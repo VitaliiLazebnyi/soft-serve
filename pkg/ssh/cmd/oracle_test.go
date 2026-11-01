@@ -204,8 +204,8 @@ func TestRenameDestinationIsGatedLikeCreate(t *testing.T) {
 	is.True(errors.Is(renameErr, proto.ErrUnauthorized))
 	is.Equal(renameErr, createErr)
 
-	// The gate for the source does not leak into the destination check.
-	is.NoErr(runRepo(t, ownerCtx, "rename", "mine", "renamed"))
+	// Local patch: renaming to a new name is a create, so a non-admin is refused.
+	is.True(errors.Is(runRepo(t, ownerCtx, "rename", "mine", "renamed"), proto.ErrUnauthorized))
 	_, err = be.Repository(ctx, "renamed")
-	is.NoErr(err)
+	is.True(err != nil)
 }

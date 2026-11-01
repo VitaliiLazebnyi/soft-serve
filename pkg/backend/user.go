@@ -96,16 +96,19 @@ func (d *Backend) ReadableByPublicKey(ctx context.Context, name string, pk ssh.P
 }
 
 // baseAccessLevel is the level user holds for a repository that does not
-// exist: enough to create one when registered, the anonymous level otherwise.
+// exist. Admin-only creation: only admins may create repositories.
+// Registered non-admins get read-only, which keeps their SSH session valid
+// (session.go needs >= read-only) but fails every create path: repo create,
+// repo import, push-to-create and rename-to-a-new-name all need read-write.
+// The anonymous level is capped the same way and is otherwise unchanged.
 func (d *Backend) baseAccessLevel(ctx context.Context, user proto.User) access.AccessLevel {
 	anon := d.AnonAccess(ctx)
 	switch {
 	case user != nil && user.IsAdmin():
 		return access.AdminAccess
-	case user != nil && anon > access.ReadWriteAccess:
-		return anon
-	case user != nil:
-		return access.ReadWriteAccess
+	case user != nil, anon > access.ReadOnlyAccess:
+		// Never read-write or above on a missing name, so never a create.
+		return access.ReadOnlyAccess
 	}
 	return anon
 }

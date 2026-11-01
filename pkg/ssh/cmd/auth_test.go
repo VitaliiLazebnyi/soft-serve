@@ -57,7 +57,8 @@ func TestGlobalCommandsIgnoreAnonAdminAccess(t *testing.T) {
 
 	attackerCtx := withUser(t, ctx, be, "attacker", false)
 	attacker := proto.UserFromContext(attackerCtx)
-	is.Equal(be.AccessLevelForUser(attackerCtx, "nonexistent", attacker), access.AdminAccess)
+	// Local patch: a missing name never grants more than read-only to a non-admin.
+	is.Equal(be.AccessLevelForUser(attackerCtx, "nonexistent", attacker), access.ReadOnlyAccess)
 
 	err := runUser(t, attackerCtx, "set-admin", "attacker", "true")
 	if !errors.Is(err, proto.ErrUnauthorized) {
