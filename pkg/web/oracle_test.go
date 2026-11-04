@@ -38,6 +38,8 @@ func newOracleFixture(t *testing.T) *oracleFixture {
 	// the server uses.
 	cfg := config.FromContext(ctx)
 	cfg.SSH.KeyPath = filepath.Join(cfg.DataPath, "ssh", "host_key")
+	// Admin-only creation is the fork's default; these oracle cases assume it.
+	cfg.AdminOnlyCreate = true
 	_, err := keygen.New(cfg.SSH.KeyPath, keygen.WithKeyType(keygen.Ed25519), keygen.WithWrite())
 	is.NoErr(err)
 

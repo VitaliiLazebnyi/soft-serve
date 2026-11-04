@@ -6,13 +6,26 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/matryer/is"
 )
 
+// With the flag off, registered users may create repositories as upstream
+// does, and the admin-only restriction does not apply.
+func TestUsersCreateRepositoriesWhenFlagOff(t *testing.T) {
+	is := is.New(t)
+	ctx, be := newAuthTestContextWith(t, func(c *config.Config) { c.AdminOnlyCreate = false })
+	userCtx := withUser(t, ctx, be, "worker", false)
+
+	is.NoErr(runRepo(t, userCtx, "create", "mine", "-p"))
+	_, err := be.Repository(ctx, "mine")
+	is.NoErr(err)
+}
+
 func TestOnlyAdminsCreateRepositories(t *testing.T) {
 	is := is.New(t)
-	ctx, be := newAuthTestContext(t)
+	ctx, be := newAuthTestContextWith(t, func(c *config.Config) { c.AdminOnlyCreate = true })
 	adminCtx := withUser(t, ctx, be, "boss", true)
 	userCtx := withUser(t, ctx, be, "worker", false)
 
