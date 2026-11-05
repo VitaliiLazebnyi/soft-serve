@@ -448,22 +448,35 @@ func (d *Backend) sendAfterChange(ctx context.Context, ev webhook.EventPayload) 
 // maxBackgroundDeliveries caps the goroutines that send events in the
 // background, and maxQueuedDeliveries caps the events waiting for one of them.
 // Together they bound the memory and goroutines the deliveries use.
+//
+// One repository's events cannot take all of them: maxRepoRunningDeliveries
+// caps the senders one repository uses at once, and maxRepoDeliveries caps its
+// events queued plus running. A repository whose receivers are slow or never
+// answer, each send taking up to the per-hook timeout, then only delays and
+// drops its own events, and the others keep being sent.
 const (
-	maxBackgroundDeliveries = 32
-	maxQueuedDeliveries     = 1024
+	maxBackgroundDeliveries  = 32
+	maxQueuedDeliveries      = 1024
+	maxRepoRunningDeliveries = 4
+	maxRepoDeliveries        = 64
 )
 
 // errDeliveryQueueFull is recorded for an event that was dropped because the
 // delivery queue was full.
 var errDeliveryQueueFull = errors.New("not sent: webhook delivery queue is full")
 
+// errRepoDeliveriesFull is recorded for an event that was dropped because its
+// repository already had maxRepoDeliveries events queued or running.
+var errRepoDeliveriesFull = errors.New("not sent: too many webhook deliveries pending for this repository")
+
 // deliverAfterChange sends ev to hooks in the background and never waits on
 // receivers. The send is detached from the request's cancellation; each
 // request is bounded by the webhook package's per-hook timeout.
 //
-// When every sender is busy, the event waits in a bounded queue. When the
-// queue is full too, the event is dropped: it is logged and, if record is
-// set, recorded as a failed delivery so it can be redelivered.
+// When every sender is busy, or the repository already uses its share of
+// them, the event waits in a bounded queue. When the queue, or the
+// repository's share of it, is full, the event is dropped: it is logged and,
+// if record is set, recorded as a failed delivery so it can be redelivered.
 func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook, ev webhook.EventPayload, record bool) {
 	if len(hooks) == 0 {
 		return
@@ -481,15 +494,20 @@ func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook
 		}
 	}
 
-	switch d.deliveries.enqueue(send) {
+	var reason error
+	switch d.deliveries.enqueue(ev.RepositoryID(), send) {
 	case enqueueClosed:
 		d.logger.Warn("webhook event skipped: server is shutting down", "event", ev.Event(), "repo_id", ev.RepositoryID())
 	case enqueueFull:
 		d.logger.Error("webhook event dropped: delivery queue is full", "event", ev.Event(), "repo_id", ev.RepositoryID(), "queued", maxQueuedDeliveries)
-		if record {
-			if err := webhook.RecordUndelivered(bg, hooks, ev, errDeliveryQueueFull); err != nil {
-				d.logger.Error("dropped webhook event not recorded", "event", ev.Event(), "repo_id", ev.RepositoryID(), "err", err)
-			}
+		reason = errDeliveryQueueFull
+	case enqueueRepoFull:
+		d.logger.Error("webhook event dropped: repository has too many pending deliveries", "event", ev.Event(), "repo_id", ev.RepositoryID(), "pending", maxRepoDeliveries)
+		reason = errRepoDeliveriesFull
+	}
+	if reason != nil && record {
+		if err := webhook.RecordUndelivered(bg, hooks, ev, reason); err != nil {
+			d.logger.Error("dropped webhook event not recorded", "event", ev.Event(), "repo_id", ev.RepositoryID(), "err", err)
 		}
 	}
 }
@@ -500,72 +518,140 @@ type enqueueResult int
 const (
 	enqueued enqueueResult = iota
 	enqueueFull
+	enqueueRepoFull
 	enqueueClosed
 )
 
 // deliveryQueue runs webhook deliveries on at most maxWorkers goroutines, with
-// at most maxPending deliveries waiting. It counts every delivery from enqueue
-// until it has run, so shutdown can wait for them. Once closed, it refuses new
-// ones, so a request still running during shutdown cannot add to a count that
-// is already being waited on.
+// at most maxPending deliveries waiting. Each delivery belongs to a
+// repository, and no repository has more than maxRepoRunning deliveries
+// running or more than maxRepo queued plus running. Queued deliveries are
+// taken from the repositories in turn, so one repository's backlog does not
+// hold back the others'.
+//
+// It counts every delivery from enqueue until it has run, so shutdown can wait
+// for them. Once closed, it refuses new ones, so a request still running
+// during shutdown cannot add to a count that is already being waited on.
 type deliveryQueue struct {
-	maxWorkers int
-	maxPending int
-	logger     *log.Logger
+	maxWorkers     int
+	maxPending     int
+	maxRepoRunning int
+	maxRepo        int
+	logger         *log.Logger
 
 	mu      sync.Mutex
 	closed  bool
 	workers int
-	queued  []func()
-	count   int // queued plus running
+	queued  int                       // waiting, over all repositories
+	repos   map[int64]*repoDeliveries // repositories with deliveries queued or running
+	backlog []int64                   // repositories with queued deliveries, in turn order
+	count   int                       // queued plus running
 	idle    chan struct{}
 }
 
-func newDeliveryQueue(maxWorkers, maxPending int, logger *log.Logger) *deliveryQueue {
-	return &deliveryQueue{maxWorkers: maxWorkers, maxPending: maxPending, logger: logger}
+// repoDeliveries is one repository's share of a deliveryQueue.
+type repoDeliveries struct {
+	running int
+	queued  []func()
 }
 
-// enqueue starts job on a new goroutine if one is free, or queues it. It never
+func newDeliveryQueue(maxWorkers, maxPending int, logger *log.Logger) *deliveryQueue {
+	return &deliveryQueue{
+		maxWorkers:     maxWorkers,
+		maxPending:     maxPending,
+		maxRepoRunning: maxRepoRunningDeliveries,
+		maxRepo:        maxRepoDeliveries,
+		logger:         logger,
+		repos:          map[int64]*repoDeliveries{},
+	}
+}
+
+// enqueue starts job for repository repoID on a new goroutine if one is free
+// and the repository has not used up its share of them, or queues it. It never
 // blocks on a running job.
-func (q *deliveryQueue) enqueue(job func()) enqueueResult {
+func (q *deliveryQueue) enqueue(repoID int64, job func()) enqueueResult {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	r := q.repos[repoID]
+	if r == nil {
+		r = &repoDeliveries{}
+	}
 	switch {
 	case q.closed:
 		return enqueueClosed
-	case q.workers < q.maxWorkers:
+	case r.running+len(r.queued) >= q.maxRepo:
+		return enqueueRepoFull
+	case q.workers < q.maxWorkers && r.running < q.maxRepoRunning:
 		q.workers++
-		go q.work(job)
-	case len(q.queued) < q.maxPending:
-		q.queued = append(q.queued, job)
+		r.running++
+		go q.work(repoID, job)
+	case q.queued < q.maxPending:
+		if len(r.queued) == 0 {
+			q.backlog = append(q.backlog, repoID)
+		}
+		r.queued = append(r.queued, job)
+		q.queued++
 	default:
 		return enqueueFull
 	}
+	q.repos[repoID] = r
 	q.count++
 	return enqueued
 }
 
-// work runs job, then queued jobs until none are left.
-func (q *deliveryQueue) work(job func()) {
+// work runs job for repository repoID, then queued jobs until none it may run
+// are left.
+func (q *deliveryQueue) work(repoID int64, job func()) {
 	for {
 		q.run(job)
 
 		q.mu.Lock()
+		r := q.repos[repoID]
+		r.running--
+		if r.running == 0 && len(r.queued) == 0 {
+			delete(q.repos, repoID)
+		}
 		q.count--
 		if q.count == 0 && q.idle != nil {
 			close(q.idle)
 			q.idle = nil
 		}
-		if len(q.queued) == 0 {
+		var ok bool
+		repoID, job, ok = q.next()
+		if !ok {
 			q.workers--
 			q.mu.Unlock()
 			return
 		}
-		job = q.queued[0]
-		q.queued[0] = nil
-		q.queued = q.queued[1:]
 		q.mu.Unlock()
 	}
+}
+
+// next takes the first queued job of the first repository in the backlog that
+// is below its running cap, and moves that repository to the back of the
+// backlog if it has more queued. It reports false when there is none. The
+// caller holds q.mu.
+//
+// A repository skipped for being at its cap has a job running, and the worker
+// that finishes it calls next again, so its queued jobs are not stranded.
+func (q *deliveryQueue) next() (int64, func(), bool) {
+	for i, repoID := range q.backlog {
+		r := q.repos[repoID]
+		if r.running >= q.maxRepoRunning {
+			continue
+		}
+		job := r.queued[0]
+		r.queued[0] = nil
+		r.queued = r.queued[1:]
+		r.running++
+		q.queued--
+		q.backlog = append(q.backlog[:i], q.backlog[i+1:]...)
+		if len(r.queued) > 0 {
+			q.backlog = append(q.backlog, repoID)
+		}
+		return repoID, job, true
+	}
+	return 0, nil, false
 }
 
 // run runs one job. A panic in it is logged rather than allowed to crash the
