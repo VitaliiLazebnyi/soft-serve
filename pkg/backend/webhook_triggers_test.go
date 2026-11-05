@@ -217,6 +217,19 @@ func TestDeleteRepositorySendsRepositoryEvent(t *testing.T) {
 	e.awaitLog(t, "webhook event not delivered")
 }
 
+// WaitForDeliveries returns only after the background sends have finished, so
+// the failed attempt is already logged when it returns, with no polling.
+func TestWaitForDeliveriesCompletesBackgroundSends(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	e.seedHook(t, webhook.EventRepository)
+
+	is.NoErr(e.be.DeleteRepository(e.ctx, "repo"))
+	e.be.WaitForDeliveries(e.ctx)
+
+	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
+}
+
 // Deleting a repository removes its webhooks with their events and deliveries,
 // even on a connection that does not enforce foreign keys. No delivery row is
 // written for the repository event, since its webhook is gone.

@@ -410,7 +410,9 @@ func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook
 		return
 	}
 	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), webhookSendTimeout)
+	d.deliveries.Add(1)
 	go func() {
+		defer d.deliveries.Done()
 		defer cancel()
 		var err error
 		if record {
@@ -422,6 +424,23 @@ func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook
 			d.logEventNotDelivered(ev, err)
 		}
 	}()
+}
+
+// WaitForDeliveries waits for the background webhook deliveries that have
+// started to finish. It gives up when ctx is done and logs a warning, since
+// the remaining deliveries are then abandoned. Call it after the servers have
+// stopped accepting requests, so no new deliveries start.
+func (d *Backend) WaitForDeliveries(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		d.deliveries.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		d.logger.Warn("shutting down with webhook deliveries still running", "err", ctx.Err())
+	}
 }
 
 func (d *Backend) logEventNotDelivered(ev webhook.EventPayload, err error) {

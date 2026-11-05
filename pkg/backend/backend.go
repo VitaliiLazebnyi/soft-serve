@@ -26,6 +26,10 @@ type Backend struct {
 	// nothing has to happen in a particular order at startup for the gate
 	// to be in place.
 	importGate func() string
+
+	// deliveries counts the webhook deliveries running in the background, so
+	// shutdown can wait for them.
+	deliveries sync.WaitGroup
 }
 
 // New returns a new Soft Serve backend.
