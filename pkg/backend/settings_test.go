@@ -27,7 +27,7 @@ func newTestBackend(t *testing.T) (*Backend, *config.Config) {
 	cfg.DataPath = dp
 	cfg.DB.Driver = "sqlite"
 	cfg.DB.DataSource = dp + "/test.db"
-	// Admin-only creation is on by default in these tests, matching this fork.
+	// Backend tests run with admin-only creation on; flag-off cases set it themselves.
 	cfg.AdminOnlyCreate = true
 
 	ctx = config.WithContext(ctx, cfg)

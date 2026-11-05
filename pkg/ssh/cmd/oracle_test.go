@@ -204,7 +204,7 @@ func TestRenameDestinationIsGatedLikeCreate(t *testing.T) {
 	is.True(errors.Is(renameErr, proto.ErrUnauthorized))
 	is.Equal(renameErr, createErr)
 
-	// Local patch: renaming to a new name is a create, so a non-admin is refused.
+	// Renaming to a new name is a create, so with admin-only creation on a non-admin is refused.
 	is.True(errors.Is(runRepo(t, ownerCtx, "rename", "mine", "renamed"), proto.ErrUnauthorized))
 	_, err = be.Repository(ctx, "renamed")
 	is.True(err != nil)

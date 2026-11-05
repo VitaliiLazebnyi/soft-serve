@@ -35,7 +35,7 @@ func TestReadable(t *testing.T) {
 	is.Equal(r, nil)
 	is.Equal(level, access.ReadOnlyAccess)
 
-	// Registered stranger: both nil; a missing name may NOT be created (local patch: admins only).
+	// Registered stranger: both nil; with admin-only creation on, a missing name may not be created.
 	r, level = be.Readable(ctx, "secret", stranger)
 	is.Equal(r, nil)
 	is.Equal(level, access.NoAccess)
@@ -53,7 +53,7 @@ func TestReadable(t *testing.T) {
 
 	// AccessLevelForUser is the same computation.
 	is.Equal(be.AccessLevelForUser(ctx, "secret", stranger), access.NoAccess)
-	is.Equal(be.AccessLevelForUser(ctx, "ghost", stranger), access.ReadOnlyAccess) // local patch
+	is.Equal(be.AccessLevelForUser(ctx, "ghost", stranger), access.ReadOnlyAccess)
 	is.Equal(be.AccessLevelForUser(ctx, "public", nil), access.ReadOnlyAccess)
 }
 

@@ -38,7 +38,7 @@ func newOracleFixture(t *testing.T) *oracleFixture {
 	// the server uses.
 	cfg := config.FromContext(ctx)
 	cfg.SSH.KeyPath = filepath.Join(cfg.DataPath, "ssh", "host_key")
-	// Admin-only creation is the fork's default; these oracle cases assume it.
+	// These oracle cases run with admin-only creation on.
 	cfg.AdminOnlyCreate = true
 	_, err := keygen.New(cfg.SSH.KeyPath, keygen.WithKeyType(keygen.Ed25519), keygen.WithWrite())
 	is.NoErr(err)
@@ -123,8 +123,9 @@ func TestReceivePackDoesNotRevealPrivateRepositories(t *testing.T) {
 	is.True(err != nil)
 
 	// A signed-in user's push to a private repository they cannot read is
-	// a 404, the same as every other unreadable repository. Local patch: a
-	// non-admin's push to a new name is refused the same way and creates nothing.
+	// a 404, the same as every other unreadable repository. With admin-only
+	// creation on, a non-admin's push to a new name is refused the same way and
+	// creates nothing.
 	is.Equal(f.do(http.MethodGet, "/secret.git/info/refs?service=git-receive-pack", auth).Code, http.StatusNotFound)
 	is.Equal(f.do(http.MethodPost, "/secret.git/git-receive-pack", auth).Code, http.StatusNotFound)
 	is.Equal(f.do(http.MethodGet, "/ghost.git/info/refs?service=git-receive-pack", auth).Code, http.StatusNotFound)

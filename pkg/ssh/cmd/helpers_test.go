@@ -21,9 +21,8 @@ import (
 // users and repositories.
 //
 // No user is attached to the returned context; use withUser to authenticate
-// as somebody.
-// newAuthTestContext builds a backend with admin-only creation on, which is
-// how this fork runs by default in the tests.
+// as somebody. Admin-only creation is on, as the restricted policy is what
+// these tests exercise.
 func newAuthTestContext(t *testing.T) (context.Context, *backend.Backend) {
 	t.Helper()
 	return newAuthTestContextWith(t, func(c *config.Config) { c.AdminOnlyCreate = true })

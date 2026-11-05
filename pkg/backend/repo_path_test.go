@@ -36,7 +36,7 @@ func TestOrphanRepoDirectoryIsNotClaimable(t *testing.T) {
 	_, err = be.CreateRepository(ctx, "orphan", user, proto.RepositoryOptions{})
 	is.True(errors.Is(err, proto.ErrRepoExist))
 
-	// A genuinely new name is not creatable by a non-admin (local patch).
+	// A genuinely new name is not creatable by a non-admin (with admin-only creation on).
 	is.Equal(be.AccessLevelForUser(ctx, "fresh", user), access.ReadOnlyAccess)
 }
 
@@ -68,7 +68,7 @@ func TestCaseVariantOfExistingRepo(t *testing.T) {
 		is.Equal(level, access.NoAccess)
 		is.True(errors.Is(createErr, proto.ErrRepoExist))
 	} else {
-		is.Equal(level, access.ReadOnlyAccess) // local patch: non-admins cannot create
+		is.Equal(level, access.ReadOnlyAccess) // admin-only creation on: non-admins cannot create
 		is.NoErr(createErr)
 	}
 
