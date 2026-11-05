@@ -113,6 +113,13 @@ func TestScript(t *testing.T) {
 		Setup: func(e *testscript.Env) error {
 			// Add binPath to PATH
 			e.Setenv("PATH", fmt.Sprintf("%s%c%s", filepath.Dir(binPath), os.PathListSeparator, e.Getenv("PATH")))
+			// The soft binary is built with -cover. When SOFT_SERVE_TEST_COVDIR
+			// is set, pass it to the server and hook processes as GOCOVERDIR so
+			// their counters are written there. A separate variable is used
+			// because `go test -cover` overrides GOCOVERDIR for the test process.
+			if dir := os.Getenv("SOFT_SERVE_TEST_COVDIR"); dir != "" {
+				e.Setenv("GOCOVERDIR", dir)
+			}
 
 			data := t.TempDir()
 			sshPort := test.RandomPort()
