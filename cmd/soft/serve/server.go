@@ -260,17 +260,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return nil
 	})
 	// defer s.DB.Close() // nolint: errcheck
-	if err := errg.Wait(); err != nil {
-		return err
-	}
+	err := errg.Wait()
 
-	// The servers have stopped, so no new deliveries start. Let the ones
+	// Always wait for the deliveries, even when a server failed to stop:
+	// the tracker is closed here so no new delivery starts, and the ones
 	// already running finish within their own budget, which is separate from
 	// the caller's drain deadline for the HTTP and SSH servers.
 	dctx, cancel := context.WithTimeout(context.Background(), backend.ShutdownDeliveryTimeout)
 	defer cancel()
 	s.Backend.WaitForDeliveries(dctx)
-	return nil
+	return err
 }
 
 // Close closes the SSH server.

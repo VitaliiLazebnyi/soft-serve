@@ -22,7 +22,7 @@ func newWebhookTestDB(t *testing.T) (context.Context, *db.DB) {
 	cfg := config.DefaultConfig()
 	cfg.DataPath = dp
 	ctx = config.WithContext(ctx, cfg)
-	dbx, err := db.Open(ctx, "sqlite", dp+"/test.db?_pragma=foreign_keys(1)")
+	dbx, err := db.Open(ctx, "sqlite", dp+"/test.db?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
 	is.NoErr(err)
 	t.Cleanup(func() { dbx.Close() }) //nolint:errcheck
 	is.NoErr(migrate.Migrate(ctx, dbx))

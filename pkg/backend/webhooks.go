@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	neturl "net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -298,10 +299,23 @@ func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repos
 
 	log.Infof("redelivering webhook delivery %s for webhook %d\n\n%s\n\n", delID, id, delivery.RequestBody)
 
-	// Stored bodies are in the webhook's own content type: form-encoded for
-	// form webhooks, JSON otherwise.
+	// The stored body is in the content type the delivery was sent with, which
+	// may differ from the webhook's current one if it was changed since. Use
+	// the stored Content-Type header and fall back to the webhook's only when
+	// that header is missing.
+	ct := webhook.ContentType(wh.ContentType) //nolint:gosec
+	stored, found, err := storedContentType(delivery.RequestHeaders)
+	if err != nil {
+		log.Errorf("error reading webhook delivery content type: %v", err)
+		return err
+	}
+	if found {
+		ct = stored
+	}
+	wh.ContentType = int(ct)
+
 	var payload any
-	if webhook.ContentType(wh.ContentType) == webhook.ContentTypeForm { //nolint:gosec
+	if ct == webhook.ContentTypeForm {
 		vals, err := neturl.ParseQuery(delivery.RequestBody)
 		if err != nil {
 			log.Errorf("error parsing webhook form body: %v", err)
@@ -318,6 +332,21 @@ func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repos
 	}
 
 	return webhook.SendWebhook(ctx, wh, webhook.Event(delivery.Event), payload)
+}
+
+// storedContentType returns the Content-Type of a delivery from its stored
+// request headers, which hold one "Name: value" line per header. It reports
+// false when there is no Content-Type line.
+func storedContentType(headers string) (webhook.ContentType, bool, error) {
+	for _, line := range strings.Split(headers, "\n") {
+		name, value, ok := strings.Cut(line, ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), "Content-Type") {
+			continue
+		}
+		ct, err := webhook.ParseContentType(strings.TrimSpace(value))
+		return ct, true, err
+	}
+	return 0, false, nil
 }
 
 // WebhookDelivery returns a webhook delivery for a webhook belonging to the
@@ -414,8 +443,15 @@ func (d *Backend) sendAfterChange(ctx context.Context, ev webhook.EventPayload) 
 	d.deliverAfterChange(ctx, hooks, ev, true)
 }
 
+// maxBackgroundDeliveries caps the goroutines that send events in the
+// background. When all are in use, the next send runs in the caller instead,
+// so an event is slowed down rather than dropped.
+const maxBackgroundDeliveries = 32
+
 // deliverAfterChange sends ev to hooks in the background. It is detached from
-// the request's cancellation but still bounded by webhookSendTimeout.
+// the request's cancellation but still bounded by webhookSendTimeout. If
+// maxBackgroundDeliveries sends are already running, this one runs before
+// deliverAfterChange returns.
 func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook, ev webhook.EventPayload, record bool) {
 	if len(hooks) == 0 {
 		return
@@ -425,7 +461,7 @@ func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook
 		return
 	}
 	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), webhookSendTimeout)
-	go func() {
+	send := func() {
 		defer d.deliveries.done()
 		defer cancel()
 		var err error
@@ -437,7 +473,17 @@ func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook
 		if err != nil {
 			d.logEventNotDelivered(ev, err)
 		}
-	}()
+	}
+
+	select {
+	case d.deliverySlots <- struct{}{}:
+		go func() {
+			defer func() { <-d.deliverySlots }()
+			send()
+		}()
+	default:
+		send()
+	}
 }
 
 // deliveryTracker counts the background webhook deliveries. Once closed, it

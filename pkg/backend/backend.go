@@ -30,6 +30,10 @@ type Backend struct {
 	// deliveries tracks the webhook deliveries running in the background, so
 	// shutdown can wait for them.
 	deliveries deliveryTracker
+
+	// deliverySlots bounds the webhook deliveries that run in their own
+	// goroutine. A send that finds it full runs in the caller instead.
+	deliverySlots chan struct{}
 }
 
 // New returns a new Soft Serve backend.
@@ -41,6 +45,8 @@ func New(ctx context.Context, cfg *config.Config, db *db.DB, st store.Store) *Ba
 		db:     db,
 		store:  st,
 		logger: logger,
+
+		deliverySlots: make(chan struct{}, maxBackgroundDeliveries),
 	}
 	b.importGate = sync.OnceValue(b.checkGitVersion)
 

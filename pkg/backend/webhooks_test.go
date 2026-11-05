@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -646,4 +647,38 @@ func TestRedeliverMalformedFormBody(t *testing.T) {
 	delID := e.seedDelivery(t, id, "http://127.0.0.1:1/", "%zz=1")
 
 	is.True(e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, delID) != nil)
+}
+
+// A redelivery sends the stored body in the content type the delivery was
+// recorded with, even if the webhook's content type changed afterwards.
+func TestRedeliverUsesStoredContentTypeAfterWebhookChanged(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	id := e.createHook(t, whURL, webhook.EventPush)
+	const body = "n=1&ref=main"
+
+	// Record a form delivery, then switch the webhook to JSON.
+	delID := uuid.New()
+	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
+		return e.be.store.CreateWebhookDelivery(e.ctx, tx, delID, id, int(webhook.EventPush), "http://127.0.0.1:1/", "POST",
+			nil, "Content-Type: application/x-www-form-urlencoded\nX-Test: 1\n", body, 200, "", "ok")
+	}))
+	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
+		return e.be.store.UpdateWebhookByID(e.ctx, tx, e.repo.ID(), id, "http://127.0.0.1:1/", "", int(webhook.ContentTypeJSON), true)
+	}))
+
+	is.NoErr(e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, delID))
+
+	list, err := e.be.ListWebhookDeliveries(e.ctx, e.repo, id)
+	is.NoErr(err)
+	is.Equal(len(list), 2)
+	for _, d := range list {
+		if d.ID == delID {
+			continue
+		}
+		rd, err := e.be.WebhookDelivery(e.ctx, e.repo, id, d.ID)
+		is.NoErr(err)
+		is.Equal(rd.RequestBody, body)
+		is.True(strings.Contains(rd.RequestHeaders, "Content-Type: application/x-www-form-urlencoded"))
+	}
 }

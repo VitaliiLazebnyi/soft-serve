@@ -29,15 +29,21 @@ func (*webhookStore) CreateWebhook(ctx context.Context, h db.Handler, repoID int
 }
 
 // CreateWebhookDelivery implements store.WebhookStore.
+//
+// The row is written only if the webhook still exists. A send that was in
+// flight when its webhook was deleted therefore leaves no orphan row, even on
+// a connection that does not enforce foreign keys. In that case nothing is
+// written and no error is returned.
 func (*webhookStore) CreateWebhookDelivery(ctx context.Context, h db.Handler, id uuid.UUID, webhookID int64, event int, url string, method string, requestError error, requestHeaders string, requestBody string, responseStatus int, responseHeaders string, responseBody string) error {
 	query := h.Rebind(`INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_error, request_headers, request_body, response_status, response_headers, response_body)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`)
+			SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			WHERE EXISTS (SELECT 1 FROM webhooks WHERE id = ?);`)
 	// A successful delivery stores NULL, not an empty string.
 	var reqErr sql.NullString
 	if requestError != nil {
 		reqErr = sql.NullString{String: requestError.Error(), Valid: true}
 	}
-	_, err := h.ExecContext(ctx, query, id, webhookID, event, url, method, reqErr, requestHeaders, requestBody, responseStatus, responseHeaders, responseBody)
+	_, err := h.ExecContext(ctx, query, id, webhookID, event, url, method, reqErr, requestHeaders, requestBody, responseStatus, responseHeaders, responseBody, webhookID)
 	return err
 }
 

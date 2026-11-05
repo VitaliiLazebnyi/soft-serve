@@ -45,7 +45,8 @@ type WebhookStore interface {
 	// ListWebhookDeliveriesByWebhookID returns all webhook deliveries for a webhook.
 	// This only returns the delivery ID, response status, and event.
 	ListWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookDelivery, error)
-	// CreateWebhookDelivery creates a webhook delivery.
+	// CreateWebhookDelivery creates a webhook delivery. It writes nothing if the
+	// webhook no longer exists.
 	CreateWebhookDelivery(ctx context.Context, h db.Handler, id uuid.UUID, webhookID int64, event int, url string, method string, requestError error, requestHeaders string, requestBody string, responseStatus int, responseHeaders string, responseBody string) error
 	// DeleteWebhookDeliveryByID deletes a webhook delivery by its ID.
 	DeleteWebhookDeliveryByID(ctx context.Context, h db.Handler, webhookID int64, id uuid.UUID) error

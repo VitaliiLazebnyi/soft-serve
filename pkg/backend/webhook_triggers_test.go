@@ -622,3 +622,50 @@ func TestSetPrivateKeepsChangeWhenEventBuildFails(t *testing.T) {
 	is.True(repo.IsPrivate())
 	is.True(strings.Contains(e.logs.String(), "visibility change committed but webhook event skipped"))
 }
+
+// When every background slot is in use, a send runs in the caller. Each event
+// is recorded by the time deliverAfterChange returns, so none is dropped.
+func TestDeliveryWithFullBoundRunsInCallerWithoutLoss(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	id := e.seedHook(t, webhook.EventRepository)
+	hooks, err := e.be.store.GetWebhooksByRepoID(e.ctx, e.be.db, e.repo.ID())
+	is.NoErr(err)
+
+	for i := 0; i < maxBackgroundDeliveries; i++ {
+		e.be.deliverySlots <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < maxBackgroundDeliveries; i++ {
+			<-e.be.deliverySlots
+		}
+	}()
+
+	const n = 3
+	for i := 0; i < n; i++ {
+		ev, err := webhook.NewRepositoryEvent(e.ctx, e.admin, e.repo, webhook.RepositoryEventActionRename)
+		is.NoErr(err)
+		e.be.deliverAfterChange(e.ctx, hooks, ev, true)
+	}
+
+	is.Equal(len(e.deliveredEvents(t, id)), n)
+}
+
+// A send whose webhook is deleted before it records must not leave a delivery
+// row behind for the removed webhook.
+func TestDeliveryRecordedAfterWebhookDeletedWritesNoRow(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	id := e.seedHook(t, webhook.EventRepository)
+	hooks, err := e.be.store.GetWebhooksByRepoID(e.ctx, e.be.db, e.repo.ID())
+	is.NoErr(err)
+	ev, err := webhook.NewRepositoryEvent(e.ctx, e.admin, e.repo, webhook.RepositoryEventActionRename)
+	is.NoErr(err)
+
+	is.NoErr(e.be.DeleteWebhook(e.ctx, e.repo, id))
+	is.NoErr(webhook.Deliver(e.ctx, hooks, ev))
+
+	var n int
+	is.NoErr(e.be.db.GetContext(e.ctx, &n, "SELECT COUNT(*) FROM webhook_deliveries WHERE webhook_id = ?", id))
+	is.Equal(n, 0)
+}
