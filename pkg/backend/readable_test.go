@@ -22,9 +22,9 @@ func TestReadable(t *testing.T) {
 	is.NoErr(err)
 	stranger, err := be.CreateUser(ctx, "stranger", proto.UserOptions{})
 	is.NoErr(err)
-	_, err = be.CreateRepository(ctx, "secret", owner, proto.RepositoryOptions{Private: true})
+	_, err = seedCreate(be, ctx, "secret", owner, proto.RepositoryOptions{Private: true})
 	is.NoErr(err)
-	_, err = be.CreateRepository(ctx, "public", owner, proto.RepositoryOptions{})
+	_, err = seedCreate(be, ctx, "public", owner, proto.RepositoryOptions{})
 	is.NoErr(err)
 
 	// Anonymous: both nil; the level is the anonymous default either way.

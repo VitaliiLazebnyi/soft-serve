@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"testing"
 
 	"github.com/charmbracelet/soft-serve/pkg/access"
+	"github.com/charmbracelet/soft-serve/pkg/config"
+	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/matryer/is"
 	"golang.org/x/crypto/ssh"
 )
@@ -85,6 +89,124 @@ func TestAnonAdminLevelIsCappedOnlyWhenFlagOn(t *testing.T) {
 
 	cfg.AdminOnlyCreate = true
 	is.Equal(be.AccessLevelForUser(ctx, "fresh", user), access.ReadOnlyAccess)
+}
+
+// backendTestContext wires the config, database and store a backend call
+// reads from its context (webhook delivery and rename need them).
+func backendTestContext(be *Backend, cfg *config.Config) context.Context {
+	ctx := context.Background()
+	ctx = config.WithContext(ctx, cfg)
+	ctx = db.WithContext(ctx, be.db)
+	return store.WithContext(ctx, be.store)
+}
+
+// seedCreate creates a fixture repository while admin-only creation is off,
+// so tests can set up owners without the create policy in the way. Tests that
+// exercise the policy call be.CreateRepository directly.
+func seedCreate(be *Backend, ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
+	prev := be.cfg.AdminOnlyCreate
+	be.cfg.AdminOnlyCreate = false
+	defer func() { be.cfg.AdminOnlyCreate = prev }()
+	return be.CreateRepository(ctx, name, user, opts)
+}
+
+// seedImport is seedCreate for ImportRepository.
+func seedImport(be *Backend, ctx context.Context, name string, user proto.User, remote string, opts proto.RepositoryOptions) (proto.Repository, error) {
+	prev := be.cfg.AdminOnlyCreate
+	be.cfg.AdminOnlyCreate = false
+	defer func() { be.cfg.AdminOnlyCreate = prev }()
+	return be.ImportRepository(ctx, name, user, remote, opts)
+}
+
+// With AdminOnlyCreate on, the backend itself refuses a non-admin, and an
+// anonymous caller, creating, importing or renaming to a new name, whichever
+// caller reaches it. Nothing is created.
+func TestBackendRefusesNonAdminCreatesWhenFlagOn(t *testing.T) {
+	is := is.New(t)
+	be, cfg := newTestBackend(t)
+	ctx := backendTestContext(be, cfg)
+	is.True(cfg.AdminOnlyCreate)
+
+	user, err := be.CreateUser(ctx, "alice", proto.UserOptions{})
+	is.NoErr(err)
+	userCtx := proto.WithUserContext(ctx, user)
+
+	_, err = be.CreateRepository(userCtx, "junk", user, proto.RepositoryOptions{})
+	is.True(errors.Is(err, proto.ErrUnauthorized))
+	_, err = be.CreateRepository(ctx, "anon-junk", nil, proto.RepositoryOptions{})
+	is.True(errors.Is(err, proto.ErrUnauthorized))
+	_, err = be.ImportRepository(userCtx, "junk-import", user, "https://example.invalid/x.git", proto.RepositoryOptions{})
+	is.True(errors.Is(err, proto.ErrUnauthorized))
+
+	_, err = be.Repository(ctx, "junk")
+	is.True(err != nil)
+	_, err = be.Repository(ctx, "anon-junk")
+	is.True(err != nil)
+	_, err = be.Repository(ctx, "junk-import")
+	is.True(err != nil)
+}
+
+// With AdminOnlyCreate on, a non-admin's rename of an owned repository to a
+// new name is refused and the repository stays where it was.
+func TestBackendRefusesNonAdminRenameToNewNameWhenFlagOn(t *testing.T) {
+	is := is.New(t)
+	be, cfg := newTestBackend(t)
+	ctx := backendTestContext(be, cfg)
+
+	user, err := be.CreateUser(ctx, "alice", proto.UserOptions{})
+	is.NoErr(err)
+	_, err = seedCreate(be, ctx, "mine", user, proto.RepositoryOptions{})
+	is.NoErr(err)
+
+	userCtx := proto.WithUserContext(ctx, user)
+	is.True(errors.Is(be.RenameRepository(userCtx, "mine", "renamed"), proto.ErrUnauthorized))
+	_, err = be.Repository(ctx, "mine")
+	is.NoErr(err)
+	_, err = be.Repository(ctx, "renamed")
+	is.True(err != nil)
+}
+
+// With AdminOnlyCreate on, a database admin may create, import and rename to
+// a new name. The import may still fail for an unrelated reason (for example,
+// a git version gate), so it only has to pass the policy.
+func TestBackendAllowsAdminCreatesWhenFlagOn(t *testing.T) {
+	is := is.New(t)
+	be, cfg := newTestBackend(t)
+	ctx := backendTestContext(be, cfg)
+	is.True(cfg.AdminOnlyCreate)
+
+	admin, err := be.CreateUser(ctx, "root", proto.UserOptions{Admin: true})
+	is.NoErr(err)
+	adminCtx := proto.WithUserContext(ctx, admin)
+
+	_, err = be.CreateRepository(adminCtx, "made", admin, proto.RepositoryOptions{})
+	is.NoErr(err)
+	_, err = be.ImportRepository(adminCtx, "imported", admin, "https://example.invalid/x.git", proto.RepositoryOptions{})
+	is.True(!errors.Is(err, proto.ErrUnauthorized))
+	is.NoErr(be.RenameRepository(adminCtx, "made", "made-again"))
+	_, err = be.Repository(ctx, "made-again")
+	is.NoErr(err)
+}
+
+// With AdminOnlyCreate off, the same non-admin calls are not refused by the
+// policy: create and rename to a new name succeed.
+func TestBackendAllowsNonAdminCreatesWhenFlagOff(t *testing.T) {
+	is := is.New(t)
+	be, cfg := newTestBackend(t)
+	ctx := backendTestContext(be, cfg)
+	cfg.AdminOnlyCreate = false
+
+	user, err := be.CreateUser(ctx, "alice", proto.UserOptions{})
+	is.NoErr(err)
+	userCtx := proto.WithUserContext(ctx, user)
+
+	_, err = be.CreateRepository(userCtx, "mine", user, proto.RepositoryOptions{})
+	is.NoErr(err)
+	is.NoErr(be.RenameRepository(userCtx, "mine", "renamed"))
+	_, err = be.Repository(ctx, "renamed")
+	is.NoErr(err)
+	_, err = be.ImportRepository(userCtx, "imported", user, "https://example.invalid/x.git", proto.RepositoryOptions{})
+	is.True(!errors.Is(err, proto.ErrUnauthorized))
 }
 
 func newTestPublicKey(t *testing.T) ssh.PublicKey {

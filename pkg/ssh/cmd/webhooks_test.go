@@ -34,7 +34,7 @@ func TestWebhookDeliveriesAreScopedToRepository(t *testing.T) {
 	// has a recorded delivery containing sensitive request/response data.
 	victimCtx := withUser(t, ctx, be, "victim", false)
 	victim := proto.UserFromContext(victimCtx)
-	victimRepo, err := be.CreateRepository(victimCtx, "victim-repo", victim, proto.RepositoryOptions{Private: true})
+	victimRepo, err := seedCreate(be, victimCtx, "victim-repo", victim, proto.RepositoryOptions{Private: true})
 	is.NoErr(err)
 	is.NoErr(be.CreateWebhook(victimCtx, victimRepo, "http://example.com/hook", webhook.ContentTypeJSON, "s3cret", []webhook.Event{webhook.EventPush}, true))
 
@@ -58,7 +58,7 @@ func TestWebhookDeliveriesAreScopedToRepository(t *testing.T) {
 	// it, but they have no access at all to the victim's repository.
 	attackerCtx := withUser(t, ctx, be, "attacker", false)
 	attacker := proto.UserFromContext(attackerCtx)
-	_, err = be.CreateRepository(attackerCtx, "attacker-repo", attacker, proto.RepositoryOptions{})
+	_, err = seedCreate(be, attackerCtx, "attacker-repo", attacker, proto.RepositoryOptions{})
 	is.NoErr(err)
 
 	hookID := strconv.FormatInt(victimHookID, 10)

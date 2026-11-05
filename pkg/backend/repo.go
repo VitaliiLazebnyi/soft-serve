@@ -62,12 +62,30 @@ func redactRemote(remote string) string {
 	return u.Redacted()
 }
 
+// checkCanCreate refuses the creation of a new repository name by user when
+// AdminOnlyCreate is set and user is not a server admin. It is the backend's
+// own guard, so a caller that skips the SSH and web access checks still
+// cannot create. A nil user is anonymous and is refused the same way.
+func (d *Backend) checkCanCreate(user proto.User) error {
+	if !d.cfg.AdminOnlyCreate {
+		return nil
+	}
+	if user != nil && user.IsAdmin() {
+		return nil
+	}
+	return proto.ErrUnauthorized
+}
+
 // CreateRepository creates a new repository.
 //
 // It implements backend.Backend.
 func (d *Backend) CreateRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
 	name = utils.SanitizeRepo(name)
 	if err := utils.ValidateRepo(name); err != nil {
+		return nil, err
+	}
+
+	if err := d.checkCanCreate(user); err != nil {
 		return nil, err
 	}
 
@@ -196,6 +214,10 @@ func (d *Backend) defaultAdminUserID(ctx context.Context, tx *db.Tx) (int64, err
 func (d *Backend) ImportRepository(_ context.Context, name string, user proto.User, remote string, opts proto.RepositoryOptions) (proto.Repository, error) {
 	name = utils.SanitizeRepo(name)
 	if err := utils.ValidateRepo(name); err != nil {
+		return nil, err
+	}
+
+	if err := d.checkCanCreate(user); err != nil {
 		return nil, err
 	}
 
@@ -439,6 +461,12 @@ func (d *Backend) RenameRepository(ctx context.Context, oldName string, newName 
 
 	if oldName == newName {
 		return nil
+	}
+
+	// Renaming onto a new name creates it, so it needs the same permission.
+	// The caller is the user on the context.
+	if err := d.checkCanCreate(proto.UserFromContext(ctx)); err != nil {
+		return err
 	}
 
 	op := d.repoPath(oldName)

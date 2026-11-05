@@ -22,7 +22,7 @@ func TestGlobalCommandsIgnoreRepositoryAccess(t *testing.T) {
 	// The attacker owns a repository named "victim", so they have
 	// AdminAccess *to that repository*.
 	attacker := proto.UserFromContext(attackerCtx)
-	_, err := be.CreateRepository(attackerCtx, "victim", attacker, proto.RepositoryOptions{})
+	_, err := seedCreate(be, attackerCtx, "victim", attacker, proto.RepositoryOptions{})
 	is.NoErr(err)
 	is.Equal(be.AccessLevelForUser(attackerCtx, "victim", attacker), access.AdminAccess)
 
@@ -105,7 +105,7 @@ func TestCollabAddCannotExceedCallerAccess(t *testing.T) {
 
 	ownerCtx := withUser(t, ctx, be, "owner", false)
 	owner := proto.UserFromContext(ownerCtx)
-	_, err := be.CreateRepository(ownerCtx, "repo", owner, proto.RepositoryOptions{})
+	_, err := seedCreate(be, ownerCtx, "repo", owner, proto.RepositoryOptions{})
 	is.NoErr(err)
 
 	collabCtx := withUser(t, ctx, be, "collab", false)
@@ -140,7 +140,7 @@ func TestCollabRemoveCannotDemoteHigherAccess(t *testing.T) {
 
 	ownerCtx := withUser(t, ctx, be, "owner", false)
 	owner := proto.UserFromContext(ownerCtx)
-	_, err := be.CreateRepository(ownerCtx, "repo", owner, proto.RepositoryOptions{})
+	_, err := seedCreate(be, ownerCtx, "repo", owner, proto.RepositoryOptions{})
 	is.NoErr(err)
 
 	collabCtx := withUser(t, ctx, be, "collab", false)

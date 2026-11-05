@@ -38,8 +38,6 @@ func newOracleFixture(t *testing.T) *oracleFixture {
 	// the server uses.
 	cfg := config.FromContext(ctx)
 	cfg.SSH.KeyPath = filepath.Join(cfg.DataPath, "ssh", "host_key")
-	// These oracle cases run with admin-only creation on.
-	cfg.AdminOnlyCreate = true
 	_, err := keygen.New(cfg.SSH.KeyPath, keygen.WithKeyType(keygen.Ed25519), keygen.WithWrite())
 	is.NoErr(err)
 
@@ -47,6 +45,10 @@ func newOracleFixture(t *testing.T) *oracleFixture {
 	is.NoErr(err)
 	_, err = be.CreateRepository(ctx, "secret", owner, proto.RepositoryOptions{Private: true})
 	is.NoErr(err)
+
+	// These oracle cases run with admin-only creation on. It is set after the
+	// fixture repository exists, so that fixture is created as upstream does.
+	cfg.AdminOnlyCreate = true
 
 	stranger, err := be.CreateUser(ctx, "stranger", proto.UserOptions{})
 	is.NoErr(err)

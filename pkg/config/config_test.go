@@ -175,6 +175,19 @@ func TestAdminOnlyCreateInEnviron(t *testing.T) {
 	is.True(slices.Contains(cfg.Environ(), "SOFT_SERVE_ADMIN_ONLY_CREATE=true"))
 }
 
+// The hook subprocess re-reads its config from the environment, and git
+// inherits the server's own environment, so the flag is always emitted
+// explicitly. An off flag must read as "=false", never as a value inherited
+// from elsewhere.
+func TestAdminOnlyCreateFalseInEnviron(t *testing.T) {
+	is := is.New(t)
+	cfg := DefaultConfig()
+	cfg.AdminOnlyCreate = false
+	envs := cfg.Environ()
+	is.True(slices.Contains(envs, "SOFT_SERVE_ADMIN_ONLY_CREATE=false"))
+	is.True(!slices.Contains(envs, "SOFT_SERVE_ADMIN_ONLY_CREATE=true"))
+}
+
 func TestAnonAccessEnvUnsetByDefault(t *testing.T) {
 	is := is.New(t)
 	cfg := DefaultConfig()

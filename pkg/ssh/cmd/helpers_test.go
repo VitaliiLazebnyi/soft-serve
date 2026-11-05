@@ -101,3 +101,14 @@ func runUser(t *testing.T, ctx context.Context, args ...string) error {
 	c.SetArgs(args)
 	return c.ExecuteContext(ctx)
 }
+
+// seedCreate creates a fixture repository while admin-only creation is off,
+// so tests can set up owners without the create policy in the way. Tests that
+// exercise the policy go through the CLI commands instead.
+func seedCreate(be *backend.Backend, ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
+	cfg := config.FromContext(ctx)
+	prev := cfg.AdminOnlyCreate
+	cfg.AdminOnlyCreate = false
+	defer func() { cfg.AdminOnlyCreate = prev }()
+	return be.CreateRepository(ctx, name, user, opts)
+}

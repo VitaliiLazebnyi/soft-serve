@@ -41,7 +41,7 @@ func TestAccessLevelCollaboratorPrivateRepo(t *testing.T) {
 
 			is.NoErr(be.SetAnonAccess(ctx, tt.anon))
 
-			_, err := be.CreateRepository(ctx, "repo", nil, proto.RepositoryOptions{Private: tt.private})
+			_, err := seedCreate(be, ctx, "repo", nil, proto.RepositoryOptions{Private: tt.private})
 			is.NoErr(err)
 
 			user, err := be.CreateUser(ctx, "collab", proto.UserOptions{})
@@ -62,7 +62,7 @@ func TestAccessLevelPrivateRepoNonCollaborator(t *testing.T) {
 	be, _ := newTestBackend(t)
 	ctx := context.Background()
 
-	_, err := be.CreateRepository(ctx, "repo", nil, proto.RepositoryOptions{Private: true})
+	_, err := seedCreate(be, ctx, "repo", nil, proto.RepositoryOptions{Private: true})
 	is.NoErr(err)
 
 	user, err := be.CreateUser(ctx, "stranger", proto.UserOptions{})
@@ -89,7 +89,7 @@ func TestDeleteUserWithRepositories(t *testing.T) {
 
 	owner, err := be.CreateUser(ctx, "owner", proto.UserOptions{})
 	is.NoErr(err)
-	_, err = be.CreateRepository(ctx, "owned", owner, proto.RepositoryOptions{})
+	_, err = seedCreate(be, ctx, "owned", owner, proto.RepositoryOptions{})
 	is.NoErr(err)
 
 	err = be.DeleteUser(ctx, "owner")
@@ -119,7 +119,7 @@ func TestDeleteRepositoryWithoutDirectory(t *testing.T) {
 	ctx = db.WithContext(ctx, be.db)
 	ctx = store.WithContext(ctx, be.store)
 
-	_, err := be.CreateRepository(ctx, "orphan", nil, proto.RepositoryOptions{})
+	_, err := seedCreate(be, ctx, "orphan", nil, proto.RepositoryOptions{})
 	is.NoErr(err)
 	is.NoErr(os.RemoveAll(be.repoPath("orphan")))
 

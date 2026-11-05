@@ -23,6 +23,21 @@ func TestUsersCreateRepositoriesWhenFlagOff(t *testing.T) {
 	is.NoErr(err)
 }
 
+// With the flag off, a registered owner may rename their repository to a new
+// name, as upstream allows.
+func TestUsersRenameToNewNameWhenFlagOff(t *testing.T) {
+	is := is.New(t)
+	ctx, be := newAuthTestContextWith(t, func(c *config.Config) { c.AdminOnlyCreate = false })
+	userCtx := withUser(t, ctx, be, "worker", false)
+
+	is.NoErr(runRepo(t, userCtx, "create", "mine"))
+	is.NoErr(runRepo(t, userCtx, "rename", "mine", "renamed"))
+	_, err := be.Repository(ctx, "renamed")
+	is.NoErr(err)
+	_, err = be.Repository(ctx, "mine")
+	is.True(err != nil)
+}
+
 func TestOnlyAdminsCreateRepositories(t *testing.T) {
 	is := is.New(t)
 	ctx, be := newAuthTestContextWith(t, func(c *config.Config) { c.AdminOnlyCreate = true })
