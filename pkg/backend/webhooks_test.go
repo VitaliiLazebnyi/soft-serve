@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -29,12 +30,14 @@ type whEnv struct {
 	cfg   *config.Config
 	admin proto.User
 	repo  proto.Repository
+	logs  *bytes.Buffer
 }
 
 func newWebhookEnv(t *testing.T) whEnv {
 	t.Helper()
 	is := is.New(t)
-	be, cfg := newTestBackend(t)
+	logs := &bytes.Buffer{}
+	be, cfg := newTestBackendWithLog(t, logs)
 	ctx := config.WithContext(context.Background(), cfg)
 	ctx = db.WithContext(ctx, be.db)
 	ctx = store.WithContext(ctx, be.store)
@@ -43,7 +46,7 @@ func newWebhookEnv(t *testing.T) whEnv {
 	ctx = proto.WithUserContext(ctx, admin)
 	repo, err := be.CreateRepository(ctx, "repo", admin, proto.RepositoryOptions{})
 	is.NoErr(err)
-	return whEnv{ctx: ctx, be: be, cfg: cfg, admin: admin, repo: repo}
+	return whEnv{ctx: ctx, be: be, cfg: cfg, admin: admin, repo: repo, logs: logs}
 }
 
 // otherRepo creates a second repository with one webhook and returns the

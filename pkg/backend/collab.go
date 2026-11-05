@@ -40,12 +40,15 @@ func (d *Backend) AddCollaborator(ctx context.Context, repo string, username str
 		return err
 	}
 
+	// The collaborator is committed, so an event problem is logged, not returned.
 	wh, err := webhook.NewCollaboratorEvent(ctx, proto.UserFromContext(ctx), r, username, webhook.CollaboratorEventAdded)
 	if err != nil {
-		return err
+		d.logger.Error("collaborator added but webhook event skipped", "repo", repo, "user", username, "err", err)
+		return nil
 	}
 
-	return webhook.SendEvent(ctx, wh)
+	d.sendAfterChange(ctx, wh)
+	return nil
 }
 
 // Collaborators returns a list of collaborators for a repository.
@@ -128,5 +131,7 @@ func (d *Backend) RemoveCollaborator(ctx context.Context, repo string, username 
 		return err
 	}
 
-	return webhook.SendEvent(ctx, wh)
+	// The removal is committed, so the event is sent without affecting the result.
+	d.sendAfterChange(ctx, wh)
+	return nil
 }

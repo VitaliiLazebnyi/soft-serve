@@ -1,7 +1,9 @@
 package backend
 
 import (
+	charmlog "charm.land/log/v2"
 	"context"
+	"io"
 	"testing"
 
 	"github.com/charmbracelet/soft-serve/pkg/access"
@@ -19,6 +21,14 @@ import (
 // can mutate AnonAccess/AllowKeyless directly to simulate config overrides).
 func newTestBackend(t *testing.T) (*Backend, *config.Config) {
 	t.Helper()
+	return newTestBackendWithLog(t, nil)
+}
+
+// newTestBackendWithLog is newTestBackend with the backend's logger writing to
+// logs, so a test can assert on what the backend logged. A nil logs keeps the
+// default logger.
+func newTestBackendWithLog(t *testing.T, logs io.Writer) (*Backend, *config.Config) {
+	t.Helper()
 	is := is.New(t)
 	ctx := context.Background()
 
@@ -26,7 +36,7 @@ func newTestBackend(t *testing.T) (*Backend, *config.Config) {
 	cfg := config.DefaultConfig()
 	cfg.DataPath = dp
 	cfg.DB.Driver = "sqlite"
-	cfg.DB.DataSource = dp + "/test.db"
+	cfg.DB.DataSource = dp + "/test.db?_pragma=foreign_keys(1)"
 
 	ctx = config.WithContext(ctx, cfg)
 	dbx, err := db.Open(ctx, cfg.DB.Driver, cfg.DB.DataSource)
@@ -36,6 +46,9 @@ func newTestBackend(t *testing.T) (*Backend, *config.Config) {
 	is.NoErr(migrate.Migrate(ctx, dbx))
 	dbstore := database.New(ctx, dbx)
 	ctx = store.WithContext(ctx, dbstore)
+	if logs != nil {
+		ctx = charmlog.WithContext(ctx, charmlog.New(logs))
+	}
 	be := New(ctx, cfg, dbx, dbstore)
 
 	return be, cfg

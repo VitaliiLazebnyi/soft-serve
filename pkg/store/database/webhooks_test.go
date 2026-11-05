@@ -22,15 +22,21 @@ func newWebhookTestDB(t *testing.T) (context.Context, *db.DB) {
 	cfg := config.DefaultConfig()
 	cfg.DataPath = dp
 	ctx = config.WithContext(ctx, cfg)
-	dbx, err := db.Open(ctx, "sqlite", dp+"/test.db")
+	dbx, err := db.Open(ctx, "sqlite", dp+"/test.db?_pragma=foreign_keys(1)")
 	is.NoErr(err)
 	t.Cleanup(func() { dbx.Close() }) //nolint:errcheck
 	is.NoErr(migrate.Migrate(ctx, dbx))
+
+	// Foreign keys are enforced, so the webhook tables need real parents: one
+	// user and the repos 7 and 8 that the tests use.
+	_, err = dbx.ExecContext(ctx, `INSERT INTO users (id, username, admin, updated_at) VALUES (100, 'owner', 0, CURRENT_TIMESTAMP);`)
+	is.NoErr(err)
+	_, err = dbx.ExecContext(ctx, `INSERT INTO repos (id, name, project_name, description, private, mirror, hidden, user_id, updated_at)
+		VALUES (7, 'repo7', 'repo7', '', 0, 0, 0, 100, CURRENT_TIMESTAMP),
+		       (8, 'repo8', 'repo8', '', 0, 0, 0, 100, CURRENT_TIMESTAMP);`)
+	is.NoErr(err)
 	return ctx, dbx
 }
-
-// The store does not check that repo IDs exist (SQLite does not enforce the
-// repo foreign key here), so these tests use plain repo IDs.
 func TestWebhookStoreRoundTrip(t *testing.T) {
 	is := is.New(t)
 	ctx, dbx := newWebhookTestDB(t)
@@ -91,9 +97,9 @@ func TestWebhookStoreEvents(t *testing.T) {
 	ctx, dbx := newWebhookTestDB(t)
 	s := &webhookStore{}
 
-	hook, err := s.CreateWebhook(ctx, dbx, 1, "https://93.184.216.34/a", "", 0, true)
+	hook, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 0, true)
 	is.NoErr(err)
-	other, err := s.CreateWebhook(ctx, dbx, 1, "https://93.184.216.35/b", "", 0, true)
+	other, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.35/b", "", 0, true)
 	is.NoErr(err)
 
 	is.NoErr(s.CreateWebhookEvents(ctx, dbx, hook, []int{4, 5}))
@@ -113,16 +119,16 @@ func TestWebhookStoreEvents(t *testing.T) {
 
 	// Filter by event: push (4) matches hook only; an event with no match
 	// returns nothing; an empty filter returns nothing and no error.
-	whs, err := s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 1, []int{4})
+	whs, err := s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, []int{4})
 	is.NoErr(err)
 	is.Equal(len(whs), 1)
 	is.Equal(whs[0].ID, hook)
 
-	whs, err = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 1, []int{99})
+	whs, err = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, []int{99})
 	is.NoErr(err)
 	is.Equal(len(whs), 0)
 
-	whs, err = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 1, nil)
+	whs, err = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, nil)
 	is.NoErr(err)
 	is.Equal(len(whs), 0)
 
@@ -152,9 +158,9 @@ func TestWebhookStoreDeliveries(t *testing.T) {
 	ctx, dbx := newWebhookTestDB(t)
 	s := &webhookStore{}
 
-	hook, err := s.CreateWebhook(ctx, dbx, 1, "https://93.184.216.34/a", "", 0, true)
+	hook, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 0, true)
 	is.NoErr(err)
-	other, err := s.CreateWebhook(ctx, dbx, 1, "https://93.184.216.35/b", "", 0, true)
+	other, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.35/b", "", 0, true)
 	is.NoErr(err)
 
 	okID := uuid.New()
@@ -208,23 +214,23 @@ func TestWebhookStoreErrorsOnClosedDB(t *testing.T) {
 	is := is.New(t)
 	ctx, dbx := newWebhookTestDB(t)
 	s := &webhookStore{}
-	id, err := s.CreateWebhook(ctx, dbx, 1, "https://93.184.216.34/a", "", 0, true)
+	id, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 0, true)
 	is.NoErr(err)
 	did := uuid.New()
 	is.NoErr(s.CreateWebhookDelivery(ctx, dbx, did, id, 4, "u", "POST", nil, "", "", 0, "", ""))
 	is.NoErr(dbx.Close())
 
 	checks := map[string]error{}
-	_, checks["GetWebhookByID"] = s.GetWebhookByID(ctx, dbx, 1, id)
-	_, checks["GetWebhooksByRepoID"] = s.GetWebhooksByRepoID(ctx, dbx, 1)
-	_, checks["GetWebhooksByRepoIDWhereEvent"] = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 1, []int{4})
-	_, checks["CreateWebhook"] = s.CreateWebhook(ctx, dbx, 1, "u", "", 0, true)
-	checks["UpdateWebhookByID"] = s.UpdateWebhookByID(ctx, dbx, 1, id, "u", "", 0, true)
+	_, checks["GetWebhookByID"] = s.GetWebhookByID(ctx, dbx, 7, id)
+	_, checks["GetWebhooksByRepoID"] = s.GetWebhooksByRepoID(ctx, dbx, 7)
+	_, checks["GetWebhooksByRepoIDWhereEvent"] = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, []int{4})
+	_, checks["CreateWebhook"] = s.CreateWebhook(ctx, dbx, 7, "u", "", 0, true)
+	checks["UpdateWebhookByID"] = s.UpdateWebhookByID(ctx, dbx, 7, id, "u", "", 0, true)
 	checks["DeleteWebhookByID"] = s.DeleteWebhookByID(ctx, dbx, id)
-	checks["DeleteWebhookForRepoByID"] = s.DeleteWebhookForRepoByID(ctx, dbx, 1, id)
+	checks["DeleteWebhookForRepoByID"] = s.DeleteWebhookForRepoByID(ctx, dbx, 7, id)
 	checks["DeleteWebhookEventsByWebhookID"] = s.DeleteWebhookEventsByWebhookID(ctx, dbx, id)
 	checks["DeleteWebhookDeliveriesByWebhookID"] = s.DeleteWebhookDeliveriesByWebhookID(ctx, dbx, id)
-	_, checks["GetWebhookEventByID"] = s.GetWebhookEventByID(ctx, dbx, 1)
+	_, checks["GetWebhookEventByID"] = s.GetWebhookEventByID(ctx, dbx, 7)
 	_, checks["GetWebhookEventsByWebhookID"] = s.GetWebhookEventsByWebhookID(ctx, dbx, id)
 	checks["CreateWebhookEvents"] = s.CreateWebhookEvents(ctx, dbx, id, []int{4})
 	checks["DeleteWebhookEventsByID"] = s.DeleteWebhookEventsByID(ctx, dbx, []int64{1})

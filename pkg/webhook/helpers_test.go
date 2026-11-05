@@ -42,7 +42,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	cfg := config.DefaultConfig()
 	cfg.DataPath = dp
 	cfg.DB.Driver = "sqlite"
-	cfg.DB.DataSource = filepath.Join(dp, "test.db")
+	cfg.DB.DataSource = filepath.Join(dp, "test.db") + "?_pragma=foreign_keys(1)"
 	cfg.HTTP.PublicURL = "http://127.0.0.1:23232"
 	cfg.SSH.PublicURL = "ssh://127.0.0.1:23231"
 	cfg.Git.PublicURL = "git://127.0.0.1:9418"

@@ -377,10 +377,10 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 	// Send the event before the rows are removed. The repository's webhooks
 	// and their deliveries are deleted with it when foreign keys are enforced
 	// (PostgreSQL), so after the delete there is no webhook to send to.
+	// A failed send is logged and does not stop the delete: the receiver's
+	// outcome is recorded as a delivery, not as a reason to keep the repo.
 	if wh != nil {
-		if err := webhook.SendEvent(ctx, *wh); err != nil {
-			return err
-		}
+		d.sendAfterChange(ctx, *wh)
 	}
 
 	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
@@ -476,18 +476,22 @@ func (d *Backend) RenameRepository(ctx context.Context, oldName string, newName 
 		return wrapRepoError(err)
 	}
 
+	// The rename is committed, so an event problem is logged, not returned.
 	user := proto.UserFromContext(ctx)
 	repo, err := d.Repository(ctx, newName)
 	if err != nil {
-		return err
+		d.logger.Error("rename committed but webhook event skipped", "repo", newName, "err", err)
+		return nil
 	}
 
 	wh, err := webhook.NewRepositoryEvent(ctx, user, repo, webhook.RepositoryEventActionRename)
 	if err != nil {
-		return err
+		d.logger.Error("rename committed but webhook event skipped", "repo", newName, "err", err)
+		return nil
 	}
 
-	return webhook.SendEvent(ctx, wh)
+	d.sendAfterChange(ctx, wh)
+	return nil
 }
 
 // Repositories returns a list of repositories per page.
@@ -798,17 +802,21 @@ func (d *Backend) SetPrivate(ctx context.Context, name string, private bool) err
 		return nil
 	}
 
+	// The change is committed, so an event problem is logged, not returned.
 	repo, err := d.Repository(ctx, name)
 	if err != nil {
-		return err
+		d.logger.Error("visibility change committed but webhook event skipped", "repo", name, "err", err)
+		return nil
 	}
 
 	wh, err := webhook.NewRepositoryEvent(ctx, proto.UserFromContext(ctx), repo, webhook.RepositoryEventActionVisibilityChange)
 	if err != nil {
-		return err
+		d.logger.Error("visibility change committed but webhook event skipped", "repo", name, "err", err)
+		return nil
 	}
 
-	return webhook.SendEvent(ctx, wh)
+	d.sendAfterChange(ctx, wh)
+	return nil
 }
 
 // SetProjectName sets the project name of a repository.

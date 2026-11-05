@@ -140,54 +140,48 @@ func TestRenameRepositorySendsRepositoryEvent(t *testing.T) {
 	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventRepository})
 }
 
-func TestRenameRepositoryReturnsSendFailure(t *testing.T) {
+// A failed event does not undo a committed rename, and the caller sees success.
+func TestRenameRepositoryKeepsChangeWhenEventFails(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
 	e.seedHook(t, webhook.EventRepository)
-	_, err := e.be.db.ExecContext(e.ctx, "DROP TABLE webhooks")
+	_, err := e.be.db.ExecContext(e.ctx, "DROP TABLE webhook_deliveries")
 	is.NoErr(err)
 
-	is.True(e.be.RenameRepository(e.ctx, "repo", "renamed") != nil)
+	is.NoErr(e.be.RenameRepository(e.ctx, "repo", "renamed"))
+	_, err = e.be.Repository(e.ctx, "renamed")
+	is.NoErr(err)
+	_, err = e.be.Repository(e.ctx, "repo")
+	is.True(errors.Is(err, proto.ErrRepoNotFound))
+	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
 }
 
-func TestSetPrivateReturnsSendFailure(t *testing.T) {
+// A failed event does not undo a committed visibility change.
+func TestSetPrivateKeepsChangeWhenEventFails(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
 	e.seedHook(t, webhook.EventRepositoryVisibilityChange)
-	_, err := e.be.db.ExecContext(e.ctx, "DROP TABLE webhooks")
+	_, err := e.be.db.ExecContext(e.ctx, "DROP TABLE webhook_deliveries")
 	is.NoErr(err)
 
-	is.True(e.be.SetPrivate(e.ctx, "repo", true) != nil)
+	is.NoErr(e.be.SetPrivate(e.ctx, "repo", true))
+	repo, err := e.be.Repository(e.ctx, "repo")
+	is.NoErr(err)
+	is.True(repo.IsPrivate())
+	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
 }
 
-// Deleting a repository sends the repository event to its webhooks. The
-// database is opened without foreign-key enforcement here, as it is on
-// SQLite in production, so the webhook row survives the delete.
+// The repository-deleted event is sent before the rows go. With foreign keys
+// enforced (as on PostgreSQL) the webhook and its deliveries are removed with
+// the repository, so a trigger copies each delivery into a probe table that
+// survives the cascade.
 func TestDeleteRepositorySendsRepositoryEvent(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
-	id := e.seedHook(t, webhook.EventRepository)
-
-	is.NoErr(e.be.DeleteRepository(e.ctx, "repo"))
-
-	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventRepository})
-}
-
-// Suspected bug: with foreign keys enforced (as on PostgreSQL), deleting the
-// repository cascades to its webhooks before the event is sent, so the
-// repository-deleted event is never delivered.
-func TestDeleteRepositorySendsEventWithForeignKeys(t *testing.T) {
-	is := is.New(t)
-	e := newWebhookEnv(t)
 	e.be.db.SetMaxOpenConns(1)
-	_, err := e.be.db.ExecContext(e.ctx, "PRAGMA foreign_keys = ON")
-	is.NoErr(err)
 	e.seedHook(t, webhook.EventRepository)
 
-	// The webhook and its deliveries are removed with the repository, so they
-	// cannot be read back. A trigger copies every new delivery into a probe
-	// table that survives the cascade.
-	_, err = e.be.db.ExecContext(e.ctx, "CREATE TABLE probe_deliveries (event INTEGER)")
+	_, err := e.be.db.ExecContext(e.ctx, "CREATE TABLE probe_deliveries (event INTEGER)")
 	is.NoErr(err)
 	_, err = e.be.db.ExecContext(e.ctx, "CREATE TRIGGER probe_delivery AFTER INSERT ON webhook_deliveries BEGIN INSERT INTO probe_deliveries (event) VALUES (NEW.event); END;")
 	is.NoErr(err)
@@ -212,16 +206,23 @@ func TestCollaboratorEventsAddAndRemove(t *testing.T) {
 	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventCollaborator, webhook.EventCollaborator})
 }
 
-func TestCollaboratorEventsReturnSendFailure(t *testing.T) {
+// A failed event does not undo committed collaborator changes.
+func TestCollaboratorChangesKeepWhenEventFails(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
-	_, err := e.be.CreateUser(e.ctx, "bob", proto.UserOptions{})
+	bob, err := e.be.CreateUser(e.ctx, "bob", proto.UserOptions{})
 	is.NoErr(err)
 	e.seedHook(t, webhook.EventCollaborator)
-	_, err = e.be.db.ExecContext(e.ctx, "DROP TABLE webhooks")
+	_, err = e.be.db.ExecContext(e.ctx, "DROP TABLE webhook_deliveries")
 	is.NoErr(err)
 
-	is.True(e.be.AddCollaborator(e.ctx, "repo", "bob", access.ReadWriteAccess) != nil)
+	is.NoErr(e.be.AddCollaborator(e.ctx, "repo", "bob", access.ReadWriteAccess))
+	is.Equal(e.be.AccessLevelForUser(e.ctx, "repo", bob), access.ReadWriteAccess)
+
+	is.NoErr(e.be.RemoveCollaborator(e.ctx, "repo", "bob"))
+	// The repository is public, so a non-collaborator gets read-only.
+	is.Equal(e.be.AccessLevelForUser(e.ctx, "repo", bob), access.ReadOnlyAccess)
+	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
 }
 
 func TestRemoveCollaboratorNotFound(t *testing.T) {
@@ -364,19 +365,18 @@ func TestUpdateHookUnknownPublicKey(t *testing.T) {
 	is.Equal(len(e.deliveredEvents(t, id)), 0)
 }
 
-// The repository-deleted event is sent before the rows go. If it cannot be
-// sent, the repository must not be deleted.
-func TestDeleteRepositoryAbortsWhenEventFails(t *testing.T) {
+// A failed event does not stop the repository from being deleted.
+func TestDeleteRepositoryProceedsWhenEventFails(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
 	e.seedHook(t, webhook.EventRepository)
-	_, err := e.be.db.ExecContext(e.ctx, "DROP TABLE webhooks")
+	_, err := e.be.db.ExecContext(e.ctx, "DROP TABLE webhook_deliveries")
 	is.NoErr(err)
 
-	is.True(e.be.DeleteRepository(e.ctx, "repo") != nil)
-
+	is.NoErr(e.be.DeleteRepository(e.ctx, "repo"))
 	_, err = e.be.Repository(e.ctx, "repo")
-	is.NoErr(err)
+	is.True(errors.Is(err, proto.ErrRepoNotFound))
+	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
 }
 
 // Collaborator changes validate the username before anything is written.
@@ -425,36 +425,62 @@ func TestUpdateHookBothShasZeroIsCreate(t *testing.T) {
 	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventBranchTagCreate})
 }
 
-// Building an event looks up the repository owner. Removing the owner row makes
-// that lookup fail while the rest still works, so the operation returns the error.
-func TestRenameRepositoryReturnsEventBuildFailure(t *testing.T) {
+// Building an event looks up the repository owner. Foreign keys stop the owner
+// row being removed normally, so corruptOwner switches them off for the delete.
+// A rename whose event cannot be built is still committed.
+func TestRenameRepositoryKeepsChangeWhenEventBuildFails(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
-	_, err := e.be.db.ExecContext(e.ctx, "DELETE FROM users WHERE username = 'admin'")
-	is.NoErr(err)
+	corruptOwner(t, e)
 
-	is.True(e.be.RenameRepository(e.ctx, "repo", "renamed") != nil)
+	is.NoErr(e.be.RenameRepository(e.ctx, "repo", "renamed"))
+	_, err := e.be.Repository(e.ctx, "renamed")
+	is.NoErr(err)
+	is.True(strings.Contains(e.logs.String(), "rename committed but webhook event skipped"))
 }
 
+// Building the delete event fails before anything is removed, so the delete
+// returns the error and the repository is kept.
 func TestDeleteRepositoryReturnsEventBuildFailure(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
-	_, err := e.be.db.ExecContext(e.ctx, "DELETE FROM users WHERE username = 'admin'")
-	is.NoErr(err)
+	corruptOwner(t, e)
 
 	is.True(e.be.DeleteRepository(e.ctx, "repo") != nil)
+	_, err := e.be.Repository(e.ctx, "repo")
+	is.NoErr(err)
 }
 
-func TestCollaboratorEventBuildFailure(t *testing.T) {
+// corruptOwner removes the repository owner's row with foreign keys switched
+// off, which is the only way to make event building fail. The pool is pinned
+// to one connection so the pragma applies to the statements that follow it.
+func corruptOwner(t *testing.T, e whEnv) {
+	t.Helper()
 	is := is.New(t)
-	e := newWebhookEnv(t)
-	_, err := e.be.CreateUser(e.ctx, "bob", proto.UserOptions{})
+	e.be.db.SetMaxOpenConns(1)
+	_, err := e.be.db.ExecContext(e.ctx, "PRAGMA foreign_keys = OFF")
 	is.NoErr(err)
 	_, err = e.be.db.ExecContext(e.ctx, "DELETE FROM users WHERE username = 'admin'")
 	is.NoErr(err)
+	_, err = e.be.db.ExecContext(e.ctx, "PRAGMA foreign_keys = ON")
+	is.NoErr(err)
+}
 
-	is.True(e.be.AddCollaborator(e.ctx, "repo", "bob", access.ReadWriteAccess) != nil)
+// Adding a collaborator whose event cannot be built still commits and returns
+// nil. Removing one fails before any change, so it returns the error.
+func TestCollaboratorEventBuildFailure(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	bob, err := e.be.CreateUser(e.ctx, "bob", proto.UserOptions{})
+	is.NoErr(err)
+	corruptOwner(t, e)
+
+	is.NoErr(e.be.AddCollaborator(e.ctx, "repo", "bob", access.ReadWriteAccess))
+	is.Equal(e.be.AccessLevelForUser(e.ctx, "repo", bob), access.ReadWriteAccess)
+
 	is.True(e.be.RemoveCollaborator(e.ctx, "repo", "bob") != nil)
+	is.Equal(e.be.AccessLevelForUser(e.ctx, "repo", bob), access.ReadWriteAccess)
+	is.True(strings.Contains(e.logs.String(), "collaborator added but webhook event skipped"))
 }
 
 // A failing collaborator table makes both operations return the error.
@@ -506,4 +532,17 @@ func TestRemoveCollaboratorRowVanishes(t *testing.T) {
 	is.NoErr(err)
 
 	is.True(errors.Is(e.be.RemoveCollaborator(e.ctx, "repo", "bob"), proto.ErrCollaboratorNotFound))
+}
+
+// A visibility change whose event cannot be built still commits and returns nil.
+func TestSetPrivateKeepsChangeWhenEventBuildFails(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	corruptOwner(t, e)
+
+	is.NoErr(e.be.SetPrivate(e.ctx, "repo", true))
+	repo, err := e.be.Repository(e.ctx, "repo")
+	is.NoErr(err)
+	is.True(repo.IsPrivate())
+	is.True(strings.Contains(e.logs.String(), "visibility change committed but webhook event skipped"))
 }

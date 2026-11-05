@@ -368,3 +368,12 @@ func dedupeEvents(events []webhook.Event) []webhook.Event {
 	}
 	return out
 }
+
+// sendAfterChange sends the webhook event for a change that is already
+// committed. The change has happened, so a delivery failure is logged rather
+// than returned: returning it would tell the caller the change failed.
+func (d *Backend) sendAfterChange(ctx context.Context, ev webhook.EventPayload) {
+	if err := webhook.SendEvent(ctx, ev); err != nil {
+		d.logger.Error("webhook event not delivered", "event", ev.Event(), "repo_id", ev.RepositoryID(), "err", err)
+	}
+}
