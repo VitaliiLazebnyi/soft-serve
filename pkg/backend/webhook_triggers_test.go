@@ -827,14 +827,16 @@ func TestDeliveryRecordedAfterWebhookDeletedWritesNoRow(t *testing.T) {
 }
 
 // With AdminOnlyCreate on, a non-admin's create and rename to a new name are
-// refused before any change, so no repository event is sent. The non-admin
-// owns "mine", which has a repository hook; the admin's "repo" has one too.
+// refused before any change. The rename half is the meaningful one: the
+// non-admin owns "mine", which has a repository hook, and a policy check
+// that ran after the commit would leave "renamed" behind and deliver an
+// event to that hook. (CreateRepository sends no event either way.)
 // TestRenameRepositorySendsRepositoryEvent shows the same hook does receive
 // the event when a rename really happens.
 func TestRefusedCreateAndRenameSendNoRepositoryEvent(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
-	is.True(e.cfg.AdminOnlyCreate)
+	e.cfg.AdminOnlyCreate = true
 
 	alice, err := e.be.CreateUser(e.ctx, "alice", proto.UserOptions{})
 	is.NoErr(err)
@@ -842,7 +844,6 @@ func TestRefusedCreateAndRenameSendNoRepositoryEvent(t *testing.T) {
 	mine, err := seedCreate(e.be, e.ctx, "mine", alice, proto.RepositoryOptions{})
 	is.NoErr(err)
 	mineHook := e.seedHookOn(t, mine, webhook.EventRepository)
-	adminHook := e.seedHook(t, webhook.EventRepository)
 
 	before := e.logs.String()
 
@@ -861,10 +862,9 @@ func TestRefusedCreateAndRenameSendNoRepositoryEvent(t *testing.T) {
 	_, err = e.be.Repository(e.ctx, "renamed")
 	is.True(err != nil)
 
-	// No delivery was recorded on either hook, and no webhook event was logged.
+	// No delivery was recorded on the hook, and no webhook event was logged.
 	mineDeliveries, err := e.be.ListWebhookDeliveries(e.ctx, mine, mineHook)
 	is.NoErr(err)
 	is.Equal(len(mineDeliveries), 0)
-	is.Equal(len(e.deliveredEvents(t, adminHook)), 0)
 	is.True(!strings.Contains(e.logs.String()[len(before):], "webhook event"))
 }
