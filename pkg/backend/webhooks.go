@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	neturl "net/url"
 
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -19,11 +20,10 @@ func (b *Backend) CreateWebhook(ctx context.Context, repo proto.Repository, url 
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
 	url = utils.Sanitize(url)
-
-	// Validate webhook URL to prevent SSRF attacks
-	if err := webhook.ValidateWebhookURL(url); err != nil {
-		return err //nolint:wrapcheck
+	if err := validateWebhookInput(url, contentType, events); err != nil {
+		return err
 	}
+	events = dedupeEvents(events)
 
 	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
 		lastID, err := datastore.CreateWebhook(ctx, tx, repo.ID(), url, secret, int(contentType), active)
@@ -125,12 +125,20 @@ func (b *Backend) UpdateWebhook(ctx context.Context, repo proto.Repository, id i
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
 
-	// Validate webhook URL to prevent SSRF attacks
-	if err := webhook.ValidateWebhookURL(url); err != nil {
+	url = utils.Sanitize(url)
+	if err := validateWebhookInput(url, contentType, updatedEvents); err != nil {
 		return err
 	}
+	updatedEvents = dedupeEvents(updatedEvents)
 
 	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
+		// The webhook must belong to this repository. Checking first keeps the
+		// event rewrite below from touching another repository's webhook, and
+		// makes an unknown ID an error instead of a silent no-op.
+		if _, err := datastore.GetWebhookByID(ctx, tx, repo.ID(), id); err != nil {
+			return db.WrapError(err)
+		}
+
 		if err := datastore.UpdateWebhookByID(ctx, tx, repo.ID(), id, url, secret, int(contentType), active); err != nil {
 			return db.WrapError(err)
 		}
@@ -190,6 +198,14 @@ func (b *Backend) DeleteWebhook(ctx context.Context, repo proto.Repository, id i
 	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
 		_, err := datastore.GetWebhookByID(ctx, tx, repo.ID(), id)
 		if err != nil {
+			return db.WrapError(err)
+		}
+		// SQLite does not enforce the schema's ON DELETE CASCADE (foreign keys
+		// are not enabled per connection), so remove dependent rows explicitly.
+		if err := datastore.DeleteWebhookDeliveriesByWebhookID(ctx, tx, id); err != nil {
+			return db.WrapError(err)
+		}
+		if err := datastore.DeleteWebhookEventsByWebhookID(ctx, tx, id); err != nil {
 			return db.WrapError(err)
 		}
 		if err := datastore.DeleteWebhookForRepoByID(ctx, tx, repo.ID(), id); err != nil {
@@ -264,10 +280,23 @@ func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repos
 
 	log.Infof("redelivering webhook delivery %s for webhook %d\n\n%s\n\n", delID, id, delivery.RequestBody)
 
-	var payload json.RawMessage
-	if err := json.Unmarshal([]byte(delivery.RequestBody), &payload); err != nil {
-		log.Errorf("error unmarshaling webhook payload: %v", err)
-		return err
+	// Stored bodies are in the webhook's own content type: form-encoded for
+	// form webhooks, JSON otherwise.
+	var payload any
+	if webhook.ContentType(wh.ContentType) == webhook.ContentTypeForm { //nolint:gosec
+		vals, err := neturl.ParseQuery(delivery.RequestBody)
+		if err != nil {
+			log.Errorf("error parsing webhook form body: %v", err)
+			return err
+		}
+		payload = vals
+	} else {
+		var raw json.RawMessage
+		if err := json.Unmarshal([]byte(delivery.RequestBody), &raw); err != nil {
+			log.Errorf("error unmarshaling webhook payload: %v", err)
+			return err
+		}
+		payload = raw
 	}
 
 	return webhook.SendWebhook(ctx, wh, webhook.Event(delivery.Event), payload)
@@ -306,4 +335,36 @@ func (b *Backend) WebhookDelivery(ctx context.Context, repo proto.Repository, we
 	}
 
 	return delivery, nil
+}
+
+// validateWebhookInput checks a webhook's URL, content type and events before
+// anything is stored.
+func validateWebhookInput(url string, contentType webhook.ContentType, events []webhook.Event) error {
+	// Validate webhook URL to prevent SSRF attacks.
+	if err := webhook.ValidateWebhookURL(url); err != nil {
+		return err //nolint:wrapcheck
+	}
+	if contentType.String() == "" {
+		return webhook.ErrInvalidContentType
+	}
+	for _, e := range events {
+		if e.String() == "" {
+			return webhook.ErrInvalidEvent
+		}
+	}
+	return nil
+}
+
+// dedupeEvents returns events without repeats, keeping the first occurrence.
+// A webhook can subscribe to an event only once.
+func dedupeEvents(events []webhook.Event) []webhook.Event {
+	seen := make(map[webhook.Event]bool, len(events))
+	out := make([]webhook.Event, 0, len(events))
+	for _, e := range events {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	return out
 }

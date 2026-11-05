@@ -109,6 +109,10 @@ func (d *Backend) RemoveCollaborator(ctx context.Context, repo string, username 
 
 	wh, err := webhook.NewCollaboratorEvent(ctx, proto.UserFromContext(ctx), r, username, webhook.CollaboratorEventRemoved)
 	if err != nil {
+		// The event looks up the collaborator row, so a missing row shows up here.
+		if errors.Is(db.WrapError(err), db.ErrRecordNotFound) {
+			return proto.ErrCollaboratorNotFound
+		}
 		return err
 	}
 

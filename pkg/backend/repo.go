@@ -359,9 +359,8 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 	name = utils.SanitizeRepo(name)
 	rp := d.repoPath(name)
 
-	// Build the webhook event before deleting so it can be sent after. A
-	// repository whose directory is gone has no event, but its database row
-	// still has to go.
+	// Build the webhook event before deleting. A repository whose directory is
+	// gone has no event, but its database row still has to go.
 	var wh *webhook.RepositoryEvent
 	r, err := d.Repository(ctx, name)
 	switch {
@@ -373,6 +372,15 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 		wh = &ev
 	case !errors.Is(err, proto.ErrRepoNotFound):
 		return err
+	}
+
+	// Send the event before the rows are removed. The repository's webhooks
+	// and their deliveries are deleted with it when foreign keys are enforced
+	// (PostgreSQL), so after the delete there is no webhook to send to.
+	if wh != nil {
+		if err := webhook.SendEvent(ctx, *wh); err != nil {
+			return err
+		}
 	}
 
 	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
@@ -416,11 +424,7 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 		return wrapRepoError(err)
 	}
 
-	if wh == nil {
-		return nil
-	}
-
-	return webhook.SendEvent(ctx, *wh)
+	return nil
 }
 
 // RenameRepository renames a repository.
