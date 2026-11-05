@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/soft-serve/pkg/backend"
+	"github.com/charmbracelet/soft-serve/pkg/config"
+	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"github.com/spf13/cobra"
 )
@@ -32,6 +34,13 @@ func PubkeyCommand() *cobra.Command {
 			apk, _, err := sshutils.ParseAuthorizedKey(strings.Join(args, " "))
 			if err != nil {
 				return err
+			}
+
+			// An account that owns an admin key is a server admin over
+			// HTTP, and adding a key proves nothing about holding its
+			// private half, so only a server admin may attach one.
+			if IsPublicKeyAdmin(config.FromContext(ctx), apk) && !isServerAdmin(ctx) {
+				return proto.ErrUnauthorized
 			}
 
 			return be.AddPublicKey(ctx, user.Username(), apk)

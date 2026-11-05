@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"io"
 	"testing"
 
 	"charm.land/ssh"
@@ -96,4 +97,48 @@ func TestAdminKeyCreatesRepositoriesWhenFlagOn(t *testing.T) {
 	_, err = be.Repository(ctx, "made-again")
 	is.NoErr(err)
 	is.True(!errors.Is(runRepo(t, keyCtx, "import", "imported", "https://example.invalid/x.git"), proto.ErrUnauthorized))
+}
+
+// An account that owns an initial_admin_keys key is a server admin over HTTP,
+// and `pubkey add` takes any public key without proof of holding its private
+// half, so a non-admin may not attach an admin key to their own account. A
+// server admin may, and ordinary keys are unaffected.
+func TestPubkeyAddRefusesAdminKeyForNonAdmin(t *testing.T) {
+	is := is.New(t)
+	newKey := func() gossh.PublicKey {
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		is.NoErr(err)
+		signer, err := gossh.NewSignerFromKey(priv)
+		is.NoErr(err)
+		return signer.PublicKey()
+	}
+	adminPub := newKey()
+	ctx, be := newAuthTestContext(t)
+	// Added after the first migration, so no account owns it yet.
+	cfg := config.FromContext(ctx)
+	cfg.InitialAdminKeys = append(cfg.InitialAdminKeys, sshutils.MarshalAuthorizedKey(adminPub))
+
+	session := func(name string, admin bool) context.Context {
+		pk := newKey()
+		u, err := be.CreateUser(ctx, name, proto.UserOptions{Admin: admin, PublicKeys: []gossh.PublicKey{pk}})
+		is.NoErr(err)
+		return context.WithValue(proto.WithUserContext(ctx, u), ssh.ContextKeyPublicKey, pk)
+	}
+	runPubkey := func(ctx context.Context, args ...string) error {
+		c := PubkeyCommand()
+		c.SilenceUsage = true
+		c.SetOut(io.Discard)
+		c.SetErr(io.Discard)
+		c.SetArgs(args)
+		return c.ExecuteContext(ctx)
+	}
+
+	workerCtx := session("worker", false)
+	is.True(errors.Is(runPubkey(workerCtx, "add", sshutils.MarshalAuthorizedKey(adminPub)), proto.ErrUnauthorized))
+	keys, err := be.ListPublicKeys(ctx, "worker")
+	is.NoErr(err)
+	is.Equal(len(keys), 1)
+	is.NoErr(runPubkey(workerCtx, "add", sshutils.MarshalAuthorizedKey(newKey())))
+
+	is.NoErr(runPubkey(session("boss", true), "add", sshutils.MarshalAuthorizedKey(adminPub)))
 }

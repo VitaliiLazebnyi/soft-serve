@@ -30,6 +30,9 @@ type Backend struct {
 	// deliveries runs the webhook deliveries in the background, bounded, and
 	// tracks them so shutdown can wait for them.
 	deliveries *deliveryQueue
+
+	// adminKeys caches the parsed initial_admin_keys.
+	adminKeys adminKeyCache
 }
 
 // New returns a new Soft Serve backend.

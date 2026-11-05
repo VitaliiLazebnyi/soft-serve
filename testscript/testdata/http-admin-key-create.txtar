@@ -1,0 +1,64 @@
+# vi: set ft=conf
+
+# FIXME: don't skip windows
+[windows] skip 'curl makes github actions hang'
+
+# With admin_only_create on, an account that owns a key listed in
+# initial_admin_keys may create a repository by pushing over HTTP, as it may
+# over SSH with that key. Other accounts and anonymous callers may not.
+
+env SOFT_SERVE_ADMIN_ONLY_CREATE=true
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+soft settings anon-access read-write
+
+# user1 is an ordinary account
+soft user create user1 --key "$USER1_AUTHORIZED_KEY"
+usoft token create 'push'
+stdout 'ss_*'
+cp stdout utokenfile
+envfile UTOKEN=utokenfile
+
+# an ordinary account cannot push-to-create over HTTP
+curl http://$UTOKEN@localhost:$HTTP_PORT/before.git/info/refs?service=git-receive-pack
+stdout '404.*'
+# nor can an anonymous caller
+curl http://localhost:$HTTP_PORT/anon1.git/info/refs?service=git-receive-pack
+stdout '401.*'
+
+# restart with user1's key added to initial_admin_keys; it is not seeded
+# into the database, so user1 is still not a database admin
+stopserver
+ensureservernotrunning SSH_PORT
+env SOFT_SERVE_INITIAL_ADMIN_KEYS=$USER1_AUTHORIZED_KEY
+exec soft serve &
+ensureserverrunning SSH_PORT
+
+soft user info user1
+stdout 'Admin: false'
+
+# the same token now creates a repository on push
+curl http://$UTOKEN@localhost:$HTTP_PORT/after.git/info/refs?service=git-receive-pack
+stdout '.*git-receive-pack.*'
+# so does basic auth with the token as the password
+curl http://user1:$UTOKEN@localhost:$HTTP_PORT/after2.git/info/refs?service=git-receive-pack
+stdout '.*git-receive-pack.*'
+
+# anonymous callers are still refused
+curl http://localhost:$HTTP_PORT/anon2.git/info/refs?service=git-receive-pack
+stdout '401.*'
+
+soft repo list
+stdout 'after'
+stdout 'after2'
+! stdout 'before'
+! stdout 'anon1'
+! stdout 'anon2'
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .
