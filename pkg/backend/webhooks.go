@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	neturl "net/url"
+	"sync"
 	"time"
 
 	"charm.land/log/v2"
@@ -409,10 +410,13 @@ func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook
 	if len(hooks) == 0 {
 		return
 	}
+	if !d.deliveries.start() {
+		d.logger.Warn("webhook event skipped: server is shutting down", "event", ev.Event(), "repo_id", ev.RepositoryID())
+		return
+	}
 	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), webhookSendTimeout)
-	d.deliveries.Add(1)
 	go func() {
-		defer d.deliveries.Done()
+		defer d.deliveries.done()
 		defer cancel()
 		var err error
 		if record {
@@ -426,18 +430,52 @@ func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook
 	}()
 }
 
-// WaitForDeliveries waits for the background webhook deliveries that have
-// started to finish. It gives up when ctx is done and logs a warning, since
-// the remaining deliveries are then abandoned. Call it after the servers have
-// stopped accepting requests, so no new deliveries start.
-func (d *Backend) WaitForDeliveries(ctx context.Context) {
-	done := make(chan struct{})
+// deliveryTracker counts the background webhook deliveries. Once closed, it
+// refuses new ones, so a request still running during shutdown cannot add to a
+// count that is already being waited on.
+type deliveryTracker struct {
+	mu     sync.Mutex
+	closed bool
+	wg     sync.WaitGroup
+}
+
+// start registers a delivery. It reports false once the tracker is closed.
+func (t *deliveryTracker) start() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return false
+	}
+	t.wg.Add(1)
+	return true
+}
+
+func (t *deliveryTracker) done() {
+	t.wg.Done()
+}
+
+// close refuses new deliveries and returns a channel that is closed once the
+// running ones have finished.
+func (t *deliveryTracker) close() <-chan struct{} {
+	t.mu.Lock()
+	t.closed = true
+	t.mu.Unlock()
+
+	finished := make(chan struct{})
 	go func() {
-		d.deliveries.Wait()
-		close(done)
+		t.wg.Wait()
+		close(finished)
 	}()
+	return finished
+}
+
+// WaitForDeliveries stops new webhook deliveries from starting and waits for
+// the running ones to finish. It gives up when ctx is done and logs a warning,
+// since the remaining deliveries are then abandoned. Call it after the servers
+// have stopped accepting requests.
+func (d *Backend) WaitForDeliveries(ctx context.Context) {
 	select {
-	case <-done:
+	case <-d.deliveries.close():
 	case <-ctx.Done():
 		d.logger.Warn("shutting down with webhook deliveries still running", "err", ctx.Err())
 	}

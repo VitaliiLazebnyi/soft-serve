@@ -230,6 +230,23 @@ func TestWaitForDeliveriesCompletesBackgroundSends(t *testing.T) {
 	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
 }
 
+// Once shutdown has started waiting, a change made by a request that is still
+// running is committed, but its event is skipped rather than added to the
+// deliveries being waited on.
+func TestChangesAfterShutdownStartSkipDelivery(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	_, err := e.be.CreateUser(e.ctx, "bob", proto.UserOptions{})
+	is.NoErr(err)
+	id := e.seedHook(t, webhook.EventCollaborator)
+
+	e.be.WaitForDeliveries(e.ctx)
+	is.NoErr(e.be.AddCollaborator(e.ctx, "repo", "bob", access.ReadWriteAccess))
+
+	is.True(strings.Contains(e.logs.String(), "webhook event skipped: server is shutting down"))
+	is.Equal(len(e.deliveredEvents(t, id)), 0)
+}
+
 // Deleting a repository removes its webhooks with their events and deliveries,
 // even on a connection that does not enforce foreign keys. No delivery row is
 // written for the repository event, since its webhook is gone.

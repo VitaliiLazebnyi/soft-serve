@@ -31,7 +31,7 @@ func newAuthTestContext(t *testing.T) (context.Context, *backend.Backend) {
 	cfg := config.DefaultConfig()
 	cfg.DataPath = dp
 	cfg.DB.Driver = "sqlite"
-	cfg.DB.DataSource = dp + "/test.db?_pragma=foreign_keys(1)"
+	cfg.DB.DataSource = dp + "/test.db?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 
 	ctx = config.WithContext(ctx, cfg)
 	dbx, err := db.Open(ctx, cfg.DB.Driver, cfg.DB.DataSource)

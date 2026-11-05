@@ -27,9 +27,9 @@ type Backend struct {
 	// to be in place.
 	importGate func() string
 
-	// deliveries counts the webhook deliveries running in the background, so
+	// deliveries tracks the webhook deliveries running in the background, so
 	// shutdown can wait for them.
-	deliveries sync.WaitGroup
+	deliveries deliveryTracker
 }
 
 // New returns a new Soft Serve backend.
