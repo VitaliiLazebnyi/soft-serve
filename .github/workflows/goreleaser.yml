@@ -10,13 +10,33 @@ concurrency:
   group: goreleaser
   cancel-in-progress: false # never stop a release halfway through
 
-permissions:
-  contents: write # create the GitHub release and upload assets
-  packages: write # push images to ghcr.io
+permissions: {} # each job asks for exactly what it needs
 
 jobs:
-  goreleaser:
+  test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test before publishing
+        run: go test ./...
+
+  goreleaser:
+    needs: test
+    runs-on: ubuntu-latest
+    # The "release" environment requires the maintainer's approval before
+    # this job starts, and only accepts v* tags.
+    environment: release
+    permissions:
+      contents: write # create the GitHub release and upload assets
+      packages: write # push images to ghcr.io
+      id-token: write # sign build provenance attestations
+      attestations: write # store build provenance attestations
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,3 +60,21 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build provenance: lets users check that a download or image was built
+      # by this workflow from this commit (`gh attestation verify`).
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/checksums.txt
+      - name: Look up the image digest
+        id: image
+        run: |
+          digest=$(docker buildx imagetools inspect "ghcr.io/vitaliilazebnyi/soft-serve-plus:${GITHUB_REF_NAME}" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - name: Attest container image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/vitaliilazebnyi/soft-serve-plus
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
