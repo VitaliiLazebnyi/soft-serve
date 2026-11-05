@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -70,6 +71,12 @@ func SendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 			return err
 		}
 	case ContentTypeForm:
+		// Redeliveries pass the stored form body as url.Values, which is
+		// already encoded; query.Values only accepts structs.
+		if v, ok := payload.(neturl.Values); ok {
+			buf.WriteString(v.Encode()) //nolint: errcheck
+			break
+		}
 		v, err := query.Values(payload)
 		if err != nil {
 			return err

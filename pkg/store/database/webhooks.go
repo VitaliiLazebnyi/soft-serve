@@ -2,12 +2,13 @@ package database
 
 import (
 	"context"
+	"database/sql"
+	"strings"
 
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
 )
 
 type webhookStore struct{}
@@ -31,9 +32,10 @@ func (*webhookStore) CreateWebhook(ctx context.Context, h db.Handler, repoID int
 func (*webhookStore) CreateWebhookDelivery(ctx context.Context, h db.Handler, id uuid.UUID, webhookID int64, event int, url string, method string, requestError error, requestHeaders string, requestBody string, responseStatus int, responseHeaders string, responseBody string) error {
 	query := h.Rebind(`INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_error, request_headers, request_body, response_status, response_headers, response_body)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`)
-	var reqErr string
+	// A successful delivery stores NULL, not an empty string.
+	var reqErr sql.NullString
 	if requestError != nil {
-		reqErr = requestError.Error()
+		reqErr = sql.NullString{String: requestError.Error(), Valid: true}
 	}
 	_, err := h.ExecContext(ctx, query, id, webhookID, event, url, method, reqErr, requestHeaders, requestBody, responseStatus, responseHeaders, responseBody)
 	return err
@@ -66,6 +68,20 @@ func (*webhookStore) DeleteWebhookForRepoByID(ctx context.Context, h db.Handler,
 	return err
 }
 
+// DeleteWebhookEventsByWebhookID implements store.WebhookStore.
+func (*webhookStore) DeleteWebhookEventsByWebhookID(ctx context.Context, h db.Handler, webhookID int64) error {
+	query := h.Rebind(`DELETE FROM webhook_events WHERE webhook_id = ?;`)
+	_, err := h.ExecContext(ctx, query, webhookID)
+	return err
+}
+
+// DeleteWebhookDeliveriesByWebhookID implements store.WebhookStore.
+func (*webhookStore) DeleteWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) error {
+	query := h.Rebind(`DELETE FROM webhook_deliveries WHERE webhook_id = ?;`)
+	_, err := h.ExecContext(ctx, query, webhookID)
+	return err
+}
+
 // DeleteWebhookDeliveryByID implements store.WebhookStore.
 func (*webhookStore) DeleteWebhookDeliveryByID(ctx context.Context, h db.Handler, webhookID int64, id uuid.UUID) error {
 	query := h.Rebind(`DELETE FROM webhook_deliveries WHERE webhook_id = ? AND id = ?;`)
@@ -73,15 +89,19 @@ func (*webhookStore) DeleteWebhookDeliveryByID(ctx context.Context, h db.Handler
 	return err
 }
 
-// DeleteWebhookEventsByWebhookID implements store.WebhookStore.
+// DeleteWebhookEventsByID implements store.WebhookStore.
 func (*webhookStore) DeleteWebhookEventsByID(ctx context.Context, h db.Handler, ids []int64) error {
-	query, args, err := sqlx.In(`DELETE FROM webhook_events WHERE id IN (?);`, ids)
-	if err != nil {
-		return err
+	// sqlx rejects an empty IN clause, and there is nothing to delete.
+	if len(ids) == 0 {
+		return nil
 	}
 
-	query = h.Rebind(query)
-	_, err = h.ExecContext(ctx, query, args...)
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	query := h.Rebind(`DELETE FROM webhook_events WHERE id IN (` + placeholders(len(ids)) + `);`)
+	_, err := h.ExecContext(ctx, query, args...)
 	return err
 }
 
@@ -135,17 +155,20 @@ func (*webhookStore) GetWebhooksByRepoID(ctx context.Context, h db.Handler, repo
 
 // GetWebhooksByRepoIDWhereEvent implements store.WebhookStore.
 func (*webhookStore) GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Handler, repoID int64, events []int) ([]models.Webhook, error) {
-	query, args, err := sqlx.In(`SELECT webhooks.*
-			FROM webhooks
-			INNER JOIN webhook_events ON webhooks.id = webhook_events.webhook_id
-			WHERE webhooks.repo_id = ? AND webhook_events.event IN (?);`, repoID, events)
-	if err != nil {
-		return nil, err
+	if len(events) == 0 {
+		return nil, nil
 	}
 
-	query = h.Rebind(query)
+	args := []any{repoID}
+	for _, e := range events {
+		args = append(args, e)
+	}
+	query := h.Rebind(`SELECT webhooks.*
+			FROM webhooks
+			INNER JOIN webhook_events ON webhooks.id = webhook_events.webhook_id
+			WHERE webhooks.repo_id = ? AND webhook_events.event IN (` + placeholders(len(events)) + `);`)
 	var whs []models.Webhook
-	err = h.SelectContext(ctx, &whs, query, args...)
+	err := h.SelectContext(ctx, &whs, query, args...)
 	return whs, err
 }
 
@@ -162,4 +185,10 @@ func (*webhookStore) UpdateWebhookByID(ctx context.Context, h db.Handler, repoID
 	query := h.Rebind(`UPDATE webhooks SET url = ?, secret = ?, content_type = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE repo_id = ? AND id = ?;`)
 	_, err := h.ExecContext(ctx, query, url, secret, contentType, active, repoID, id)
 	return err
+}
+
+// placeholders returns n comma-separated "?" placeholders for an IN clause.
+// The callers never pass n == 0; they return early for an empty list.
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }

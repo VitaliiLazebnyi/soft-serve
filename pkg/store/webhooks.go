@@ -24,6 +24,10 @@ type WebhookStore interface {
 	DeleteWebhookByID(ctx context.Context, h db.Handler, id int64) error
 	// DeleteWebhookForRepoByID deletes a webhook for a repository by its ID.
 	DeleteWebhookForRepoByID(ctx context.Context, h db.Handler, repoID int64, id int64) error
+	// DeleteWebhookEventsByWebhookID deletes all events of a webhook.
+	DeleteWebhookEventsByWebhookID(ctx context.Context, h db.Handler, webhookID int64) error
+	// DeleteWebhookDeliveriesByWebhookID deletes all deliveries of a webhook.
+	DeleteWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) error
 
 	// GetWebhookEventByID returns a webhook event by its ID.
 	GetWebhookEventByID(ctx context.Context, h db.Handler, id int64) (models.WebhookEvent, error)
