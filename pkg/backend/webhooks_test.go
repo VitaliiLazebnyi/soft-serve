@@ -442,6 +442,31 @@ func TestRedeliverRecordsNewDelivery(t *testing.T) {
 	is.Equal(len(list), 2)
 }
 
+// Redelivery logs identifiers only, never the stored request body, headers
+// or the hook URL.
+func TestRedeliverDoesNotLogPayload(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	id := e.createHook(t, whURL, webhook.EventPush)
+	const hookURL = "http://127.0.0.1:1/secret-path?token=hook-token"
+	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
+		return e.be.store.UpdateWebhookByID(e.ctx, tx, e.repo.ID(), id, hookURL, "", int(webhook.ContentTypeJSON), true)
+	}))
+	const marker = "payload-marker-do-not-log"
+	delID := e.seedDelivery(t, id, hookURL, `{"ref":"main","commit":"`+marker+`"}`)
+
+	is.NoErr(e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, delID))
+
+	logs := e.logs.String()
+	is.True(strings.Contains(logs, "redelivering webhook delivery"))
+	is.True(strings.Contains(logs, delID.String()))
+	for _, leak := range []string{marker, `"ref"`, "X-Test", "secret-path", "hook-token"} {
+		if strings.Contains(logs, leak) {
+			t.Errorf("redelivery log contains %q:\n%s", leak, logs)
+		}
+	}
+}
+
 // Suspected bug: a form-encoded webhook cannot be redelivered, because the
 // stored JSON body is passed as a raw message and form encoding of it fails.
 func TestRedeliverFormWebhook(t *testing.T) {
