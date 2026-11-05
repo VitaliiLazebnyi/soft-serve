@@ -29,7 +29,7 @@ func whRepo(t *testing.T, ctx context.Context, be *backend.Backend) context.Cont
 	t.Helper()
 	is := is.New(t)
 	ownerCtx := withUser(t, ctx, be, "owner", false)
-	_, err := be.CreateRepository(ownerCtx, "hooks", proto.UserFromContext(ownerCtx), proto.RepositoryOptions{})
+	_, err := seedCreate(be, ownerCtx, "hooks", proto.UserFromContext(ownerCtx), proto.RepositoryOptions{})
 	is.NoErr(err)
 	return ownerCtx
 }
@@ -261,7 +261,7 @@ func TestWebhookDeleteIsScopedToRepository(t *testing.T) {
 	is := is.New(t)
 	ctx, be := newAuthTestContext(t)
 	ownerCtx := whRepo(t, ctx, be)
-	_, err := be.CreateRepository(ownerCtx, "other", proto.UserFromContext(ownerCtx), proto.RepositoryOptions{})
+	_, err := seedCreate(be, ownerCtx, "other", proto.UserFromContext(ownerCtx), proto.RepositoryOptions{})
 	is.NoErr(err)
 	otherHook := whCreate(t, ownerCtx, be)
 	is.NoErr(runRepo(t, ownerCtx, "webhook", "create", "other", whURL))

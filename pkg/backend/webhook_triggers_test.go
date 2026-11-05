@@ -29,11 +29,17 @@ const someSha = "1111111111111111111111111111111111111111"
 // recorded as a delivery, which lets tests see which events were sent.
 func (e whEnv) seedHook(t *testing.T, events ...webhook.Event) int64 {
 	t.Helper()
+	return e.seedHookOn(t, e.repo, events...)
+}
+
+// seedHookOn is seedHook for a given repository.
+func (e whEnv) seedHookOn(t *testing.T, repo proto.Repository, events ...webhook.Event) int64 {
+	t.Helper()
 	is := is.New(t)
 	var id int64
 	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
 		var err error
-		id, err = e.be.store.CreateWebhook(e.ctx, tx, e.repo.ID(), "http://127.0.0.1:1/", "", int(webhook.ContentTypeJSON), true)
+		id, err = e.be.store.CreateWebhook(e.ctx, tx, repo.ID(), "http://127.0.0.1:1/", "", int(webhook.ContentTypeJSON), true)
 		if err != nil {
 			return err
 		}
@@ -668,4 +674,47 @@ func TestDeliveryRecordedAfterWebhookDeletedWritesNoRow(t *testing.T) {
 	var n int
 	is.NoErr(e.be.db.GetContext(e.ctx, &n, "SELECT COUNT(*) FROM webhook_deliveries WHERE webhook_id = ?", id))
 	is.Equal(n, 0)
+}
+
+// With AdminOnlyCreate on, a non-admin's create and rename to a new name are
+// refused before any change, so no repository event is sent. The non-admin
+// owns "mine", which has a repository hook; the admin's "repo" has one too.
+// TestRenameRepositorySendsRepositoryEvent shows the same hook does receive
+// the event when a rename really happens.
+func TestRefusedCreateAndRenameSendNoRepositoryEvent(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	is.True(e.cfg.AdminOnlyCreate)
+
+	alice, err := e.be.CreateUser(e.ctx, "alice", proto.UserOptions{})
+	is.NoErr(err)
+	aliceCtx := proto.WithUserContext(e.ctx, alice)
+	mine, err := seedCreate(e.be, e.ctx, "mine", alice, proto.RepositoryOptions{})
+	is.NoErr(err)
+	mineHook := e.seedHookOn(t, mine, webhook.EventRepository)
+	adminHook := e.seedHook(t, webhook.EventRepository)
+
+	before := e.logs.String()
+
+	is.True(errors.Is(func() error {
+		_, err := e.be.CreateRepository(aliceCtx, "junk", alice, proto.RepositoryOptions{})
+		return err
+	}(), proto.ErrUnauthorized))
+	is.True(errors.Is(e.be.RenameRepository(aliceCtx, "mine", "renamed"), proto.ErrUnauthorized))
+	e.be.WaitForDeliveries(e.ctx)
+
+	// Nothing was created or renamed.
+	_, err = e.be.Repository(e.ctx, "junk")
+	is.True(err != nil)
+	_, err = e.be.Repository(e.ctx, "mine")
+	is.NoErr(err)
+	_, err = e.be.Repository(e.ctx, "renamed")
+	is.True(err != nil)
+
+	// No delivery was recorded on either hook, and no webhook event was logged.
+	mineDeliveries, err := e.be.ListWebhookDeliveries(e.ctx, mine, mineHook)
+	is.NoErr(err)
+	is.Equal(len(mineDeliveries), 0)
+	is.Equal(len(e.deliveredEvents(t, adminHook)), 0)
+	is.True(!strings.Contains(e.logs.String()[len(before):], "webhook event"))
 }
