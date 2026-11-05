@@ -317,9 +317,12 @@ stats:
 #anon_access: "admin-access"
 #allow_keyless: true
 
-# Only server admins may create repositories. Registered non-admins and
-# anonymous users cannot create, import or rename to a new name. Existing
-# repositories are not affected. Defaults to false.
+# Only server admins (admin accounts or initial_admin_keys) may create
+# repositories. Registered non-admins and anonymous users cannot create or
+# import. Renaming counts as creating the new name, so repository owners and
+# collaborators can no longer rename their repositories. Anonymous access to a
+# name that does not exist yet is capped at read-only whatever anon_access
+# says. Access to existing repositories is not affected. Defaults to false.
 #admin_only_create: false
 
 # Repository name to create on boot if it does not already exist.
@@ -339,7 +342,7 @@ name all in uppercase. Here are some examples:
 - `SOFT_SERVE_GIT_MAX_CONNECTIONS`: The number of simultaneous connections to git daemon
 - `SOFT_SERVE_ANON_ACCESS`: Overrides the `anon-access` setting (see [Authentication](#authentication))
 - `SOFT_SERVE_ALLOW_KEYLESS`: Overrides the `allow-keyless` setting (see [Authentication](#authentication))
-- `SOFT_SERVE_ADMIN_ONLY_CREATE`: Only server admins may create repositories. Defaults to `false`. Existing repositories are not affected.
+- `SOFT_SERVE_ADMIN_ONLY_CREATE`: Only server admins may create repositories. Owners and collaborators can no longer rename repositories, and anonymous access to names that do not exist yet is capped at read-only. Defaults to `false`. Access to existing repositories is not affected.
 - `SOFT_SERVE_DEFAULT_REPO`: Repository name to create on boot if missing
 
 #### Database Configuration

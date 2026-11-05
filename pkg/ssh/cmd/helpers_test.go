@@ -21,11 +21,11 @@ import (
 // users and repositories.
 //
 // No user is attached to the returned context; use withUser to authenticate
-// as somebody. Admin-only creation is on, as the restricted policy is what
-// these tests exercise.
+// as somebody. AdminOnlyCreate is left at its default (off); use
+// newAuthTestContextWith to turn it on.
 func newAuthTestContext(t *testing.T) (context.Context, *backend.Backend) {
 	t.Helper()
-	return newAuthTestContextWith(t, func(c *config.Config) { c.AdminOnlyCreate = true })
+	return newAuthTestContextWith(t, nil)
 }
 
 // newAuthTestContextWith is newAuthTestContext with a hook to adjust the
@@ -100,15 +100,4 @@ func runUser(t *testing.T, ctx context.Context, args ...string) error {
 	c.SetErr(&errBuf)
 	c.SetArgs(args)
 	return c.ExecuteContext(ctx)
-}
-
-// seedCreate creates a fixture repository while admin-only creation is off,
-// so tests can set up owners without the create policy in the way. Tests that
-// exercise the policy go through the CLI commands instead.
-func seedCreate(be *backend.Backend, ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
-	cfg := config.FromContext(ctx)
-	prev := cfg.AdminOnlyCreate
-	cfg.AdminOnlyCreate = false
-	defer func() { cfg.AdminOnlyCreate = prev }()
-	return be.CreateRepository(ctx, name, user, opts)
 }

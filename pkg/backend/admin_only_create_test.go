@@ -7,10 +7,12 @@ import (
 	"errors"
 	"testing"
 
+	charmssh "charm.land/ssh"
 	"github.com/charmbracelet/soft-serve/pkg/access"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/matryer/is"
 	"golang.org/x/crypto/ssh"
@@ -22,7 +24,7 @@ func TestAdminOnlyCreateFlagOnCapsBaseAccess(t *testing.T) {
 	is := is.New(t)
 	be, cfg := newTestBackend(t)
 	ctx := context.Background()
-	is.True(cfg.AdminOnlyCreate)
+	cfg.AdminOnlyCreate = true
 
 	user, err := be.CreateUser(ctx, "alice", proto.UserOptions{})
 	is.NoErr(err)
@@ -38,13 +40,14 @@ func TestAdminOnlyCreateFlagOnCapsBaseAccess(t *testing.T) {
 	is.Equal(be.AccessLevelForUser(ctx, "fresh", nil), access.ReadOnlyAccess)
 }
 
-// With AdminOnlyCreate off, the backend keeps upstream behaviour: a registered
-// user gets read-write on a missing name, so can create it.
+// With AdminOnlyCreate off (the default), the backend keeps upstream
+// behaviour: a registered user gets read-write on a missing name, so can
+// create it.
 func TestAdminOnlyCreateFlagOffKeepsUpstreamBaseAccess(t *testing.T) {
 	is := is.New(t)
 	be, cfg := newTestBackend(t)
 	ctx := context.Background()
-	cfg.AdminOnlyCreate = false
+	is.True(!cfg.AdminOnlyCreate)
 	rw := access.ReadWriteAccess
 	cfg.AnonAccess = &rw
 
@@ -125,7 +128,7 @@ func TestBackendRefusesNonAdminCreatesWhenFlagOn(t *testing.T) {
 	is := is.New(t)
 	be, cfg := newTestBackend(t)
 	ctx := backendTestContext(be, cfg)
-	is.True(cfg.AdminOnlyCreate)
+	cfg.AdminOnlyCreate = true
 
 	user, err := be.CreateUser(ctx, "alice", proto.UserOptions{})
 	is.NoErr(err)
@@ -152,6 +155,7 @@ func TestBackendRefusesNonAdminRenameToNewNameWhenFlagOn(t *testing.T) {
 	is := is.New(t)
 	be, cfg := newTestBackend(t)
 	ctx := backendTestContext(be, cfg)
+	cfg.AdminOnlyCreate = true
 
 	user, err := be.CreateUser(ctx, "alice", proto.UserOptions{})
 	is.NoErr(err)
@@ -173,7 +177,7 @@ func TestBackendAllowsAdminCreatesWhenFlagOn(t *testing.T) {
 	is := is.New(t)
 	be, cfg := newTestBackend(t)
 	ctx := backendTestContext(be, cfg)
-	is.True(cfg.AdminOnlyCreate)
+	cfg.AdminOnlyCreate = true
 
 	admin, err := be.CreateUser(ctx, "root", proto.UserOptions{Admin: true})
 	is.NoErr(err)
@@ -217,4 +221,56 @@ func newTestPublicKey(t *testing.T) ssh.PublicKey {
 	signer, err := ssh.NewSignerFromKey(priv)
 	is.NoErr(err)
 	return signer.PublicKey()
+}
+
+// A key listed in initial_admin_keys is a server admin even when it was added
+// after the first migration, so it never reached the database: the caller is
+// anonymous or a non-admin account. With AdminOnlyCreate on, the backend must
+// still let it create, import and rename to a new name, as the SSH layer's
+// isServerAdmin does.
+func TestBackendAllowsAdminKeyCreatesWhenFlagOn(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		name := "anonymous"
+		if registered {
+			name = "non-admin user"
+		}
+		t.Run(name, func(t *testing.T) {
+			is := is.New(t)
+			be, cfg := newTestBackend(t)
+			ctx := backendTestContext(be, cfg)
+			cfg.AdminOnlyCreate = true
+
+			pub := newTestPublicKey(t)
+			cfg.InitialAdminKeys = append(cfg.InitialAdminKeys, sshutils.MarshalAuthorizedKey(pub))
+
+			var user proto.User
+			if registered {
+				var err error
+				user, err = be.CreateUser(ctx, "alice", proto.UserOptions{PublicKeys: []ssh.PublicKey{pub}})
+				is.NoErr(err)
+				is.True(!user.IsAdmin())
+				ctx = proto.WithUserContext(ctx, user)
+			}
+			keyCtx := context.WithValue(ctx, charmssh.ContextKeyPublicKey, pub)
+
+			// Without the key on the context, the same user is refused.
+			_, err := be.CreateRepository(ctx, "nokey", user, proto.RepositoryOptions{})
+			is.True(errors.Is(err, proto.ErrUnauthorized))
+
+			is.Equal(be.AccessLevelForUser(keyCtx, "fresh", user), access.AdminAccess)
+
+			_, err = be.CreateRepository(keyCtx, "made", user, proto.RepositoryOptions{})
+			is.NoErr(err)
+			_, err = be.ImportRepository(keyCtx, "imported", user, "https://example.invalid/x.git", proto.RepositoryOptions{})
+			is.True(!errors.Is(err, proto.ErrUnauthorized))
+			if !registered {
+				// The rename webhook needs a sender, so rename is only
+				// exercised with a registered user.
+				return
+			}
+			is.NoErr(be.RenameRepository(keyCtx, "made", "made-again"))
+			_, err = be.Repository(ctx, "made-again")
+			is.NoErr(err)
+		})
+	}
 }

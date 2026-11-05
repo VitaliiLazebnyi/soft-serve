@@ -15,16 +15,16 @@ import (
 // whether a missing name may be created.
 func TestReadable(t *testing.T) {
 	is := is.New(t)
-	be, _ := newTestBackend(t)
+	be, cfg := newTestBackend(t)
 	ctx := context.Background()
 
 	owner, err := be.CreateUser(ctx, "owner", proto.UserOptions{})
 	is.NoErr(err)
 	stranger, err := be.CreateUser(ctx, "stranger", proto.UserOptions{})
 	is.NoErr(err)
-	_, err = seedCreate(be, ctx, "secret", owner, proto.RepositoryOptions{Private: true})
+	_, err = be.CreateRepository(ctx, "secret", owner, proto.RepositoryOptions{Private: true})
 	is.NoErr(err)
-	_, err = seedCreate(be, ctx, "public", owner, proto.RepositoryOptions{})
+	_, err = be.CreateRepository(ctx, "public", owner, proto.RepositoryOptions{})
 	is.NoErr(err)
 
 	// Anonymous: both nil; the level is the anonymous default either way.
@@ -35,13 +35,13 @@ func TestReadable(t *testing.T) {
 	is.Equal(r, nil)
 	is.Equal(level, access.ReadOnlyAccess)
 
-	// Registered stranger: both nil; with admin-only creation on, a missing name may not be created.
+	// Registered stranger: both nil; a missing name may be created.
 	r, level = be.Readable(ctx, "secret", stranger)
 	is.Equal(r, nil)
 	is.Equal(level, access.NoAccess)
 	r, level = be.Readable(ctx, "ghost", stranger)
 	is.Equal(r, nil)
-	is.Equal(level, access.ReadOnlyAccess)
+	is.Equal(level, access.ReadWriteAccess)
 
 	// Readers get the repository.
 	r, level = be.Readable(ctx, "public", nil)
@@ -53,8 +53,15 @@ func TestReadable(t *testing.T) {
 
 	// AccessLevelForUser is the same computation.
 	is.Equal(be.AccessLevelForUser(ctx, "secret", stranger), access.NoAccess)
-	is.Equal(be.AccessLevelForUser(ctx, "ghost", stranger), access.ReadOnlyAccess)
+	is.Equal(be.AccessLevelForUser(ctx, "ghost", stranger), access.ReadWriteAccess)
 	is.Equal(be.AccessLevelForUser(ctx, "public", nil), access.ReadOnlyAccess)
+
+	// With admin-only creation on, a missing name is no longer creatable.
+	cfg.AdminOnlyCreate = true
+	r, level = be.Readable(ctx, "ghost", stranger)
+	is.Equal(r, nil)
+	is.Equal(level, access.ReadOnlyAccess)
+	is.Equal(be.AccessLevelForUser(ctx, "secret", stranger), access.NoAccess)
 }
 
 // TestBaseAccessLevelByPublicKey verifies the baseline level does not

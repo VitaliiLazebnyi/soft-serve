@@ -63,14 +63,15 @@ func redactRemote(remote string) string {
 }
 
 // checkCanCreate refuses the creation of a new repository name by user when
-// AdminOnlyCreate is set and user is not a server admin. It is the backend's
-// own guard, so a caller that skips the SSH and web access checks still
-// cannot create. A nil user is anonymous and is refused the same way.
-func (d *Backend) checkCanCreate(user proto.User) error {
+// AdminOnlyCreate is set and the caller is not a server admin (see
+// isServerAdmin). It is the backend's own guard, so a caller that skips the
+// SSH and web access checks still cannot create. A nil user without an admin
+// key is anonymous and is refused the same way.
+func (d *Backend) checkCanCreate(ctx context.Context, user proto.User) error {
 	if !d.cfg.AdminOnlyCreate {
 		return nil
 	}
-	if user != nil && user.IsAdmin() {
+	if d.isServerAdmin(ctx, user) {
 		return nil
 	}
 	return proto.ErrUnauthorized
@@ -80,12 +81,23 @@ func (d *Backend) checkCanCreate(user proto.User) error {
 //
 // It implements backend.Backend.
 func (d *Backend) CreateRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
-	name = utils.SanitizeRepo(name)
-	if err := utils.ValidateRepo(name); err != nil {
+	if err := d.checkCanCreate(ctx, user); err != nil {
 		return nil, err
 	}
+	return d.createRepository(ctx, name, user, opts)
+}
 
-	if err := d.checkCanCreate(user); err != nil {
+// CreateSystemRepository creates a repository on the server's own behalf,
+// attributed to user. It is not subject to AdminOnlyCreate, so it is only for
+// internal bootstrap (such as default_repo on boot) and must never be reached
+// from a user request.
+func (d *Backend) CreateSystemRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
+	return d.createRepository(ctx, name, user, opts)
+}
+
+func (d *Backend) createRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
+	name = utils.SanitizeRepo(name)
+	if err := utils.ValidateRepo(name); err != nil {
 		return nil, err
 	}
 
@@ -211,13 +223,13 @@ func (d *Backend) defaultAdminUserID(ctx context.Context, tx *db.Tx) (int64, err
 }
 
 // ImportRepository imports a repository from remote.
-func (d *Backend) ImportRepository(_ context.Context, name string, user proto.User, remote string, opts proto.RepositoryOptions) (proto.Repository, error) {
+func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.User, remote string, opts proto.RepositoryOptions) (proto.Repository, error) {
 	name = utils.SanitizeRepo(name)
 	if err := utils.ValidateRepo(name); err != nil {
 		return nil, err
 	}
 
-	if err := d.checkCanCreate(user); err != nil {
+	if err := d.checkCanCreate(ctx, user); err != nil {
 		return nil, err
 	}
 
@@ -276,8 +288,8 @@ func (d *Backend) ImportRepository(_ context.Context, name string, user proto.Us
 
 	// The import runs on the backend's context rather than the caller's so a
 	// dropped session does not leave a half-cloned repository behind.
-	ctx := proto.WithUserContext(d.ctx, user)
-	r, err := d.importRepository(ctx, user, imp)
+	importCtx := proto.WithUserContext(d.ctx, user)
+	r, err := d.importRepository(importCtx, user, imp)
 	if err != nil {
 		// The real error is logged where it happened. The caller gets a
 		// fixed message so a failed import cannot be used to probe hosts
@@ -485,8 +497,8 @@ func (d *Backend) RenameRepository(ctx context.Context, oldName string, newName 
 	}
 
 	// Renaming onto a new name creates it, so it needs the same permission.
-	// The caller is the user on the context.
-	if err := d.checkCanCreate(proto.UserFromContext(ctx)); err != nil {
+	// The caller is the user and public key on the context.
+	if err := d.checkCanCreate(ctx, proto.UserFromContext(ctx)); err != nil {
 		return err
 	}
 

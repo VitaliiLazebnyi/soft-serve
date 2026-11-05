@@ -157,14 +157,16 @@ func ensureDefaultRepo(ctx context.Context, cfg *config.Config, be *backend.Back
 	}
 
 	// The migration always inserts a user at ID 1. The repos table requires
-	// a non-null owner, so we attribute the repo to that account.
+	// a non-null owner, so we attribute the repo to that account. This is the
+	// server's own bootstrap, not a user request, so it is not subject to
+	// admin_only_create even if that account is no longer an admin.
 	owner, err := be.UserByID(ctx, 1)
 	if err != nil {
 		logger.Warn("failed to look up default repo owner, skipping", "name", name, "err", err)
 		return
 	}
 
-	switch _, err := be.CreateRepository(ctx, name, owner, proto.RepositoryOptions{}); {
+	switch _, err := be.CreateSystemRepository(ctx, name, owner, proto.RepositoryOptions{}); {
 	case errors.Is(err, proto.ErrRepoExist):
 		logger.Warn("default repo directory exists without a database row, skipping", "name", name)
 	case err != nil:

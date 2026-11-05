@@ -113,6 +113,28 @@ func TestEnsureDefaultRepoCreatesWhenAdminOnly(t *testing.T) {
 	is.Equal(r.Name(), "gitops")
 }
 
+// The default repository is the server's own bootstrap, so admin-only
+// creation does not apply to it even when user 1 is no longer an admin.
+func TestEnsureDefaultRepoIgnoresAdminOnlyForDemotedOwner(t *testing.T) {
+	is := is.New(t)
+	ctx, cfg, be := setupTestBackend(t)
+
+	owner, err := be.UserByID(ctx, 1)
+	is.NoErr(err)
+	// A second admin, so user 1 can be demoted.
+	_, err = be.CreateUser(ctx, "root2", proto.UserOptions{Admin: true})
+	is.NoErr(err)
+	is.NoErr(be.SetAdmin(ctx, owner.Username(), false))
+
+	cfg.AdminOnlyCreate = true
+	cfg.DefaultRepo = "gitops"
+	ensureDefaultRepo(ctx, cfg, be, log.New(os.Stderr))
+
+	r, err := be.Repository(ctx, "gitops")
+	is.NoErr(err)
+	is.Equal(r.UserID(), owner.ID())
+}
+
 func TestEnsureDefaultRepoCreatesWhenMissing(t *testing.T) {
 	is := is.New(t)
 	ctx, cfg, be := setupTestBackend(t)
