@@ -75,6 +75,12 @@ func (*webhookStore) DeleteWebhookDeliveryByID(ctx context.Context, h db.Handler
 
 // DeleteWebhookEventsByWebhookID implements store.WebhookStore.
 func (*webhookStore) DeleteWebhookEventsByID(ctx context.Context, h db.Handler, ids []int64) error {
+	// sqlx.In rejects an empty slice, and deleting nothing is a no-op. Updating
+	// a webhook without changing its events reaches here with no IDs.
+	if len(ids) == 0 {
+		return nil
+	}
+
 	query, args, err := sqlx.In(`DELETE FROM webhook_events WHERE id IN (?);`, ids)
 	if err != nil {
 		return err
