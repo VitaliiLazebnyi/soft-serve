@@ -1,16 +1,159 @@
-# yaml-language-server: $schema=https://goreleaser.com/static/schema-pro.json
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 
 version: 2
 
-includes:
-  - from_url:
-      url: charmbracelet/meta/main/goreleaser-soft-serve.yaml
+project_name: soft-serve-plus
 
-variables:
-  main: "./cmd/soft"
-  binary_name: soft
-  description: "A tasty, self-hostable Git server for the command line🍦"
-  github_url: "https://github.com/charmbracelet/soft-serve"
-  maintainer: "Ayman Bagabas <ayman@charm.sh>"
-  brew_commit_author_name: "Ayman Bagabas"
-  brew_commit_author_email: "ayman@charm.sh"
+
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
+
+before:
+  hooks:
+    - go mod tidy
+    - rm -rf completions
+    - mkdir completions
+    - rm -rf manpages
+    - mkdir manpages
+    - sh -c 'go run ./cmd/soft completion "bash" >./completions/soft.bash'
+    - sh -c 'go run ./cmd/soft completion "zsh" >./completions/soft.zsh'
+    - sh -c 'go run ./cmd/soft completion "fish" >./completions/soft.fish'
+    - sh -c 'go run ./cmd/soft man | gzip -c >./manpages/soft.1.gz'
+
+builds:
+  - binary: "soft"
+    main: "./cmd/soft"
+    env:
+      - CGO_ENABLED=0
+    ldflags: -s -w -X main.Version=v{{ .Version }} -X main.CommitSHA={{ .Commit }} -X main.CommitDate={{ .CommitDate }}
+    goos:
+      - linux
+      - darwin
+      - windows
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+      - "386"
+      - arm
+    goarm:
+      - "7"
+    ignore:
+      - goos: windows
+        goarch: arm64
+      - goos: windows
+        goarch: "386"
+      - goos: windows
+        goarm: "7"
+      - goos: freebsd
+        goarch: "386"
+      - goos: freebsd
+        goarch: arm
+
+archives:
+  - format_overrides:
+      - goos: windows
+        formats: zip
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    wrap_in_directory: true
+    files:
+      - README*
+      - LICENSE*
+      - manpages/*
+      - completions/*
+
+nfpms:
+  - vendor: "Soft Serve Plus"
+    homepage: "https://github.com/VitaliiLazebnyi/soft-serve-plus"
+    maintainer: "Vitalii Lazebnyi <18521734+VitaliiLazebnyi@users.noreply.github.com>"
+    description: "A tasty, self-hostable Git server for the command line🍦 (maintained fork of Soft Serve)"
+    license: MIT
+    file_name_template: "{{ .ConventionalFileName }}"
+    formats:
+      - apk
+      - deb
+      - rpm
+    # Both packages install /usr/bin/soft and the soft-serve systemd unit.
+    conflicts:
+      - soft-serve
+    replaces:
+      - soft-serve
+    contents:
+      - src: ./completions/soft.bash
+        dst: /etc/bash_completion.d/soft
+      - src: ./completions/soft.fish
+        dst: /usr/share/fish/vendor_completions.d/soft.fish
+      - src: ./completions/soft.zsh
+        dst: /usr/share/zsh/site-functions/_soft
+      - src: ./manpages/soft.1.gz
+        dst: /usr/share/man/man1/soft.1.gz
+      - src: ./.nfpm/soft-serve.service
+        dst: /usr/lib/systemd/system/soft-serve.service
+      - src: ./.nfpm/soft-serve.conf
+        dst: /etc/soft-serve.conf
+        type: config|noreplace
+      - src: ./.nfpm/sysusers.conf
+        dst: /usr/lib/sysusers.d/soft-serve.conf
+      - src: ./.nfpm/tmpfiles.conf
+        dst: /usr/lib/tmpfiles.d/soft-serve.conf
+    scripts:
+      postinstall: ./.nfpm/postinstall.sh
+      postremove: ./.nfpm/postremove.sh
+    dependencies:
+      - git
+      - bash
+
+checksum:
+  name_template: "checksums.txt"
+
+source:
+  enabled: true
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^test:"
+      - "^chore"
+      - "merge conflict"
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch
+      - go mod tidy
+
+dockers_v2:
+  - dockerfile: Dockerfile
+    images:
+      - ghcr.io/vitaliilazebnyi/soft-serve-plus
+    tags:
+      - "v{{ .Version }}"
+      - "{{ if not .Prerelease }}v{{ .Major }}.{{ .Minor }}{{ end }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+      - linux/arm/v7
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: "A tasty, self-hostable Git server for the command line (maintained fork of Soft Serve)"
+      org.opencontainers.image.source: "https://github.com/VitaliiLazebnyi/soft-serve-plus"
+      org.opencontainers.image.version: "v{{ .Version }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: MIT
+
+git:
+  tag_sort: semver
+
+release:
+  prerelease: auto

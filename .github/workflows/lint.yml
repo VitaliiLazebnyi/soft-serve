@@ -1,12 +1,26 @@
 name: lint
+
 on:
   push:
+    branches:
+      - "main"
   pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
 
 jobs:
   lint:
-    uses: charmbracelet/meta/.github/workflows/lint.yml@main
-    with:
-      golangci_path: .golangci.yml
-      golangci_version: latest
-      timeout: 10m
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          args: --config=.golangci.yml --timeout=10m ./...
