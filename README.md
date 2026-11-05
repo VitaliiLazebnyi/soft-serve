@@ -103,6 +103,14 @@ full privileges.
 Using this environment variable, Soft Serve Plus will create a new `admin` user that
 has full privileges. You can rename and change the user settings later.
 
+The keys are reconciled on every start, not only the first one: a key you add
+to `initial_admin_keys` later is attached to the admin user (the admin with
+the lowest id, normally the one created on first boot; if no admin exists, a
+new `admin` user is created). A key that already belongs to a non-admin user
+is left on that user, who is not promoted; a warning is logged. Removing a key
+from the config does not remove it from the database or revoke admin rights;
+use the `user` commands for that.
+
 If you'd like a repository to exist the moment the server finishes booting,
 with no human logging in to run `repo create`, set `SOFT_SERVE_DEFAULT_REPO`
 to a repository name. This is useful for GitOps tools like ArgoCD that need a

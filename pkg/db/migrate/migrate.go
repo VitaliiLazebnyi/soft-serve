@@ -91,7 +91,9 @@ func Migrate(ctx context.Context, dbx *db.DB) error {
 			}
 		}
 
-		return nil
+		// Reconcile initial_admin_keys on every run, not only on the first
+		// migration, so keys added to the config later become admin keys.
+		return syncAdminKeys(ctx, tx)
 	})
 }
 
