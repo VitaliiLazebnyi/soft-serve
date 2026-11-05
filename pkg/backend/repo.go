@@ -240,6 +240,9 @@ func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.
 
 	remote = utils.Sanitize(remote)
 	policy := RemotePolicy(d.cfg, user)
+	// The caller is acting live, so an admin key on the session counts too,
+	// as it does for every other admin check (see isServerAdmin).
+	policy.AllowAnySSHHost = d.isServerAdmin(ctx, user)
 	v, err := validateImportRemote(remote, policy)
 	if err != nil {
 		return nil, err

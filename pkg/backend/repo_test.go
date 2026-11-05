@@ -9,11 +9,14 @@ import (
 	"testing"
 	"time"
 
+	charmssh "charm.land/ssh"
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"github.com/charmbracelet/soft-serve/pkg/ssrf"
 	"github.com/matryer/is"
+	"golang.org/x/crypto/ssh"
 )
 
 // TestCreateRepositoryAnonymousOwner verifies that a repository created with
@@ -223,6 +226,57 @@ func TestImportRepositorySSHRequiresAdmin(t *testing.T) {
 	is.True(errors.Is(err, proto.ErrRepoNotFound))
 	_, err = be.Repository(ctx, "admin-ssh")
 	is.True(errors.Is(err, proto.ErrRepoNotFound))
+}
+
+// TestImportRepositorySSHAdminKey verifies that a caller whose session key is
+// listed in initial_admin_keys may import over ssh with no allowlist, whether
+// it has no account or a non-admin one, as the SSH layer's isServerAdmin
+// treats it. The same caller without the key on the context, or with any
+// other key, is still refused.
+func TestImportRepositorySSHAdminKey(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("ssh client not available")
+	}
+
+	for _, registered := range []bool{false, true} {
+		name := "anonymous"
+		if registered {
+			name = "non-admin user"
+		}
+		t.Run(name, func(t *testing.T) {
+			is := is.New(t)
+			be, cfg := newTestBackend(t)
+			ctx := backendTestContext(be, cfg)
+			is.Equal(len(cfg.SSH.AllowedHosts()), 0)
+
+			pub := newTestPublicKey(t)
+			cfg.InitialAdminKeys = append(cfg.InitialAdminKeys, sshutils.MarshalAuthorizedKey(pub))
+
+			var user proto.User
+			if registered {
+				var err error
+				user, err = be.CreateUser(ctx, "alice", proto.UserOptions{PublicKeys: []ssh.PublicKey{pub}})
+				is.NoErr(err)
+				is.True(!user.IsAdmin())
+			}
+
+			// Nothing listens on loopback port 1, so a remote that passes
+			// policy fails at the clone without touching the network.
+			remote := "ssh://git@127.0.0.1:1/x.git"
+			opts := proto.RepositoryOptions{}
+
+			_, err := be.ImportRepository(ctx, "nokey", user, remote, opts)
+			is.True(errors.Is(err, proto.ErrUnauthorized)) // no key on the context
+
+			otherCtx := context.WithValue(ctx, charmssh.ContextKeyPublicKey, newTestPublicKey(t))
+			_, err = be.ImportRepository(otherCtx, "otherkey", user, remote, opts)
+			is.True(errors.Is(err, proto.ErrUnauthorized)) // not an admin key
+
+			keyCtx := context.WithValue(ctx, charmssh.ContextKeyPublicKey, pub)
+			_, err = be.ImportRepository(keyCtx, "adminkey", user, remote, opts)
+			is.True(errors.Is(err, proto.ErrImportFailed)) // admin key passes policy
+		})
+	}
 }
 
 // TestImportRepositoryDisabled verifies that when the installed git is too
