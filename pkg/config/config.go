@@ -13,8 +13,8 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/access"
 	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"github.com/charmbracelet/soft-serve/pkg/ssrf"
+	"go.yaml.in/yaml/v4"
 	"golang.org/x/crypto/ssh"
-	"gopkg.in/yaml.v3"
 )
 
 var binPath = "soft"

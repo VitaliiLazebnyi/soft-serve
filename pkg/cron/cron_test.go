@@ -16,7 +16,7 @@ func TestCronLogger(t *testing.T) {
 	clogger := cronLogger{logger}
 	clogger.Info("foo")
 	clogger.Error(fmt.Errorf("bar"), "test")
-	if buf.String() != "DEBU foo\nERRO test err=bar\n" {
+	if buf.String() != "DEBUG foo\nERROR test err=bar\n" {
 		t.Errorf("unexpected log output: %s", buf.String())
 	}
 }
