@@ -249,13 +249,14 @@ func TestLFSUploadRejectsForgedServiceParam(t *testing.T) {
 		return w
 	}
 
-	// Baseline: anonymous read-only access cannot upload.
-	is.Equal(upload(path).Code, http.StatusForbidden)
+	// Baseline: anonymous read-only access cannot upload. It is asked for
+	// credentials (401), which git-lfs needs before it will send any.
+	is.Equal(upload(path).Code, http.StatusUnauthorized)
 
 	for _, service := range forgeableServices {
 		w := upload(path + "?service=" + service)
-		if w.Code != http.StatusForbidden {
-			t.Errorf("service=%s: got status %d, want 403: %s", service, w.Code, w.Body.String())
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("service=%s: got status %d, want 401: %s", service, w.Code, w.Body.String())
 		}
 	}
 
@@ -394,4 +395,73 @@ func TestLFSWriteStillWorksForAuthorizedUser(t *testing.T) {
 	got, err := datastore.GetLFSLockForPath(ctx, dbx, repo.ID(), "src/file.bin")
 	is.NoErr(err)
 	is.Equal(got.Path, "src/file.bin")
+}
+
+// TestLFSWriteDeniedAsksAnonymousForCredentials checks how an LFS write is
+// refused. git-lfs sends its first request without credentials and only asks
+// for them after a 401, so an anonymous caller must get a 401 with a
+// challenge; a 403 would end a push from a user whose token is in a
+// credential helper. A signed-in caller without write access still gets 403.
+func TestLFSWriteDeniedAsksAnonymousForCredentials(t *testing.T) {
+	ctx, be, _ := newLFSTestContext(t)
+
+	owner, err := be.CreateUser(ctx, "owner", proto.UserOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := be.CreateRepository(ctx, "public-repo", owner, proto.RepositoryOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := be.CreateUser(ctx, "reader", proto.UserOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := be.CreateAccessToken(ctx, reader, "test", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	router := lfsTestRouter(ctx)
+	oid := strings.Repeat("b", 64)
+	requests := []struct {
+		name, method, path, body string
+	}{
+		{
+			"batch upload", http.MethodPost, "/public-repo.git/info/lfs/objects/batch",
+			`{"operation":"upload","objects":[{"oid":"` + oid + `","size":1}]}`,
+		},
+		{"basic upload", http.MethodPut, "/public-repo.git/info/lfs/objects/basic/" + oid, "x"},
+		{
+			"lock create", http.MethodPost, "/public-repo.git/info/lfs/locks",
+			`{"path":"a.bin","ref":{"name":"refs/heads/main"}}`,
+		},
+	}
+	for _, rq := range requests {
+		for _, caller := range []struct {
+			name       string
+			auth       string
+			wantStatus int
+		}{
+			{"anonymous", "", http.StatusUnauthorized},
+			{"reader", "token " + token, http.StatusForbidden},
+		} {
+			t.Run(rq.name+"/"+caller.name, func(t *testing.T) {
+				req := httptest.NewRequestWithContext(ctx, rq.method, rq.path, strings.NewReader(rq.body))
+				req.Header.Set("Accept", lfs.MediaType)
+				req.Header.Set("Content-Type", lfs.MediaType)
+				if caller.auth != "" {
+					req.Header.Set("Authorization", caller.auth)
+				}
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+				if w.Code != caller.wantStatus {
+					t.Fatalf("got status %d, want %d: %s", w.Code, caller.wantStatus, w.Body.String())
+				}
+				challenged := w.Header().Get("WWW-Authenticate") != ""
+				if anonymous := caller.auth == ""; challenged != anonymous {
+					t.Errorf("WWW-Authenticate set=%v, want %v", challenged, anonymous)
+				}
+			})
+		}
+	}
 }
