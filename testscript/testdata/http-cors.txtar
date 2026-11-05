@@ -31,7 +31,14 @@ git -c init.defaultBranch=master -C repo2 init
 mkfile ./repo2/README.md '# Project\nfoo'
 mkfile ./repo2/foo.png 'foo'
 mkfile ./repo2/bar.png 'bar'
-git -C repo2 remote add origin http://$TOKEN@localhost:$HTTP_PORT/repo2
+# Pass the token through a credential helper, not the URL. Git on some
+# platforms (Homebrew git on macOS) thinks a URL with credentials was
+# redirected, drops them, and fails the push. The empty helper first clears
+# helpers from the system config (e.g. osxkeychain), so the token is never
+# stored outside the test.
+git -C repo2 remote add origin http://localhost:$HTTP_PORT/repo2
+git -C repo2 config credential.helper ''
+git -C repo2 config --add credential.helper '!f() { echo username=soft; echo password='$TOKEN'; }; f'
 git -C repo2 lfs install --local
 git -C repo2 lfs track '*.png'
 git -C repo2 add -A

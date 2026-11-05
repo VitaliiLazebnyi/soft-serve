@@ -485,12 +485,22 @@ ssh -p 23231 localhost token create --expires-in 1y 'my other token'
 ss_98fghi1234abc56789012345678901234de246d7
 ```
 
-Now you can access to repos that require `read-write` access.
+Now you can access repos that require `read-write` access. Give git the token
+as the password (any username works) through a credential helper, so it is
+not stored in the remote URL:
 
 ```sh
-git clone http://ss_98fghi1234abc56789012345678901234de246d7@localhost:23232/my-private-repo.git my-private-repo
+git clone http://localhost:23232/my-private-repo.git my-private-repo
+# When prompted, enter any username and the token as the password.
+# Your credential helper (e.g. osxkeychain, manager, libsecret) remembers it.
 # Make changes and push
 ```
+
+You can also put the token in the URL as the username
+(`http://ss_98fg…@localhost:23232/my-private-repo.git`), but avoid it: the URL
+ends up in `.git/config` and shell history, and some git builds (for example
+Homebrew git on macOS) drop credentials embedded in the URL and then fail to
+push.
 
 ### Authorization
 
