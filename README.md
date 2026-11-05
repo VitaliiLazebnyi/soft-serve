@@ -74,7 +74,8 @@ go install ./cmd/soft
 > [!NOTE]
 > Packages named `soft-serve` from Homebrew, Apt/Yum, Winget, Arch, Nix or
 > Docker Hub install the original Soft Serve, without the changes in this fork.
-> The Soft Serve Plus packages replace them in place.
+> The Soft Serve Plus `.deb`, `.rpm` and `.apk` packages replace the original
+> `soft-serve` package; for other installs, remove the original first.
 
 ## Setting up a server
 
@@ -133,11 +134,11 @@ Once you start the server for the first time, the settings will be in
 self-explanatory and will look like this:
 
 ```yaml
-# Soft Serve Server configurations
+# Soft Serve Plus Server configurations
 
 # The name of the server.
 # This is the name that will be displayed in the UI.
-name: "Soft Serve"
+name: "Soft Serve Plus"
 
 # Log format to use. Valid values are "json", "logfmt", and "text".
 log_format: "text"
@@ -840,7 +841,7 @@ else
         newrev_type=$(git cat-file -t $newrev)
 fi
 
-echo "Hi from Soft Serve update hook!"
+echo "Hi from Soft Serve Plus update hook!"
 echo
 echo "RefName: $refname"
 echo "Change Type: $newrev_type"
