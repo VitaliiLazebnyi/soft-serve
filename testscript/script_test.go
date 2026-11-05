@@ -157,7 +157,12 @@ func TestScript(t *testing.T) {
 			// Every git process the script starts, the server's included,
 			// creates "master" as the default branch, whatever the machine's
 			// git config says (Apple's git ships init.defaultBranch=main).
-			// Config from the environment overrides system and global config.
+			// System and global config are not read at all, so nothing else
+			// from the machine (credential helpers, signing, hooksPath, ...)
+			// leaks in either. The branch is still pinned explicitly because
+			// git's own default is moving from "master" to "main".
+			e.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+			e.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 			e.Setenv("GIT_CONFIG_COUNT", "1")
 			e.Setenv("GIT_CONFIG_KEY_0", "init.defaultBranch")
 			e.Setenv("GIT_CONFIG_VALUE_0", "master")
