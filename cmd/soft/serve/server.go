@@ -239,9 +239,6 @@ func (s *Server) Start() error {
 
 // Shutdown lets the server gracefully shutdown.
 func (s *Server) Shutdown(ctx context.Context) error {
-	// The errgroup below shadows ctx and is cancelled once Wait returns, so
-	// keep the caller's deadline for waiting on webhook deliveries.
-	deadline := ctx
 	errg, ctx := errgroup.WithContext(ctx)
 	errg.Go(func() error {
 		return s.GitDaemon.Shutdown(ctx)
@@ -268,8 +265,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	// The servers have stopped, so no new deliveries start. Let the ones
-	// already running finish within the shutdown deadline.
-	s.Backend.WaitForDeliveries(deadline)
+	// already running finish within their own budget, which is separate from
+	// the caller's drain deadline for the HTTP and SSH servers.
+	dctx, cancel := context.WithTimeout(context.Background(), backend.ShutdownDeliveryTimeout)
+	defer cancel()
+	s.Backend.WaitForDeliveries(dctx)
 	return nil
 }
 

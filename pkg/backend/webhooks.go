@@ -388,8 +388,18 @@ func dedupeEvents(events []webhook.Event) []webhook.Event {
 }
 
 // webhookSendTimeout bounds how long the deliveries of one event may take,
-// including waiting on slow receivers.
+// including waiting on slow receivers. Hooks of one event are sent one after
+// another under this bound, and each request is capped at 30s by the HTTP
+// client in pkg/ssrf. Two receivers that hit that cap therefore fit in the
+// bound. A smaller bound would cut off the later hooks of an event after one
+// slow receiver, so it stays at a minute.
 const webhookSendTimeout = time.Minute
+
+// ShutdownDeliveryTimeout is how long shutdown waits for deliveries that are
+// already running. It equals webhookSendTimeout, so a delivery that started
+// before shutdown can run to its own bound. The shorter HTTP and SSH drain
+// does not apply to it: a drain that stops early abandons the delivery.
+const ShutdownDeliveryTimeout = webhookSendTimeout
 
 // sendAfterChange sends the webhook event for a change that is already
 // committed. The subscribers are read now and the deliveries run in the

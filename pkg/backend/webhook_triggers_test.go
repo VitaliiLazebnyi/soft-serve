@@ -230,6 +230,15 @@ func TestWaitForDeliveriesCompletesBackgroundSends(t *testing.T) {
 	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
 }
 
+// A delivery that starts before shutdown must be able to finish within the
+// shutdown budget. The per-request HTTP timeout is 30s (pkg/ssrf), and one
+// event may take up to webhookSendTimeout across its hooks.
+func TestShutdownDeliveryBudgetCoversSendTimeout(t *testing.T) {
+	is := is.New(t)
+	is.True(webhookSendTimeout >= 30*time.Second)
+	is.True(ShutdownDeliveryTimeout >= webhookSendTimeout)
+}
+
 // Once shutdown has started waiting, a change made by a request that is still
 // running is committed, but its event is skipped rather than added to the
 // deliveries being waited on.
