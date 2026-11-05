@@ -18,7 +18,7 @@ func TestRepositoryReflectsDatabase(t *testing.T) {
 	be, _ := newTestBackend(t)
 	ctx := context.Background()
 
-	_, err := be.CreateRepository(ctx, "repo", nil, proto.RepositoryOptions{})
+	_, err := seedCreate(be, ctx, "repo", nil, proto.RepositoryOptions{})
 	is.NoErr(err)
 	is.Equal(be.AccessLevelForUser(ctx, "repo", nil), access.ReadOnlyAccess)
 

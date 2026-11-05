@@ -21,8 +21,16 @@ import (
 // users and repositories.
 //
 // No user is attached to the returned context; use withUser to authenticate
-// as somebody.
+// as somebody. Admin-only creation is on, as the restricted policy is what
+// these tests exercise.
 func newAuthTestContext(t *testing.T) (context.Context, *backend.Backend) {
+	t.Helper()
+	return newAuthTestContextWith(t, func(c *config.Config) { c.AdminOnlyCreate = true })
+}
+
+// newAuthTestContextWith is newAuthTestContext with a hook to adjust the
+// config before the backend is built, for example to set a flag.
+func newAuthTestContextWith(t *testing.T, tweak func(*config.Config)) (context.Context, *backend.Backend) {
 	t.Helper()
 	is := is.New(t)
 	ctx := context.Background()
@@ -32,6 +40,9 @@ func newAuthTestContext(t *testing.T) (context.Context, *backend.Backend) {
 	cfg.DataPath = dp
 	cfg.DB.Driver = "sqlite"
 	cfg.DB.DataSource = dp + "/test.db?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	if tweak != nil {
+		tweak(cfg)
+	}
 
 	ctx = config.WithContext(ctx, cfg)
 	dbx, err := db.Open(ctx, cfg.DB.Driver, cfg.DB.DataSource)
@@ -89,4 +100,15 @@ func runUser(t *testing.T, ctx context.Context, args ...string) error {
 	c.SetErr(&errBuf)
 	c.SetArgs(args)
 	return c.ExecuteContext(ctx)
+}
+
+// seedCreate creates a fixture repository while admin-only creation is off,
+// so tests can set up owners without the create policy in the way. Tests that
+// exercise the policy go through the CLI commands instead.
+func seedCreate(be *backend.Backend, ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
+	cfg := config.FromContext(ctx)
+	prev := cfg.AdminOnlyCreate
+	cfg.AdminOnlyCreate = false
+	defer func() { cfg.AdminOnlyCreate = prev }()
+	return be.CreateRepository(ctx, name, user, opts)
 }

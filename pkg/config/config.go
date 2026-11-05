@@ -222,6 +222,15 @@ type Config struct {
 	// A nil value means "no override": fall back to the database.
 	AllowKeyless *bool `env:"ALLOW_KEYLESS" yaml:"allow_keyless"`
 
+	// AdminOnlyCreate restricts repository creation to server admins.
+	//
+	// When true, registered non-admins and anonymous users get read-only on
+	// repository names that do not exist yet, so repo create, repo import,
+	// push-to-create and rename-to-a-new-name are refused. Existing
+	// repositories are not affected. When false (the default), access follows
+	// upstream Soft Serve: registered users may create repositories.
+	AdminOnlyCreate bool `env:"ADMIN_ONLY_CREATE" yaml:"admin_only_create"`
+
 	// DefaultRepo is a repository name to create on boot if it does not
 	// already exist. Leave empty to disable.
 	DefaultRepo string `env:"DEFAULT_REPO" yaml:"default_repo"`
@@ -290,6 +299,8 @@ func (c *Config) Environ() []string {
 	if c.AllowKeyless != nil {
 		envs = append(envs, fmt.Sprintf("SOFT_SERVE_ALLOW_KEYLESS=%t", *c.AllowKeyless))
 	}
+
+	envs = append(envs, fmt.Sprintf("SOFT_SERVE_ADMIN_ONLY_CREATE=%t", c.AdminOnlyCreate))
 
 	return envs
 }

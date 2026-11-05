@@ -78,7 +78,7 @@ func TestSetDescriptionHidesFilesystemError(t *testing.T) {
 	be, cfg := newTestBackend(t)
 	ctx := context.Background()
 
-	_, err := be.CreateRepository(ctx, "repo", nil, proto.RepositoryOptions{})
+	_, err := seedCreate(be, ctx, "repo", nil, proto.RepositoryOptions{})
 	is.NoErr(err)
 
 	// Make the description path unwritable by turning it into a directory.

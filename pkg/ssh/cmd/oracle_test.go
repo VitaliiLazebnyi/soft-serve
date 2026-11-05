@@ -93,7 +93,7 @@ func setupSecretRepo(t *testing.T) (context.Context, context.Context, *backend.B
 	is := is.New(t)
 	ctx, be := newAuthTestContext(t)
 	ownerCtx := withUser(t, ctx, be, "owner", false)
-	_, err := be.CreateRepository(ownerCtx, "secret", proto.UserFromContext(ownerCtx), proto.RepositoryOptions{Private: true})
+	_, err := seedCreate(be, ownerCtx, "secret", proto.UserFromContext(ownerCtx), proto.RepositoryOptions{Private: true})
 	is.NoErr(err)
 	_ = withUser(t, ctx, be, "someone", false)
 	return ctx, ownerCtx, be
@@ -131,7 +131,7 @@ func TestNoAccessCollaboratorCannotTellPrivateFromMissing(t *testing.T) {
 func TestReaderGetsUnauthorizedForWrites(t *testing.T) {
 	ctx, be := newAuthTestContext(t)
 	ownerCtx := withUser(t, ctx, be, "owner", false)
-	_, err := be.CreateRepository(ownerCtx, "public", proto.UserFromContext(ownerCtx), proto.RepositoryOptions{})
+	_, err := seedCreate(be, ownerCtx, "public", proto.UserFromContext(ownerCtx), proto.RepositoryOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestAdminCanDeleteOrphanedRepository(t *testing.T) {
 	is := is.New(t)
 	ctx, be := newAuthTestContext(t)
 	adminCtx := withUser(t, ctx, be, "root", true)
-	_, err := be.CreateRepository(adminCtx, "orphan", proto.UserFromContext(adminCtx), proto.RepositoryOptions{})
+	_, err := seedCreate(be, adminCtx, "orphan", proto.UserFromContext(adminCtx), proto.RepositoryOptions{})
 	is.NoErr(err)
 
 	cfg := config.FromContext(ctx)
@@ -194,9 +194,9 @@ func TestRenameDestinationIsGatedLikeCreate(t *testing.T) {
 	ctx, be := newAuthTestContext(t)
 	ownerCtx := withUser(t, ctx, be, "owner", false)
 	otherCtx := withUser(t, ctx, be, "other", false)
-	_, err := be.CreateRepository(ownerCtx, "mine", proto.UserFromContext(ownerCtx), proto.RepositoryOptions{})
+	_, err := seedCreate(be, ownerCtx, "mine", proto.UserFromContext(ownerCtx), proto.RepositoryOptions{})
 	is.NoErr(err)
-	_, err = be.CreateRepository(otherCtx, "theirs", proto.UserFromContext(otherCtx), proto.RepositoryOptions{})
+	_, err = seedCreate(be, otherCtx, "theirs", proto.UserFromContext(otherCtx), proto.RepositoryOptions{})
 	is.NoErr(err)
 
 	renameErr := runRepo(t, ownerCtx, "rename", "mine", "theirs")
@@ -204,8 +204,8 @@ func TestRenameDestinationIsGatedLikeCreate(t *testing.T) {
 	is.True(errors.Is(renameErr, proto.ErrUnauthorized))
 	is.Equal(renameErr, createErr)
 
-	// The gate for the source does not leak into the destination check.
-	is.NoErr(runRepo(t, ownerCtx, "rename", "mine", "renamed"))
+	// Renaming to a new name is a create, so with admin-only creation on a non-admin is refused.
+	is.True(errors.Is(runRepo(t, ownerCtx, "rename", "mine", "renamed"), proto.ErrUnauthorized))
 	_, err = be.Repository(ctx, "renamed")
-	is.NoErr(err)
+	is.True(err != nil)
 }

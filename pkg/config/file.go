@@ -174,6 +174,11 @@ jobs:
 #initial_admin_keys:
 #  - "ssh-rsa AAAAB3NzaC1yc2..."
 
+# Only server admins may create repositories. Registered non-admins and
+# anonymous users cannot create, import or rename to a new name. Existing
+# repositories are not affected. Defaults to false.
+#admin_only_create: false
+
 # Name of a repository to create automatically on boot if it doesn't already
 # exist. Empty disables this behavior.
 #default_repo: ""

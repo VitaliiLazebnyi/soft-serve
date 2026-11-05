@@ -27,7 +27,7 @@ func TestCreateRepositoryAnonymousOwner(t *testing.T) {
 	admin, err := be.User(ctx, "admin")
 	is.NoErr(err)
 
-	repo, err := be.CreateRepository(ctx, "anon-repo", nil, proto.RepositoryOptions{})
+	repo, err := seedCreate(be, ctx, "anon-repo", nil, proto.RepositoryOptions{})
 	is.NoErr(err)
 	is.Equal(repo.UserID(), admin.ID())
 }
@@ -141,7 +141,7 @@ func TestImportRepositoryCloneFailure(t *testing.T) {
 	}
 	resc := make(chan result, 1)
 	go func() {
-		r, err := be.ImportRepository(ctx, "broken", admin, "ssh://127.0.0.1:1/x.git", proto.RepositoryOptions{})
+		r, err := seedImport(be, ctx, "broken", admin, "ssh://127.0.0.1:1/x.git", proto.RepositoryOptions{})
 		resc <- result{r, err}
 	}()
 
@@ -194,15 +194,15 @@ func TestImportRepositorySSHRequiresAdmin(t *testing.T) {
 		"git@10.0.0.1:x.git",
 		"[git@10.0.0.1:2222]:x.git",
 	} {
-		_, err = be.ImportRepository(ctx, "tenant-ssh", user, remote, proto.RepositoryOptions{})
+		_, err = seedImport(be, ctx, "tenant-ssh", user, remote, proto.RepositoryOptions{})
 		is.True(errors.Is(err, proto.ErrUnauthorized)) // remote
 	}
 
-	_, err = be.ImportRepository(ctx, "tenant-ssh", nil, "ssh://git@10.0.0.1/x.git", proto.RepositoryOptions{})
+	_, err = seedImport(be, ctx, "tenant-ssh", nil, "ssh://git@10.0.0.1/x.git", proto.RepositoryOptions{})
 	is.True(errors.Is(err, proto.ErrUnauthorized))
 
 	// An ssh LFS endpoint is subject to the same policy as the remote.
-	_, err = be.ImportRepository(ctx, "tenant-ssh", user, "https://1.1.1.1/x.git", proto.RepositoryOptions{LFSEndpoint: "ssh://git@10.0.0.1/x.git"})
+	_, err = seedImport(be, ctx, "tenant-ssh", user, "https://1.1.1.1/x.git", proto.RepositoryOptions{LFSEndpoint: "ssh://git@10.0.0.1/x.git"})
 	is.True(errors.Is(err, proto.ErrUnauthorized))
 
 	// An allowlist entry that does not cover the host is refused for
@@ -212,10 +212,10 @@ func TestImportRepositorySSHRequiresAdmin(t *testing.T) {
 	is.NoErr(err)
 	cfg.SSH.ClientAllowedHosts = []string{"git.internal.example"}
 	is.NoErr(cfg.Validate())
-	_, err = be.ImportRepository(ctx, "admin-ssh", admin, "ssh://git@10.0.0.1/x.git", proto.RepositoryOptions{})
+	_, err = seedImport(be, ctx, "admin-ssh", admin, "ssh://git@10.0.0.1/x.git", proto.RepositoryOptions{})
 	is.True(errors.Is(err, proto.ErrInvalidRemote))
 	is.True(errors.Is(err, ssrf.ErrSSHHostNotAllowed))
-	_, err = be.ImportRepository(ctx, "tenant-ssh", user, "ssh://git@10.0.0.1/x.git", proto.RepositoryOptions{})
+	_, err = seedImport(be, ctx, "tenant-ssh", user, "ssh://git@10.0.0.1/x.git", proto.RepositoryOptions{})
 	is.True(errors.Is(err, proto.ErrInvalidRemote))
 
 	// Nothing was created along the way.
@@ -261,7 +261,7 @@ func TestImportRepositoryDisabled(t *testing.T) {
 				return
 			}
 
-			_, err = be.ImportRepository(ctx, "gated", admin, "https://1.1.1.1/x.git", proto.RepositoryOptions{})
+			_, err = seedImport(be, ctx, "gated", admin, "https://1.1.1.1/x.git", proto.RepositoryOptions{})
 			is.True(errors.Is(err, proto.ErrImportsDisabled))
 			// The reason is for the operator, not the user.
 			is.Equal(err.Error(), proto.ErrImportsDisabled.Error())

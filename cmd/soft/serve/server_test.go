@@ -98,6 +98,21 @@ func TestEnsureDefaultRepoDisabled(t *testing.T) {
 	is.Equal(len(repos), 0)
 }
 
+// With admin-only creation on, the boot-time default repository is still
+// created: it is attributed to the database admin (user 1), who may create.
+func TestEnsureDefaultRepoCreatesWhenAdminOnly(t *testing.T) {
+	is := is.New(t)
+	ctx, cfg, be := setupTestBackend(t)
+
+	cfg.AdminOnlyCreate = true
+	cfg.DefaultRepo = "gitops"
+	ensureDefaultRepo(ctx, cfg, be, log.New(os.Stderr))
+
+	r, err := be.Repository(ctx, "gitops")
+	is.NoErr(err)
+	is.Equal(r.Name(), "gitops")
+}
+
 func TestEnsureDefaultRepoCreatesWhenMissing(t *testing.T) {
 	is := is.New(t)
 	ctx, cfg, be := setupTestBackend(t)

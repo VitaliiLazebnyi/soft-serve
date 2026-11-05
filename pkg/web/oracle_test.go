@@ -46,6 +46,10 @@ func newOracleFixture(t *testing.T) *oracleFixture {
 	_, err = be.CreateRepository(ctx, "secret", owner, proto.RepositoryOptions{Private: true})
 	is.NoErr(err)
 
+	// These oracle cases run with admin-only creation on. It is set after the
+	// fixture repository exists, so that fixture is created as upstream does.
+	cfg.AdminOnlyCreate = true
+
 	stranger, err := be.CreateUser(ctx, "stranger", proto.UserOptions{})
 	is.NoErr(err)
 	token, err := be.CreateAccessToken(ctx, stranger, "t", time.Now().Add(time.Hour))
@@ -121,13 +125,14 @@ func TestReceivePackDoesNotRevealPrivateRepositories(t *testing.T) {
 	is.True(err != nil)
 
 	// A signed-in user's push to a private repository they cannot read is
-	// a 404, the same as every other unreadable repository, while a push
-	// to a new name still creates it.
+	// a 404, the same as every other unreadable repository. With admin-only
+	// creation on, a non-admin's push to a new name is refused the same way and
+	// creates nothing.
 	is.Equal(f.do(http.MethodGet, "/secret.git/info/refs?service=git-receive-pack", auth).Code, http.StatusNotFound)
 	is.Equal(f.do(http.MethodPost, "/secret.git/git-receive-pack", auth).Code, http.StatusNotFound)
-	is.Equal(f.do(http.MethodGet, "/ghost.git/info/refs?service=git-receive-pack", auth).Code, http.StatusOK)
+	is.Equal(f.do(http.MethodGet, "/ghost.git/info/refs?service=git-receive-pack", auth).Code, http.StatusNotFound)
 	_, err = f.be.Repository(f.ctx, "ghost")
-	is.NoErr(err)
+	is.True(err != nil)
 }
 
 // TestReceivePackReaderIsForbidden verifies a caller who can read but not
