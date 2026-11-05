@@ -21,8 +21,16 @@ import (
 // users and repositories.
 //
 // No user is attached to the returned context; use withUser to authenticate
-// as somebody.
+// as somebody. AdminOnlyCreate is left at its default (off); use
+// newAuthTestContextWith to turn it on.
 func newAuthTestContext(t *testing.T) (context.Context, *backend.Backend) {
+	t.Helper()
+	return newAuthTestContextWith(t, nil)
+}
+
+// newAuthTestContextWith is newAuthTestContext with a hook to adjust the
+// config before the backend is built, for example to set a flag.
+func newAuthTestContextWith(t *testing.T, tweak func(*config.Config)) (context.Context, *backend.Backend) {
 	t.Helper()
 	is := is.New(t)
 	ctx := context.Background()
@@ -31,7 +39,10 @@ func newAuthTestContext(t *testing.T) (context.Context, *backend.Backend) {
 	cfg := config.DefaultConfig()
 	cfg.DataPath = dp
 	cfg.DB.Driver = "sqlite"
-	cfg.DB.DataSource = dp + "/test.db"
+	cfg.DB.DataSource = dp + "/test.db?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	if tweak != nil {
+		tweak(cfg)
+	}
 
 	ctx = config.WithContext(ctx, cfg)
 	dbx, err := db.Open(ctx, cfg.DB.Driver, cfg.DB.DataSource)

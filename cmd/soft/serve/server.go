@@ -157,14 +157,16 @@ func ensureDefaultRepo(ctx context.Context, cfg *config.Config, be *backend.Back
 	}
 
 	// The migration always inserts a user at ID 1. The repos table requires
-	// a non-null owner, so we attribute the repo to that account.
+	// a non-null owner, so we attribute the repo to that account. This is the
+	// server's own bootstrap, not a user request, so it is not subject to
+	// admin_only_create even if that account is no longer an admin.
 	owner, err := be.UserByID(ctx, 1)
 	if err != nil {
 		logger.Warn("failed to look up default repo owner, skipping", "name", name, "err", err)
 		return
 	}
 
-	switch _, err := be.CreateRepository(ctx, name, owner, proto.RepositoryOptions{}); {
+	switch _, err := be.CreateSystemRepository(ctx, name, owner, proto.RepositoryOptions{}); {
 	case errors.Is(err, proto.ErrRepoExist):
 		logger.Warn("default repo directory exists without a database row, skipping", "name", name)
 	case err != nil:
@@ -237,8 +239,11 @@ func (s *Server) Start() error {
 	return errg.Wait()
 }
 
-// Shutdown lets the server gracefully shutdown.
-func (s *Server) Shutdown(ctx context.Context) error {
+// Shutdown lets the server gracefully shutdown. The servers drain within ctx.
+// The background webhook deliveries are then waited for within their own
+// budget, backend.ShutdownDeliveryTimeout, or until abort is done, whichever
+// comes first.
+func (s *Server) Shutdown(ctx context.Context, abort context.Context) error {
 	errg, ctx := errgroup.WithContext(ctx)
 	errg.Go(func() error {
 		return s.GitDaemon.Shutdown(ctx)
@@ -260,7 +265,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return nil
 	})
 	// defer s.DB.Close() // nolint: errcheck
-	return errg.Wait()
+	err := errg.Wait()
+
+	// Always wait for the deliveries, even when a server failed to stop:
+	// the queue is closed here so no new delivery starts, and the ones
+	// already queued or running get their own budget, which is separate from
+	// the caller's drain deadline for the HTTP and SSH servers.
+	dctx, cancel := context.WithTimeout(abort, backend.ShutdownDeliveryTimeout)
+	defer cancel()
+	s.Backend.WaitForDeliveries(dctx)
+	return err
 }
 
 // Close closes the SSH server.

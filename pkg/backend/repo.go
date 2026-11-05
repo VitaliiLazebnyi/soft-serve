@@ -62,10 +62,40 @@ func redactRemote(remote string) string {
 	return u.Redacted()
 }
 
+// checkCanCreate refuses the creation of a new repository name by user when
+// AdminOnlyCreate is set and the caller is not a server admin (see
+// isServerAdmin). It is the backend's own guard, so a caller that skips the
+// SSH and web access checks still cannot create. A nil user without an admin
+// key is anonymous and is refused the same way.
+func (d *Backend) checkCanCreate(ctx context.Context, user proto.User) error {
+	if !d.cfg.AdminOnlyCreate {
+		return nil
+	}
+	if d.isServerAdmin(ctx, user) {
+		return nil
+	}
+	return proto.ErrUnauthorized
+}
+
 // CreateRepository creates a new repository.
 //
 // It implements backend.Backend.
 func (d *Backend) CreateRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
+	if err := d.checkCanCreate(ctx, user); err != nil {
+		return nil, err
+	}
+	return d.createRepository(ctx, name, user, opts)
+}
+
+// CreateSystemRepository creates a repository on the server's own behalf,
+// attributed to user. It is not subject to AdminOnlyCreate, so it is only for
+// internal bootstrap (such as default_repo on boot) and must never be reached
+// from a user request.
+func (d *Backend) CreateSystemRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
+	return d.createRepository(ctx, name, user, opts)
+}
+
+func (d *Backend) createRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
 	name = utils.SanitizeRepo(name)
 	if err := utils.ValidateRepo(name); err != nil {
 		return nil, err
@@ -193,9 +223,13 @@ func (d *Backend) defaultAdminUserID(ctx context.Context, tx *db.Tx) (int64, err
 }
 
 // ImportRepository imports a repository from remote.
-func (d *Backend) ImportRepository(_ context.Context, name string, user proto.User, remote string, opts proto.RepositoryOptions) (proto.Repository, error) {
+func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.User, remote string, opts proto.RepositoryOptions) (proto.Repository, error) {
 	name = utils.SanitizeRepo(name)
 	if err := utils.ValidateRepo(name); err != nil {
+		return nil, err
+	}
+
+	if err := d.checkCanCreate(ctx, user); err != nil {
 		return nil, err
 	}
 
@@ -254,8 +288,8 @@ func (d *Backend) ImportRepository(_ context.Context, name string, user proto.Us
 
 	// The import runs on the backend's context rather than the caller's so a
 	// dropped session does not leave a half-cloned repository behind.
-	ctx := proto.WithUserContext(d.ctx, user)
-	r, err := d.importRepository(ctx, user, imp)
+	importCtx := proto.WithUserContext(d.ctx, user)
+	r, err := d.importRepository(importCtx, user, imp)
 	if err != nil {
 		// The real error is logged where it happened. The caller gets a
 		// fixed message so a failed import cannot be used to probe hosts
@@ -359,9 +393,8 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 	name = utils.SanitizeRepo(name)
 	rp := d.repoPath(name)
 
-	// Build the webhook event before deleting so it can be sent after. A
-	// repository whose directory is gone has no event, but its database row
-	// still has to go.
+	// Build the webhook event before deleting. A repository whose directory is
+	// gone has no event, but its database row still has to go.
 	var wh *webhook.RepositoryEvent
 	r, err := d.Repository(ctx, name)
 	switch {
@@ -373,6 +406,19 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 		wh = &ev
 	case !errors.Is(err, proto.ErrRepoNotFound):
 		return err
+	}
+
+	// The subscribers must be read before the rows are removed: the webhooks
+	// are gone after the delete. A failure to read them is logged and does not
+	// stop the delete.
+	var hooks []models.Webhook
+	if wh != nil {
+		subs, subErr := webhook.Subscribers(ctx, *wh)
+		if subErr != nil {
+			d.logEventNotDelivered(*wh, subErr)
+		} else {
+			hooks = subs
+		}
 	}
 
 	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
@@ -407,6 +453,12 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 			}
 		}
 
+		// Remove the webhooks and their rows explicitly, so none are left
+		// behind whether or not the connection enforces foreign keys.
+		if err := d.deleteRepoWebhookRows(ctx, tx, repom.ID); err != nil {
+			return db.WrapError(err)
+		}
+
 		if err := d.store.DeleteRepoByName(ctx, tx, name); err != nil {
 			return db.WrapError(err)
 		}
@@ -416,11 +468,14 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 		return wrapRepoError(err)
 	}
 
-	if wh == nil {
-		return nil
+	// The repository is gone, so its event is delivered without recording
+	// deliveries: they would refer to webhooks that no longer exist. The
+	// receiver's outcome is only logged, not returned, so it cannot undo the delete.
+	if wh != nil {
+		d.deliverAfterChange(ctx, hooks, *wh, false)
 	}
 
-	return webhook.SendEvent(ctx, *wh)
+	return nil
 }
 
 // RenameRepository renames a repository.
@@ -439,6 +494,12 @@ func (d *Backend) RenameRepository(ctx context.Context, oldName string, newName 
 
 	if oldName == newName {
 		return nil
+	}
+
+	// Renaming onto a new name creates it, so it needs the same permission.
+	// The caller is the user and public key on the context.
+	if err := d.checkCanCreate(ctx, proto.UserFromContext(ctx)); err != nil {
+		return err
 	}
 
 	op := d.repoPath(oldName)
@@ -472,18 +533,22 @@ func (d *Backend) RenameRepository(ctx context.Context, oldName string, newName 
 		return wrapRepoError(err)
 	}
 
+	// The rename is committed, so an event problem is logged, not returned.
 	user := proto.UserFromContext(ctx)
 	repo, err := d.Repository(ctx, newName)
 	if err != nil {
-		return err
+		d.logger.Error("rename committed but webhook event skipped", "repo", newName, "err", err)
+		return nil
 	}
 
 	wh, err := webhook.NewRepositoryEvent(ctx, user, repo, webhook.RepositoryEventActionRename)
 	if err != nil {
-		return err
+		d.logger.Error("rename committed but webhook event skipped", "repo", newName, "err", err)
+		return nil
 	}
 
-	return webhook.SendEvent(ctx, wh)
+	d.sendAfterChange(ctx, wh)
+	return nil
 }
 
 // Repositories returns a list of repositories per page.
@@ -794,17 +859,21 @@ func (d *Backend) SetPrivate(ctx context.Context, name string, private bool) err
 		return nil
 	}
 
+	// The change is committed, so an event problem is logged, not returned.
 	repo, err := d.Repository(ctx, name)
 	if err != nil {
-		return err
+		d.logger.Error("visibility change committed but webhook event skipped", "repo", name, "err", err)
+		return nil
 	}
 
 	wh, err := webhook.NewRepositoryEvent(ctx, proto.UserFromContext(ctx), repo, webhook.RepositoryEventActionVisibilityChange)
 	if err != nil {
-		return err
+		d.logger.Error("visibility change committed but webhook event skipped", "repo", name, "err", err)
+		return nil
 	}
 
-	return webhook.SendEvent(ctx, wh)
+	d.sendAfterChange(ctx, wh)
+	return nil
 }
 
 // SetProjectName sets the project name of a repository.

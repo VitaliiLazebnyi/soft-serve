@@ -194,7 +194,8 @@ func webhookUpdateCommand() *cobra.Command {
 
 			newURL := wh.URL
 			if url != "" {
-				newURL = url
+				// Normalise the same way create does.
+				newURL = strings.TrimSpace(utils.Sanitize(url))
 			}
 
 			newSecret := wh.Secret

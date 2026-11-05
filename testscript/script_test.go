@@ -3,13 +3,13 @@ package testscript
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,13 +35,15 @@ var (
 	binPath string
 )
 
+// PrepareBuildCommand builds the soft binary under test. The webhooktest tag
+// lets the tests send webhooks to a local receiver; see newWebhookReceiver.
 func PrepareBuildCommand(binPath string) *exec.Cmd {
 	_, disableRaceSet := os.LookupEnv("SOFT_SERVE_DISABLE_RACE_CHECKS")
 	if disableRaceSet {
 		// don't add the -race flag
-		return exec.Command("go", "build", "-cover", "-o", binPath, filepath.Join("..", "cmd", "soft")) //nolint:noctx
+		return exec.Command("go", "build", "-tags", "webhooktest", "-cover", "-o", binPath, filepath.Join("..", "cmd", "soft")) //nolint:noctx
 	}
-	return exec.Command("go", "build", "-race", "-cover", "-o", binPath, filepath.Join("..", "cmd", "soft")) //nolint:noctx
+	return exec.Command("go", "build", "-tags", "webhooktest", "-race", "-cover", "-o", binPath, filepath.Join("..", "cmd", "soft")) //nolint:noctx
 }
 
 func TestMain(m *testing.M) {
@@ -105,6 +108,7 @@ func TestScript(t *testing.T) {
 			"readfile":               cmdReadfile,
 			"dos2unix":               cmdDos2Unix,
 			"new-webhook":            cmdNewWebhook,
+			"webhook-received":       cmdWebhookReceived,
 			"ensureserverrunning":    cmdEnsureServerRunning,
 			"ensureservernotrunning": cmdEnsureServerNotRunning,
 			"stopserver":             cmdStopserver,
@@ -114,6 +118,13 @@ func TestScript(t *testing.T) {
 		Setup: func(e *testscript.Env) error {
 			// Add binPath to PATH
 			e.Setenv("PATH", fmt.Sprintf("%s%c%s", filepath.Dir(binPath), os.PathListSeparator, e.Getenv("PATH")))
+			// The soft binary is built with -cover. When SOFT_SERVE_TEST_COVDIR
+			// is set, pass it to the server and hook processes as GOCOVERDIR so
+			// their counters are written there. A separate variable is used
+			// because `go test -cover` overrides GOCOVERDIR for the test process.
+			if dir := os.Getenv("SOFT_SERVE_TEST_COVDIR"); dir != "" {
+				e.Setenv("GOCOVERDIR", dir)
+			}
 
 			data := t.TempDir()
 			sshPort := test.RandomPort()
@@ -140,6 +151,13 @@ func TestScript(t *testing.T) {
 
 			// This is used to set up test specific configuration and http endpoints
 			e.Setenv("SOFT_SERVE_TESTRUN", "1")
+
+			// Every webhook request of the server and its hooks goes to this
+			// script's local receiver, never to the webhook's host.
+			rcv := newWebhookReceiver()
+			e.Defer(rcv.srv.Close)
+			e.Values[webhookReceiverKey{}] = rcv
+			e.Setenv("SOFT_SERVE_TEST_WEBHOOK_ADDR", rcv.srv.Listener.Addr().String())
 
 			// This will disable the default lipgloss renderer colors
 			e.Setenv("SOFT_SERVE_NO_COLOR", "1")
@@ -422,27 +440,53 @@ func cmdEnvfile(ts *testscript.TestScript, neg bool, args []string) {
 	}
 }
 
+// cmdNewWebhook sets env-name to a webhook target URL. The host is a literal
+// public address, so the URL passes the server's SSRF validation without a DNS
+// lookup. The soft binary is built with the webhooktest tag, which dials every
+// webhook request to the script's local receiver instead, so nothing is sent
+// to that address.
 func cmdNewWebhook(ts *testscript.TestScript, neg bool, args []string) {
-	type webhookSite struct {
-		UUID string `json:"uuid"`
-	}
-
 	if len(args) != 1 {
 		ts.Fatalf("usage: new-webhook <env-name>")
 	}
 
-	const whSite = "https://webhook.site"
-	req, err := http.NewRequest(http.MethodPost, whSite+"/token", nil) //nolint:noctx
-	check(ts, err, neg)
+	ts.Setenv(args[0], "http://93.184.216.34/hooks/"+args[0])
+}
 
-	resp, err := http.DefaultClient.Do(req)
-	check(ts, err, neg)
+type webhookReceiverKey struct{}
 
-	defer resp.Body.Close()
-	var site webhookSite
-	check(ts, json.NewDecoder(resp.Body).Decode(&site), neg)
+// webhookReceiver is a local HTTP server that accepts every webhook request
+// and remembers the event and path of each.
+type webhookReceiver struct {
+	srv      *httptest.Server
+	mu       sync.Mutex
+	received []string
+}
 
-	ts.Setenv(args[0], whSite+"/"+site.UUID)
+func newWebhookReceiver() *webhookReceiver {
+	r := &webhookReceiver{}
+	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, _ = io.Copy(io.Discard, req.Body)
+		r.mu.Lock()
+		r.received = append(r.received, req.Header.Get("X-SoftServe-Event")+" "+req.URL.Path)
+		r.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	return r
+}
+
+// cmdWebhookReceived prints one "event path" line per webhook request the
+// script's receiver got, in order.
+func cmdWebhookReceived(ts *testscript.TestScript, neg bool, args []string) {
+	if neg || len(args) != 0 {
+		ts.Fatalf("usage: webhook-received")
+	}
+	rcv := ts.Value(webhookReceiverKey{}).(*webhookReceiver)
+	rcv.mu.Lock()
+	defer rcv.mu.Unlock()
+	for _, line := range rcv.received {
+		fmt.Fprintln(ts.Stdout(), line)
+	}
 }
 
 func cmdCurl(ts *testscript.TestScript, neg bool, args []string) {

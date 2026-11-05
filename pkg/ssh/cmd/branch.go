@@ -3,9 +3,11 @@ package cmd
 import (
 	"fmt"
 
+	"charm.land/log/v2"
 	gitm "github.com/aymanbagabas/git-module"
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/access"
+	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/webhook"
 	"github.com/spf13/cobra"
@@ -111,12 +113,18 @@ func branchDefaultCommand() *cobra.Command {
 
 				// TODO: move this to backend?
 				user := proto.UserFromContext(ctx)
+				// The default branch is already changed, so a failed event is
+				// logged rather than reported as a failed command.
 				wh, err := webhook.NewRepositoryEvent(ctx, user, rr, webhook.RepositoryEventActionDefaultBranchChange)
 				if err != nil {
-					return err
+					log.Error("default branch changed but webhook event skipped", "err", err)
+					return nil
 				}
 
-				return webhook.SendEvent(ctx, wh)
+				// Sent in the background like the backend's own events, so the
+				// session neither waits on receivers nor cancels the delivery.
+				backend.FromContext(ctx).SendEventAfterChange(ctx, wh)
+				return nil
 			}
 
 			return nil
@@ -177,12 +185,18 @@ func branchDeleteCommand() *cobra.Command {
 				return err
 			}
 
+			// The branch is already deleted, so a failed event is logged rather
+			// than reported as a failed command.
 			wh, err := webhook.NewBranchTagEvent(ctx, proto.UserFromContext(ctx), rr, git.RefsHeads+branch, branchCommit.ID.String(), git.ZeroID)
 			if err != nil {
-				return err
+				log.Error("branch deleted but webhook event skipped", "err", err)
+				return nil
 			}
 
-			return webhook.SendEvent(ctx, wh)
+			// Sent in the background like the backend's own events, so the
+			// session neither waits on receivers nor cancels the delivery.
+			backend.FromContext(ctx).SendEventAfterChange(ctx, wh)
+			return nil
 		},
 	}
 

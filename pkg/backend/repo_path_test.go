@@ -36,8 +36,11 @@ func TestOrphanRepoDirectoryIsNotClaimable(t *testing.T) {
 	_, err = be.CreateRepository(ctx, "orphan", user, proto.RepositoryOptions{})
 	is.True(errors.Is(err, proto.ErrRepoExist))
 
-	// A genuinely new name is still creatable.
+	// A genuinely new name is still creatable, unless admin-only creation is on.
 	is.Equal(be.AccessLevelForUser(ctx, "fresh", user), access.ReadWriteAccess)
+	cfg.AdminOnlyCreate = true
+	is.Equal(be.AccessLevelForUser(ctx, "fresh", user), access.ReadOnlyAccess)
+	is.Equal(be.AccessLevelForUser(ctx, "orphan", user), access.NoAccess)
 }
 
 // TestCaseVariantOfExistingRepo verifies that a name differing only by case
@@ -78,6 +81,18 @@ func TestCaseVariantOfExistingRepo(t *testing.T) {
 	is.True(r.IsPrivate())
 	is.Equal(r.UserID(), owner.ID())
 	is.Equal(be.AccessLevelForUser(ctx, "secret", attacker), access.NoAccess)
+
+	// With admin-only creation on, no case variant is creatable by the
+	// attacker, whatever the filesystem.
+	cfg.AdminOnlyCreate = true
+	level = be.AccessLevelForUser(ctx, "Secret", attacker)
+	_, createErr = be.CreateRepository(ctx, "Secret", attacker, proto.RepositoryOptions{})
+	is.True(errors.Is(createErr, proto.ErrUnauthorized))
+	if caseInsensitive {
+		is.Equal(level, access.NoAccess)
+	} else {
+		is.Equal(level, access.ReadOnlyAccess)
+	}
 }
 
 // TestConcurrentCreateSameName verifies that racing creates of one name yield

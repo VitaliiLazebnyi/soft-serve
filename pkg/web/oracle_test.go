@@ -128,6 +128,14 @@ func TestReceivePackDoesNotRevealPrivateRepositories(t *testing.T) {
 	is.Equal(f.do(http.MethodGet, "/ghost.git/info/refs?service=git-receive-pack", auth).Code, http.StatusOK)
 	_, err = f.be.Repository(f.ctx, "ghost")
 	is.NoErr(err)
+
+	// With admin-only creation on, a non-admin's push to a new name is
+	// refused like any other unreadable repository and creates nothing.
+	config.FromContext(f.ctx).AdminOnlyCreate = true
+	is.Equal(f.do(http.MethodGet, "/ghost2.git/info/refs?service=git-receive-pack", auth).Code, http.StatusNotFound)
+	is.Equal(f.do(http.MethodPost, "/ghost2.git/git-receive-pack", auth).Code, http.StatusNotFound)
+	_, err = f.be.Repository(f.ctx, "ghost2")
+	is.True(err != nil)
 }
 
 // TestReceivePackReaderIsForbidden verifies a caller who can read but not

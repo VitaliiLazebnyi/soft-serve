@@ -24,6 +24,10 @@ type WebhookStore interface {
 	DeleteWebhookByID(ctx context.Context, h db.Handler, id int64) error
 	// DeleteWebhookForRepoByID deletes a webhook for a repository by its ID.
 	DeleteWebhookForRepoByID(ctx context.Context, h db.Handler, repoID int64, id int64) error
+	// DeleteWebhookEventsByWebhookID deletes all events of a webhook.
+	DeleteWebhookEventsByWebhookID(ctx context.Context, h db.Handler, webhookID int64) error
+	// DeleteWebhookDeliveriesByWebhookID deletes all deliveries of a webhook.
+	DeleteWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) error
 
 	// GetWebhookEventByID returns a webhook event by its ID.
 	GetWebhookEventByID(ctx context.Context, h db.Handler, id int64) (models.WebhookEvent, error)
@@ -41,7 +45,8 @@ type WebhookStore interface {
 	// ListWebhookDeliveriesByWebhookID returns all webhook deliveries for a webhook.
 	// This only returns the delivery ID, response status, and event.
 	ListWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookDelivery, error)
-	// CreateWebhookDelivery creates a webhook delivery.
+	// CreateWebhookDelivery creates a webhook delivery. It writes nothing if the
+	// webhook no longer exists.
 	CreateWebhookDelivery(ctx context.Context, h db.Handler, id uuid.UUID, webhookID int64, event int, url string, method string, requestError error, requestHeaders string, requestBody string, responseStatus int, responseHeaders string, responseBody string) error
 	// DeleteWebhookDeliveryByID deletes a webhook delivery by its ID.
 	DeleteWebhookDeliveryByID(ctx context.Context, h db.Handler, webhookID int64, id uuid.UUID) error

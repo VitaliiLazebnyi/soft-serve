@@ -3,6 +3,12 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	neturl "net/url"
+	"runtime/debug"
+	"strings"
+	"sync"
+	"time"
 
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -19,11 +25,10 @@ func (b *Backend) CreateWebhook(ctx context.Context, repo proto.Repository, url 
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
 	url = utils.Sanitize(url)
-
-	// Validate webhook URL to prevent SSRF attacks
-	if err := webhook.ValidateWebhookURL(url); err != nil {
-		return err //nolint:wrapcheck
+	if err := validateWebhookInput(url, contentType, events); err != nil {
+		return err
 	}
+	events = dedupeEvents(events)
 
 	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
 		lastID, err := datastore.CreateWebhook(ctx, tx, repo.ID(), url, secret, int(contentType), active)
@@ -125,12 +130,20 @@ func (b *Backend) UpdateWebhook(ctx context.Context, repo proto.Repository, id i
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
 
-	// Validate webhook URL to prevent SSRF attacks
-	if err := webhook.ValidateWebhookURL(url); err != nil {
+	url = utils.Sanitize(url)
+	if err := validateWebhookInput(url, contentType, updatedEvents); err != nil {
 		return err
 	}
+	updatedEvents = dedupeEvents(updatedEvents)
 
 	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
+		// The webhook must belong to this repository. Checking first keeps the
+		// event rewrite below from touching another repository's webhook, and
+		// makes an unknown ID an error instead of a silent no-op.
+		if _, err := datastore.GetWebhookByID(ctx, tx, repo.ID(), id); err != nil {
+			return db.WrapError(err)
+		}
+
 		if err := datastore.UpdateWebhookByID(ctx, tx, repo.ID(), id, url, secret, int(contentType), active); err != nil {
 			return db.WrapError(err)
 		}
@@ -192,12 +205,36 @@ func (b *Backend) DeleteWebhook(ctx context.Context, repo proto.Repository, id i
 		if err != nil {
 			return db.WrapError(err)
 		}
-		if err := datastore.DeleteWebhookForRepoByID(ctx, tx, repo.ID(), id); err != nil {
-			return db.WrapError(err)
-		}
-
-		return nil
+		return db.WrapError(b.deleteWebhookRows(ctx, tx, repo.ID(), id))
 	})
+}
+
+// deleteWebhookRows removes one webhook of a repository together with its
+// events and deliveries. The rows are removed explicitly rather than through
+// ON DELETE CASCADE, which only applies when the connection enables foreign
+// keys; the default SQLite data source does, but a custom one may not.
+func (d *Backend) deleteWebhookRows(ctx context.Context, tx *db.Tx, repoID int64, id int64) error {
+	if err := d.store.DeleteWebhookDeliveriesByWebhookID(ctx, tx, id); err != nil {
+		return err
+	}
+	if err := d.store.DeleteWebhookEventsByWebhookID(ctx, tx, id); err != nil {
+		return err
+	}
+	return d.store.DeleteWebhookForRepoByID(ctx, tx, repoID, id)
+}
+
+// deleteRepoWebhookRows removes every webhook of a repository with its rows.
+func (d *Backend) deleteRepoWebhookRows(ctx context.Context, tx *db.Tx, repoID int64) error {
+	whs, err := d.store.GetWebhooksByRepoID(ctx, tx, repoID)
+	if err != nil {
+		return err
+	}
+	for _, w := range whs {
+		if err := d.deleteWebhookRows(ctx, tx, repoID, w.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ListWebhookDeliveries lists webhook deliveries for a webhook belonging to
@@ -264,13 +301,54 @@ func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repos
 
 	log.Infof("redelivering webhook delivery %s for webhook %d\n\n%s\n\n", delID, id, delivery.RequestBody)
 
-	var payload json.RawMessage
-	if err := json.Unmarshal([]byte(delivery.RequestBody), &payload); err != nil {
-		log.Errorf("error unmarshaling webhook payload: %v", err)
-		return err
+	// The stored body is in the content type the delivery was sent with, which
+	// may differ from the webhook's current one if it was changed since. Use
+	// the stored Content-Type header and fall back to the webhook's only when
+	// that header is missing.
+	// An unrecognized stored value is treated like a missing one.
+	ct := webhook.ContentType(wh.ContentType) //nolint:gosec
+	stored, found, err := storedContentType(delivery.RequestHeaders)
+	switch {
+	case err != nil:
+		b.logger.Warn("unrecognized content type in webhook delivery, using the webhook's", "delivery", delID, "webhook", id, "content_type", ct, "err", err)
+	case found:
+		ct = stored
+	}
+	wh.ContentType = int(ct)
+
+	var payload any
+	if ct == webhook.ContentTypeForm {
+		vals, err := neturl.ParseQuery(delivery.RequestBody)
+		if err != nil {
+			log.Errorf("error parsing webhook form body: %v", err)
+			return err
+		}
+		payload = vals
+	} else {
+		var raw json.RawMessage
+		if err := json.Unmarshal([]byte(delivery.RequestBody), &raw); err != nil {
+			log.Errorf("error unmarshaling webhook payload: %v", err)
+			return err
+		}
+		payload = raw
 	}
 
 	return webhook.SendWebhook(ctx, wh, webhook.Event(delivery.Event), payload)
+}
+
+// storedContentType returns the Content-Type of a delivery from its stored
+// request headers, which hold one "Name: value" line per header. It reports
+// false when there is no Content-Type line.
+func storedContentType(headers string) (webhook.ContentType, bool, error) {
+	for _, line := range strings.Split(headers, "\n") {
+		name, value, ok := strings.Cut(line, ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), "Content-Type") {
+			continue
+		}
+		ct, err := webhook.ParseContentType(strings.TrimSpace(value))
+		return ct, true, err
+	}
+	return 0, false, nil
 }
 
 // WebhookDelivery returns a webhook delivery for a webhook belonging to the
@@ -306,4 +384,244 @@ func (b *Backend) WebhookDelivery(ctx context.Context, repo proto.Repository, we
 	}
 
 	return delivery, nil
+}
+
+// validateWebhookInput checks a webhook's URL, content type and events before
+// anything is stored.
+func validateWebhookInput(url string, contentType webhook.ContentType, events []webhook.Event) error {
+	// Validate webhook URL to prevent SSRF attacks.
+	if err := webhook.ValidateWebhookURL(url); err != nil {
+		return err //nolint:wrapcheck
+	}
+	if contentType.String() == "" {
+		return webhook.ErrInvalidContentType
+	}
+	for _, e := range events {
+		if e.String() == "" {
+			return webhook.ErrInvalidEvent
+		}
+	}
+	return nil
+}
+
+// dedupeEvents returns events without repeats, keeping the first occurrence.
+// A webhook can subscribe to an event only once.
+func dedupeEvents(events []webhook.Event) []webhook.Event {
+	seen := make(map[webhook.Event]bool, len(events))
+	out := make([]webhook.Event, 0, len(events))
+	for _, e := range events {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// ShutdownDeliveryTimeout is how long shutdown waits for background
+// deliveries. It is separate from the shorter HTTP and SSH drain, since a drain
+// that stops early abandons the deliveries. It covers a request that started
+// just before shutdown and runs to the client's cap (ssrf.ClientTimeout), with
+// time left to record it and to send a few queued ones. A second signal stops
+// the wait early.
+const ShutdownDeliveryTimeout = time.Minute
+
+// SendEventAfterChange sends the webhook event for a change that is already
+// committed, the same way the backend's own changes do. See sendAfterChange.
+func (d *Backend) SendEventAfterChange(ctx context.Context, ev webhook.EventPayload) {
+	d.sendAfterChange(ctx, ev)
+}
+
+// sendAfterChange sends the webhook event for a change that is already
+// committed. The subscribers are read now and the deliveries run in the
+// background, so the caller does not wait on receivers. The change has
+// happened, so a failure is logged rather than returned.
+func (d *Backend) sendAfterChange(ctx context.Context, ev webhook.EventPayload) {
+	hooks, err := webhook.Subscribers(ctx, ev)
+	if err != nil {
+		d.logEventNotDelivered(ev, err)
+		return
+	}
+	d.deliverAfterChange(ctx, hooks, ev, true)
+}
+
+// maxBackgroundDeliveries caps the goroutines that send events in the
+// background, and maxQueuedDeliveries caps the events waiting for one of them.
+// Together they bound the memory and goroutines the deliveries use.
+const (
+	maxBackgroundDeliveries = 32
+	maxQueuedDeliveries     = 1024
+)
+
+// errDeliveryQueueFull is recorded for an event that was dropped because the
+// delivery queue was full.
+var errDeliveryQueueFull = errors.New("not sent: webhook delivery queue is full")
+
+// deliverAfterChange sends ev to hooks in the background and never waits on
+// receivers. The send is detached from the request's cancellation; each
+// request is bounded by the webhook package's per-hook timeout.
+//
+// When every sender is busy, the event waits in a bounded queue. When the
+// queue is full too, the event is dropped: it is logged and, if record is
+// set, recorded as a failed delivery so it can be redelivered.
+func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook, ev webhook.EventPayload, record bool) {
+	if len(hooks) == 0 {
+		return
+	}
+	bg := context.WithoutCancel(ctx)
+	send := func() {
+		var err error
+		if record {
+			err = webhook.Deliver(bg, hooks, ev)
+		} else {
+			err = webhook.DeliverUnrecorded(bg, hooks, ev)
+		}
+		if err != nil {
+			d.logEventNotDelivered(ev, err)
+		}
+	}
+
+	switch d.deliveries.enqueue(send) {
+	case enqueueClosed:
+		d.logger.Warn("webhook event skipped: server is shutting down", "event", ev.Event(), "repo_id", ev.RepositoryID())
+	case enqueueFull:
+		d.logger.Error("webhook event dropped: delivery queue is full", "event", ev.Event(), "repo_id", ev.RepositoryID(), "queued", maxQueuedDeliveries)
+		if record {
+			if err := webhook.RecordUndelivered(bg, hooks, ev, errDeliveryQueueFull); err != nil {
+				d.logger.Error("dropped webhook event not recorded", "event", ev.Event(), "repo_id", ev.RepositoryID(), "err", err)
+			}
+		}
+	}
+}
+
+// enqueueResult is the outcome of deliveryQueue.enqueue.
+type enqueueResult int
+
+const (
+	enqueued enqueueResult = iota
+	enqueueFull
+	enqueueClosed
+)
+
+// deliveryQueue runs webhook deliveries on at most maxWorkers goroutines, with
+// at most maxPending deliveries waiting. It counts every delivery from enqueue
+// until it has run, so shutdown can wait for them. Once closed, it refuses new
+// ones, so a request still running during shutdown cannot add to a count that
+// is already being waited on.
+type deliveryQueue struct {
+	maxWorkers int
+	maxPending int
+	logger     *log.Logger
+
+	mu      sync.Mutex
+	closed  bool
+	workers int
+	queued  []func()
+	count   int // queued plus running
+	idle    chan struct{}
+}
+
+func newDeliveryQueue(maxWorkers, maxPending int, logger *log.Logger) *deliveryQueue {
+	return &deliveryQueue{maxWorkers: maxWorkers, maxPending: maxPending, logger: logger}
+}
+
+// enqueue starts job on a new goroutine if one is free, or queues it. It never
+// blocks on a running job.
+func (q *deliveryQueue) enqueue(job func()) enqueueResult {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	switch {
+	case q.closed:
+		return enqueueClosed
+	case q.workers < q.maxWorkers:
+		q.workers++
+		go q.work(job)
+	case len(q.queued) < q.maxPending:
+		q.queued = append(q.queued, job)
+	default:
+		return enqueueFull
+	}
+	q.count++
+	return enqueued
+}
+
+// work runs job, then queued jobs until none are left.
+func (q *deliveryQueue) work(job func()) {
+	for {
+		q.run(job)
+
+		q.mu.Lock()
+		q.count--
+		if q.count == 0 && q.idle != nil {
+			close(q.idle)
+			q.idle = nil
+		}
+		if len(q.queued) == 0 {
+			q.workers--
+			q.mu.Unlock()
+			return
+		}
+		job = q.queued[0]
+		q.queued[0] = nil
+		q.queued = q.queued[1:]
+		q.mu.Unlock()
+	}
+}
+
+// run runs one job. A panic in it is logged rather than allowed to crash the
+// process, since no request handler is there to recover it.
+func (q *deliveryQueue) run(job func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			q.logger.Error("webhook delivery panicked", "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	job()
+}
+
+// close refuses new deliveries. It returns how many are queued or running and
+// a channel that is closed once they have all run.
+func (q *deliveryQueue) close() (int, <-chan struct{}) {
+	q.mu.Lock()
+	q.closed = true
+	q.mu.Unlock()
+	return q.pending()
+}
+
+// pending returns how many deliveries are queued or running and a channel that
+// is closed once none are.
+func (q *deliveryQueue) pending() (int, <-chan struct{}) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	finished := make(chan struct{})
+	if q.count == 0 {
+		close(finished)
+	} else if q.idle == nil {
+		q.idle = finished
+	} else {
+		finished = q.idle
+	}
+	return q.count, finished
+}
+
+// WaitForDeliveries stops new webhook deliveries from starting and waits for
+// the queued and running ones to finish. It gives up when ctx is done and logs
+// a warning, since the remaining deliveries are then abandoned. Call it after
+// the servers have stopped accepting requests.
+func (d *Backend) WaitForDeliveries(ctx context.Context) {
+	pending, finished := d.deliveries.close()
+	if pending == 0 {
+		return
+	}
+	d.logger.Info("waiting for webhook deliveries", "pending", pending)
+	select {
+	case <-finished:
+	case <-ctx.Done():
+		left, _ := d.deliveries.pending()
+		d.logger.Warn("shutting down with webhook deliveries still running", "pending", left, "err", ctx.Err())
+	}
+}
+
+func (d *Backend) logEventNotDelivered(ev webhook.EventPayload, err error) {
+	d.logger.Error("webhook event not delivered", "event", ev.Event(), "repo_id", ev.RepositoryID(), "err", err)
 }

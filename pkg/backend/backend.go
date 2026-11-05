@@ -26,6 +26,10 @@ type Backend struct {
 	// nothing has to happen in a particular order at startup for the gate
 	// to be in place.
 	importGate func() string
+
+	// deliveries runs the webhook deliveries in the background, bounded, and
+	// tracks them so shutdown can wait for them.
+	deliveries *deliveryQueue
 }
 
 // New returns a new Soft Serve backend.
@@ -37,6 +41,8 @@ func New(ctx context.Context, cfg *config.Config, db *db.DB, st store.Store) *Ba
 		db:     db,
 		store:  st,
 		logger: logger,
+
+		deliveries: newDeliveryQueue(maxBackgroundDeliveries, maxQueuedDeliveries, logger),
 	}
 	b.importGate = sync.OnceValue(b.checkGitVersion)
 

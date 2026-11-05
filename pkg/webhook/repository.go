@@ -54,10 +54,7 @@ func NewRepositoryEvent(ctx context.Context, user proto.User, repo proto.Reposit
 				CreatedAt:   repo.CreatedAt(),
 				UpdatedAt:   repo.UpdatedAt(),
 			},
-			Sender: User{
-				ID:       user.ID(),
-				Username: user.Username(),
-			},
+			Sender: senderOf(user),
 		},
 	}
 

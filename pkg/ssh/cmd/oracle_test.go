@@ -44,7 +44,7 @@ var repoScopedCommands = [][]string{
 	{"mirror", "REPO"},
 	{"mirror", "REPO", "true"},
 	{"webhook", "list", "REPO"},
-	{"webhook", "create", "REPO", "https://example.com", "-e", "push"},
+	{"webhook", "create", "REPO", "https://93.184.216.34", "-e", "push"},
 	{"webhook", "delete", "REPO", "1"},
 	{"webhook", "update", "REPO", "1"},
 	{"webhook", "deliveries", "list", "REPO", "1"},
@@ -206,6 +206,18 @@ func TestRenameDestinationIsGatedLikeCreate(t *testing.T) {
 
 	// The gate for the source does not leak into the destination check.
 	is.NoErr(runRepo(t, ownerCtx, "rename", "mine", "renamed"))
+	_, err = be.Repository(ctx, "renamed")
+	is.NoErr(err)
+
+	// With admin-only creation on, a new name is one the owner could not
+	// create, so renaming onto it gets create's answer too.
+	config.FromContext(ctx).AdminOnlyCreate = true
+	renameErr = runRepo(t, ownerCtx, "rename", "renamed", "again")
+	createErr = runRepo(t, ownerCtx, "create", "again")
+	is.True(errors.Is(renameErr, proto.ErrUnauthorized))
+	is.Equal(renameErr, createErr)
+	_, err = be.Repository(ctx, "again")
+	is.True(err != nil)
 	_, err = be.Repository(ctx, "renamed")
 	is.NoErr(err)
 }

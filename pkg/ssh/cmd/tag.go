@@ -4,6 +4,7 @@ import (
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/access"
+	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/webhook"
 	"github.com/spf13/cobra"
@@ -100,13 +101,18 @@ func tagDeleteCommand() *cobra.Command {
 				return err
 			}
 
+			// The tag is already deleted, so a failed event is logged rather
+			// than reported as a failed command.
 			wh, err := webhook.NewBranchTagEvent(ctx, proto.UserFromContext(ctx), rr, git.RefsTags+tag, tagCommit.ID.String(), git.ZeroID)
 			if err != nil {
-				log.Error("failed to create branch_tag webhook", "err", err)
-				return err
+				log.Error("tag deleted but webhook event skipped", "err", err)
+				return nil
 			}
 
-			return webhook.SendEvent(ctx, wh)
+			// Sent in the background like the backend's own events, so the
+			// session neither waits on receivers nor cancels the delivery.
+			backend.FromContext(ctx).SendEventAfterChange(ctx, wh)
+			return nil
 		},
 	}
 

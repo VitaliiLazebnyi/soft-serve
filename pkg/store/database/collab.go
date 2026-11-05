@@ -121,6 +121,18 @@ func (*collabStore) RemoveCollabByUsernameAndRepo(ctx context.Context, tx db.Han
 				SELECT id FROM repos WHERE name = ?
 			)
 	`)
-	_, err := tx.ExecContext(ctx, query, username, repo)
-	return err
+	res, err := tx.ExecContext(ctx, query, username, repo)
+	if err != nil {
+		return err
+	}
+
+	// Nothing deleted means there was no such collaborator.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return db.ErrRecordNotFound
+	}
+	return nil
 }

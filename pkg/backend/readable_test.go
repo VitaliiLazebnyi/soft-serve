@@ -15,7 +15,7 @@ import (
 // whether a missing name may be created.
 func TestReadable(t *testing.T) {
 	is := is.New(t)
-	be, _ := newTestBackend(t)
+	be, cfg := newTestBackend(t)
 	ctx := context.Background()
 
 	owner, err := be.CreateUser(ctx, "owner", proto.UserOptions{})
@@ -55,6 +55,13 @@ func TestReadable(t *testing.T) {
 	is.Equal(be.AccessLevelForUser(ctx, "secret", stranger), access.NoAccess)
 	is.Equal(be.AccessLevelForUser(ctx, "ghost", stranger), access.ReadWriteAccess)
 	is.Equal(be.AccessLevelForUser(ctx, "public", nil), access.ReadOnlyAccess)
+
+	// With admin-only creation on, a missing name is no longer creatable.
+	cfg.AdminOnlyCreate = true
+	r, level = be.Readable(ctx, "ghost", stranger)
+	is.Equal(r, nil)
+	is.Equal(level, access.ReadOnlyAccess)
+	is.Equal(be.AccessLevelForUser(ctx, "secret", stranger), access.NoAccess)
 }
 
 // TestBaseAccessLevelByPublicKey verifies the baseline level does not

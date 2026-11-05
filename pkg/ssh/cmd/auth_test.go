@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/charmbracelet/soft-serve/pkg/access"
+	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/matryer/is"
 )
@@ -49,24 +51,36 @@ func TestGlobalCommandsIgnoreRepositoryAccess(t *testing.T) {
 // TestGlobalCommandsIgnoreAnonAdminAccess covers the variant that needs no
 // repository at all: with anon-access set to admin-access,
 // AccessLevelForUser returns AdminAccess to any authenticated user for a
-// nonexistent repository name.
+// nonexistent repository name. That only holds with admin_only_create off
+// (the default), so the flag is forced off here; with it on the missing name
+// is capped at read-only and set-admin must still be refused.
 func TestGlobalCommandsIgnoreAnonAdminAccess(t *testing.T) {
-	is := is.New(t)
-	ctx, be := newAuthTestContext(t)
-	is.NoErr(be.SetAnonAccess(ctx, access.AdminAccess))
+	for _, tt := range []struct {
+		adminOnly bool
+		missing   access.AccessLevel
+	}{
+		{adminOnly: false, missing: access.AdminAccess},
+		{adminOnly: true, missing: access.ReadOnlyAccess},
+	} {
+		t.Run(fmt.Sprintf("admin_only_create=%t", tt.adminOnly), func(t *testing.T) {
+			is := is.New(t)
+			ctx, be := newAuthTestContextWith(t, func(c *config.Config) { c.AdminOnlyCreate = tt.adminOnly })
+			is.NoErr(be.SetAnonAccess(ctx, access.AdminAccess))
 
-	attackerCtx := withUser(t, ctx, be, "attacker", false)
-	attacker := proto.UserFromContext(attackerCtx)
-	is.Equal(be.AccessLevelForUser(attackerCtx, "nonexistent", attacker), access.AdminAccess)
+			attackerCtx := withUser(t, ctx, be, "attacker", false)
+			attacker := proto.UserFromContext(attackerCtx)
+			is.Equal(be.AccessLevelForUser(attackerCtx, "nonexistent", attacker), tt.missing)
 
-	err := runUser(t, attackerCtx, "set-admin", "attacker", "true")
-	if !errors.Is(err, proto.ErrUnauthorized) {
-		t.Fatalf("expected ErrUnauthorized, got %v", err)
+			err := runUser(t, attackerCtx, "set-admin", "attacker", "true")
+			if !errors.Is(err, proto.ErrUnauthorized) {
+				t.Fatalf("expected ErrUnauthorized, got %v", err)
+			}
+
+			reloaded, err := be.User(ctx, "attacker")
+			is.NoErr(err)
+			is.Equal(reloaded.IsAdmin(), false)
+		})
 	}
-
-	reloaded, err := be.User(ctx, "attacker")
-	is.NoErr(err)
-	is.Equal(reloaded.IsAdmin(), false)
 }
 
 // TestUserSubcommandsAreGatedByParent verifies the gate lives on the `user`
