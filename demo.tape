@@ -5,7 +5,7 @@ Set FontSize 22
 Output soft-serve.gif
 Output soft-serve-frames/
 
-Type "ssh git.charm.sh"
+Type "ssh localhost -p 23231"
 Sleep 1s
 Enter
 Sleep 2s

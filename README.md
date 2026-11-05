@@ -14,12 +14,6 @@ installation can switch to Soft Serve Plus in place.
 
 A tasty, self-hostable Git server for the command line. 🍦
 
-<picture>
-  <source media="(max-width: 750px)" srcset="https://github.com/charmbracelet/soft-serve/assets/42545625/c754c746-dc4c-44a6-9c39-28649264cbf2">
-  <source media="(min-width: 750px)" width="750" srcset="https://github.com/charmbracelet/soft-serve/assets/42545625/c754c746-dc4c-44a6-9c39-28649264cbf2">
-  <img src="https://github.com/charmbracelet/soft-serve/assets/42545625/c754c746-dc4c-44a6-9c39-28649264cbf2" alt="Soft Serve Plus screencast">
-</picture>
-
 - Easy to navigate TUI available over SSH
 - Clone repos over SSH, HTTP, or Git protocol
 - Git LFS support with both HTTP and SSH backends
@@ -36,20 +30,20 @@ A tasty, self-hostable Git server for the command line. 🍦
 
 ## Where can I see it?
 
-Charm runs a public instance of the original Soft Serve: just run `ssh git.charm.sh` for an example. You can also try some of the following commands:
+Start a server locally and connect to it over SSH:
 
 ```bash
-# Jump directly to a repo in the TUI
-ssh git.charm.sh -t soft-serve
+# Start a server, making your SSH key the admin
+SOFT_SERVE_INITIAL_ADMIN_KEYS="$(cat ~/.ssh/id_ed25519.pub)" soft serve
+
+# In another terminal: open the TUI
+ssh localhost -p 23231
 
 # Print out a directory tree for a repo
-ssh git.charm.sh repo tree soft-serve
-
-# Print a specific file
-ssh git.charm.sh repo blob soft-serve cmd/soft/main.go
+ssh localhost -p 23231 repo tree my-repo
 
 # Print a file with syntax highlighting and line numbers
-ssh git.charm.sh repo blob soft-serve cmd/soft/main.go -c -l
+ssh localhost -p 23231 repo blob my-repo README.md -c -l
 ```
 
 Or you can use Soft Serve Plus to browse local repositories using `soft browse
@@ -57,8 +51,19 @@ Or you can use Soft Serve Plus to browse local repositories using `soft browse
 
 ## Installation
 
-Soft Serve Plus is a single binary called `soft`. There are no prebuilt
-packages or images for the fork yet, so build it from source (Go is required):
+Soft Serve Plus is a single binary called `soft`.
+
+Download a binary, or a `.deb`, `.rpm` or `.apk` package, from the
+[releases][releases] page. Binaries are available for Linux, macOS, FreeBSD and
+Windows. The Linux packages include a Systemd service.
+
+[releases]: https://github.com/VitaliiLazebnyi/soft-serve-plus/releases
+
+A [Docker image][docker] is available as `ghcr.io/vitaliilazebnyi/soft-serve-plus`.
+
+[docker]: https://github.com/VitaliiLazebnyi/soft-serve-plus/blob/main/docker.md
+
+Or build it from source (Go is required):
 
 ```bash
 git clone https://github.com/VitaliiLazebnyi/soft-serve-plus.git
@@ -67,13 +72,9 @@ go install ./cmd/soft
 ```
 
 > [!NOTE]
-> The upstream packages (`brew install charmbracelet/tap/soft-serve`, the Charm
-> Apt/Yum repositories, Winget, Arch, Nix, `charmcli/soft-serve` images) install
-> the original Soft Serve, without the changes in this fork.
-
-You can also [build a Docker image][docker] yourself.
-
-[docker]: https://github.com/VitaliiLazebnyi/soft-serve-plus/blob/main/docker.md
+> Packages named `soft-serve` from Homebrew, Apt/Yum, Winget, Arch, Nix or
+> Docker Hub install the original Soft Serve, without the changes in this fork.
+> The Soft Serve Plus packages replace them in place.
 
 ## Setting up a server
 
@@ -120,8 +121,8 @@ boot, not its reachability, which is still governed entirely by the
 the same data directory is a no-op if the repository already exists.
 
 Check out [Systemd][systemd] on how to run Soft Serve Plus as a service using
-Systemd. The upstream Soft Serve packages in Charm's Apt/Yum repositories come with Systemd
-service units.
+Systemd. The `.deb` and `.rpm` packages from the [releases][releases] page come
+with a Systemd service unit.
 
 [systemd]: https://github.com/VitaliiLazebnyi/soft-serve-plus/blob/main/systemd.md
 
@@ -619,11 +620,11 @@ Repositories can be nested too:
 
 ```sh
 # Create a new nested repository
-ssh -p 23231 localhost repo create charmbracelet/icecream
+ssh -p 23231 localhost repo create my-team/icecream
 
 # Or ...
-git remote add charm ssh://localhost:23231/charmbracelet/icecream
-git push charm main
+git remote add soft ssh://localhost:23231/my-team/icecream
+git push soft main
 ```
 
 ### Mirrors
@@ -760,8 +761,6 @@ Flags:
 ```
 
 ## The Soft Serve Plus TUI
-
-<img src="https://stuff.charm.sh/soft-serve/soft-serve-demo-commit.png" width="750" alt="TUI example showing a diff">
 
 Soft Serve Plus TUI is mainly used to browse repos over SSH. You can also use it to
 browse local repositories with `soft browse` or running `soft` within a Git

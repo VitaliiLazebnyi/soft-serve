@@ -3,15 +3,16 @@
 Most Linux OSes use Systemd as an init system and service management. You can
 use Systemd to manage Soft Serve Plus as a service on your host machine.
 
-The upstream Soft Serve deb/rpm packages come with Systemd service files
-pre-packaged, but they install the original Soft Serve, not this fork. To run
-Soft Serve Plus, [build it from source](https://github.com/VitaliiLazebnyi/soft-serve-plus#installation),
-install the `soft` binary as `/usr/bin/soft`, and follow this guide.
+The Soft Serve Plus deb/rpm packages come with Systemd service files
+pre-packaged. You can download them from the
+[releases page](https://github.com/VitaliiLazebnyi/soft-serve-plus/releases).
+Follow the [installation instructions](https://github.com/VitaliiLazebnyi/soft-serve-plus#installation)
+for more information.
 
 ## Writing a Systemd Service File
 
-> **Note** the upstream deb/rpm packages ship this service file already, but
-> they install the original Soft Serve. For Soft Serve Plus, write it yourself.
+> **Note** you can skip this section if you installed Soft Serve Plus from our
+> deb/rpm packages.
 
 Start by writing a Systemd service file to define how your Soft Serve Plus server
 should start.
@@ -89,11 +90,3 @@ sudo systemctl start soft-serve.service
 
 You can monitor the server logs using `journalctl -u soft-serve.service`. Use
 `-f` to _tail_ and follow the logs as they get written.
-
-***
-
-Part of [Charm](https://charm.sh).
-
-<a href="https://charm.sh/"><img alt="The Charm logo" src="https://stuff.charm.sh/charm-badge-unrounded.jpg" width="400"></a>
-
-Charm热爱开源 • Charm loves open source
