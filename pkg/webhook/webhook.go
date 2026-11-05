@@ -229,8 +229,8 @@ func RecordUndelivered(ctx context.Context, hooks []models.Webhook, payload Even
 	return errors.Join(errs...)
 }
 
-// Subscribers returns the webhooks of the payload's repository that subscribe
-// to its event. Call it before a change that removes those webhooks, since
+// Subscribers returns the active webhooks of the payload's repository that
+// subscribe to its event. Inactive webhooks are not sent events. Call it before a change that removes those webhooks, since
 // they cannot be found afterwards.
 func Subscribers(ctx context.Context, payload EventPayload) ([]models.Webhook, error) {
 	dbx := db.FromContext(ctx)
@@ -244,7 +244,8 @@ func Subscribers(ctx context.Context, payload EventPayload) ([]models.Webhook, e
 
 // Deliver sends the payload to each webhook and records every attempt. Each
 // webhook is re-read just before its send: one deleted or unsubscribed since
-// hooks was read is skipped, and a changed URL or secret is used.
+// hooks was read is skipped, as is one deactivated since, and a changed URL or
+// secret is used.
 func Deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload) error {
 	return deliver(ctx, hooks, payload, true)
 }
@@ -279,7 +280,7 @@ func deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload, 
 // currentHook re-reads w right before it is sent, since a delivery can wait in
 // the background queue while its webhook is changed. It returns the webhook as
 // stored now, so a rotated secret or changed URL is used, and false when the
-// webhook was deleted or no longer subscribes to event. If the webhook cannot
+// webhook was deleted, deactivated, or no longer subscribes to event. If the webhook cannot
 // be read, w is returned unchanged and the send goes ahead as before, with its
 // outcome recorded as usual.
 func currentHook(ctx context.Context, w models.Webhook, event Event) (models.Webhook, bool) {
