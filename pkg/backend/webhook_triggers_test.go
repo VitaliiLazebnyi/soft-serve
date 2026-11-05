@@ -25,8 +25,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const zeroSha = "0000000000000000000000000000000000000000"
-const someSha = "1111111111111111111111111111111111111111"
+const (
+	zeroSha = "0000000000000000000000000000000000000000"
+	someSha = "1111111111111111111111111111111111111111"
+)
 
 // seedHook stores a webhook directly, so its delivery attempts go to a
 // loopback address that the SSRF-protected client refuses. The refusal is
@@ -349,7 +351,7 @@ func makeCommit(t *testing.T, path string) string {
 	is := is.New(t)
 	git := func(stdin string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"--git-dir", path}, args...)...) //nolint:gosec
+		cmd := exec.CommandContext(t.Context(), "git", append([]string{"--git-dir", path}, args...)...) //nolint:gosec
 		cmd.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")

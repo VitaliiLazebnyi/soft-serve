@@ -145,8 +145,10 @@ func (r fakeRepo) Open() (*git.Repository, error) {
 	return git.Open(r.path)
 }
 
-var _ proto.User = fakeUser{}
-var _ proto.Repository = fakeRepo{}
+var (
+	_ proto.User       = fakeUser{}
+	_ proto.Repository = fakeRepo{}
+)
 
 // gitRepo creates a bare git repository with the given files committed to
 // main, and returns its path and the commit hash of the tip.

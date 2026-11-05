@@ -37,7 +37,10 @@ func TestMain(m *testing.M) {
 	ctx := context.TODO()
 	cfg := config.DefaultConfig()
 	cfg.DataPath = tmp
-	cfg.Git.MaxConnections = 3
+	// Each request in these tests closes its connection, but the daemon notices
+	// asynchronously; leave headroom so back-to-back requests are not refused
+	// with "too many connections" on slow (-race) runners.
+	cfg.Git.MaxConnections = 10
 	cfg.Git.MaxTimeout = 100
 	cfg.Git.IdleTimeout = 1
 	cfg.Git.ListenAddr = fmt.Sprintf(":%d", test.RandomPort())
