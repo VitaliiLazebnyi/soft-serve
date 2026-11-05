@@ -3,7 +3,6 @@ package testscript
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -422,27 +421,16 @@ func cmdEnvfile(ts *testscript.TestScript, neg bool, args []string) {
 	}
 }
 
+// cmdNewWebhook sets env-name to a webhook target URL. The host is
+// example.com, a domain reserved for documentation, so the test does not
+// depend on a third-party service. Soft Serve only validates that the
+// target is public; no delivery is checked.
 func cmdNewWebhook(ts *testscript.TestScript, neg bool, args []string) {
-	type webhookSite struct {
-		UUID string `json:"uuid"`
-	}
-
 	if len(args) != 1 {
 		ts.Fatalf("usage: new-webhook <env-name>")
 	}
 
-	const whSite = "https://webhook.site"
-	req, err := http.NewRequest(http.MethodPost, whSite+"/token", nil) //nolint:noctx
-	check(ts, err, neg)
-
-	resp, err := http.DefaultClient.Do(req)
-	check(ts, err, neg)
-
-	defer resp.Body.Close()
-	var site webhookSite
-	check(ts, json.NewDecoder(resp.Body).Decode(&site), neg)
-
-	ts.Setenv(args[0], whSite+"/"+site.UUID)
+	ts.Setenv(args[0], "https://example.com/hooks/"+args[0])
 }
 
 func cmdCurl(ts *testscript.TestScript, neg bool, args []string) {

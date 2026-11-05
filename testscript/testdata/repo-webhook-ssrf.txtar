@@ -32,7 +32,7 @@ soft repo webhook create test-repo $WH_PUBLIC -e push
 
 # List webhooks - should show only the valid one
 soft repo webhook list test-repo
-stdout 'webhook.site'
+stdout 'example.com/hooks/'
 
 # Try to update webhook to localhost - should fail
 ! soft repo webhook update test-repo 1 --url http://localhost:9090/hook

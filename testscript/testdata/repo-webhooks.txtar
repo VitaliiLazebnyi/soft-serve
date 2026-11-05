@@ -16,7 +16,7 @@ soft repo webhook create repo-123 $WH_REPO_123 -e branch_tag_create -e branch_ta
 
 # list webhooks
 soft repo webhook list repo-123
-stdout '1.*webhook.site/.*'
+stdout '1.*example.com/hooks/.*'
 
 # clone repo and commit files
 git clone ssh://localhost:$SSH_PORT/repo-123 repo-123
@@ -25,9 +25,10 @@ git -C repo-123 add -A
 git -C repo-123 commit -m 'first'
 git -C repo-123 push origin HEAD
 
-# list webhook deliveries
+# list webhook deliveries; the target is not a receiver, so only check that the
+# push produced a delivery record, not that it succeeded
 soft repo webhook deliver list repo-123 1
-stdout '✅.*push.*'
+stdout 'push'
 
 # stop the server
 [windows] stopserver
