@@ -780,6 +780,11 @@ Flags:
   -h, --help   help for webhook
 ```
 
+Every attempt to send an event is recorded as a delivery, which `repo webhook
+deliveries` lists and can redeliver. Each webhook keeps about its 100 most
+recent deliveries (at most 109); older ones are deleted as new ones are
+recorded.
+
 ## The Soft Serve Plus TUI
 
 Soft Serve Plus TUI is mainly used to browse repos over SSH. You can also use it to

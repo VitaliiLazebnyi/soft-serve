@@ -13,8 +13,11 @@ import (
 	"net/http"
 	neturl "net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
@@ -209,7 +212,44 @@ func recordDelivery(ctx context.Context, w models.Webhook, event Event, req requ
 
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	return db.WrapError(datastore.CreateWebhookDelivery(rctx, dbx, req.id, w.ID, int(event), w.URL, http.MethodPost, reqErr, reqHeaders, req.body, resStatus, resHeaders, resBody))
+	if err := datastore.CreateWebhookDelivery(rctx, dbx, req.id, w.ID, int(event), w.URL, http.MethodPost, reqErr, reqHeaders, req.body, resStatus, resHeaders, resBody); err != nil {
+		return db.WrapError(err)
+	}
+
+	// The delivery is recorded; a failed prune only delays the cleanup to a
+	// later delivery, so it is logged rather than returned.
+	if shouldPrune(w.ID) {
+		if err := datastore.PruneWebhookDeliveries(rctx, dbx, w.ID, maxDeliveries); err != nil {
+			log.Warn("pruning webhook deliveries", "webhook", w.ID, "err", err)
+		}
+	}
+	return nil
+}
+
+// maxDeliveries is how many deliveries are kept per webhook. Older ones are
+// deleted, so events, including ones recorded without sending when the queue
+// is full, cannot grow the deliveries table without limit. It is a variable
+// so tests can lower it.
+var maxDeliveries = 100
+
+// pruneEvery is how many deliveries of a webhook are recorded between prunes.
+// The deliveries table has no index on webhook_id, so a prune scans it;
+// pruning every pruneEvery-th record instead of every one spreads that cost.
+// A webhook therefore holds at most maxDeliveries+pruneEvery-1 deliveries. It
+// is a variable so tests can change it.
+var pruneEvery uint64 = 10
+
+// recordCounts counts, per webhook ID, the deliveries recorded by this
+// process. Its values are *atomic.Uint64.
+var recordCounts sync.Map
+
+// shouldPrune counts a recorded delivery of the webhook and reports whether
+// its deliveries should be pruned now. The first record of each webhook after
+// start prunes, so a table that grew before retention existed is trimmed.
+func shouldPrune(webhookID int64) bool {
+	v, _ := recordCounts.LoadOrStore(webhookID, new(atomic.Uint64))
+	n := v.(*atomic.Uint64).Add(1) //nolint:forcetypeassert
+	return pruneEvery <= 1 || n%pruneEvery == 1
 }
 
 // RecordUndelivered records a delivery of payload to each webhook without

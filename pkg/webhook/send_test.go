@@ -545,6 +545,79 @@ func TestRecordUndeliveredStoresRequestWithoutSending(t *testing.T) {
 	is.True(strings.Contains(ds[0].RequestHeaders, "X-Softserve-Signature: sha256="))
 }
 
+// useRetention sets the delivery retention for the test and forgets the
+// per-webhook record counts, which earlier tests' webhooks with the same IDs
+// left behind. It swaps package variables, so tests using it must not call
+// t.Parallel.
+func useRetention(t *testing.T, keep int, every uint64) {
+	t.Helper()
+	origKeep, origEvery := maxDeliveries, pruneEvery
+	maxDeliveries, pruneEvery = keep, every
+	recordCounts.Clear()
+	t.Cleanup(func() {
+		maxDeliveries, pruneEvery = origKeep, origEvery
+		recordCounts.Clear()
+	})
+}
+
+// Undelivered events cost no network time, so they are the quickest way to
+// grow the deliveries table. Each webhook keeps only its newest deliveries,
+// and pruning one webhook leaves the others' deliveries alone.
+func TestRecordedDeliveriesAreBoundedPerWebhook(t *testing.T) {
+	is := is.New(t)
+	useRetention(t, 5, 1)
+	e := newTestEnv(t)
+	a := e.newWebhook(t, "https://93.184.216.34/a", "", ContentTypeJSON, EventPush)
+	b := e.newWebhook(t, "https://93.184.216.34/b", "", ContentTypeJSON, EventPush)
+	payload := samplePayloadFor(e)
+
+	for range 12 {
+		is.NoErr(RecordUndelivered(e.ctx, []models.Webhook{a}, payload, errors.New("queue full")))
+	}
+	for range 3 {
+		is.NoErr(RecordUndelivered(e.ctx, []models.Webhook{b}, payload, errors.New("queue full")))
+	}
+
+	is.Equal(len(e.deliveries(t, a.ID)), 5)
+	is.Equal(len(e.deliveries(t, b.ID)), 3)
+}
+
+// Pruning only every few records lets a webhook exceed the limit by less
+// than that interval, and never by more.
+func TestRecordedDeliveriesPruneIsAmortized(t *testing.T) {
+	is := is.New(t)
+	useRetention(t, 5, 4)
+	e := newTestEnv(t)
+	w := e.newWebhook(t, "https://93.184.216.34/a", "", ContentTypeJSON, EventPush)
+	payload := samplePayloadFor(e)
+
+	maxSeen := 0
+	for range 30 {
+		is.NoErr(RecordUndelivered(e.ctx, []models.Webhook{w}, payload, errors.New("queue full")))
+		maxSeen = max(maxSeen, len(e.deliveries(t, w.ID)))
+	}
+	is.Equal(maxSeen, 5+4-1)
+	// Record 29 pruned to 5, record 30 added one.
+	is.Equal(len(e.deliveries(t, w.ID)), 6)
+}
+
+// The first record of a webhook after start prunes, so deliveries that piled
+// up before retention existed are trimmed without waiting for a full interval.
+func TestFirstRecordPrunesExistingDeliveries(t *testing.T) {
+	is := is.New(t)
+	useRetention(t, 5, 10)
+	e := newTestEnv(t)
+	w := e.newWebhook(t, "https://93.184.216.34/a", "", ContentTypeJSON, EventPush)
+	for range 20 {
+		req, err := newRequest(w, EventPush, samplePayloadFor(e))
+		is.NoErr(err)
+		is.NoErr(e.ds.CreateWebhookDelivery(e.ctx, e.dbx, req.id, w.ID, int(EventPush), w.URL, http.MethodPost, nil, "", req.body, 200, "", ""))
+	}
+
+	is.NoErr(RecordUndelivered(e.ctx, []models.Webhook{w}, samplePayloadFor(e), errors.New("queue full")))
+	is.Equal(len(e.deliveries(t, w.ID)), 5)
+}
+
 // Deliver re-reads each webhook before sending, so an event that waited while
 // the webhook was changed goes to its current URL, signed with its current
 // secret, and not to the old receiver.

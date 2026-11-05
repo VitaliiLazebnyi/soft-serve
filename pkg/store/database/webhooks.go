@@ -119,6 +119,28 @@ func (*webhookStore) DeleteWebhookDeliveryByID(ctx context.Context, h db.Handler
 	return err
 }
 
+// PruneWebhookDeliveries implements store.WebhookStore.
+//
+// created_at has a resolution of one second, so several deliveries can share
+// it. The ID breaks those ties, which keeps the choice of what to delete
+// deterministic: among deliveries recorded in the same second, the ones with
+// the lowest IDs go first. The same statement works on SQLite and Postgres.
+func (*webhookStore) PruneWebhookDeliveries(ctx context.Context, h db.Handler, webhookID int64, keep int) error {
+	if keep < 0 {
+		keep = 0
+	}
+	query := h.Rebind(`DELETE FROM webhook_deliveries
+			WHERE webhook_id = ?
+			AND id NOT IN (
+				SELECT id FROM webhook_deliveries
+				WHERE webhook_id = ?
+				ORDER BY created_at DESC, id DESC
+				LIMIT ?
+			);`)
+	_, err := h.ExecContext(ctx, query, webhookID, webhookID, keep)
+	return err
+}
+
 // DeleteWebhookEventsByID implements store.WebhookStore.
 func (*webhookStore) DeleteWebhookEventsByID(ctx context.Context, h db.Handler, ids []int64) error {
 	// sqlx rejects an empty IN clause, and there is nothing to delete.

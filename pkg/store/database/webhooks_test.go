@@ -256,6 +256,7 @@ func TestWebhookStoreErrorsOnClosedDB(t *testing.T) {
 	_, checks["ListWebhookDeliveriesByWebhookID"] = s.ListWebhookDeliveriesByWebhookID(ctx, dbx, id)
 	checks["CreateWebhookDelivery"] = s.CreateWebhookDelivery(ctx, dbx, uuid.New(), id, 4, "u", "POST", nil, "", "", 0, "", "")
 	checks["DeleteWebhookDeliveryByID"] = s.DeleteWebhookDeliveryByID(ctx, dbx, id, did)
+	checks["PruneWebhookDeliveries"] = s.PruneWebhookDeliveries(ctx, dbx, id, 1)
 
 	for name, err := range checks {
 		if err == nil {
@@ -401,6 +402,92 @@ func TestWebhookStoreDeliveriesOrder(t *testing.T) {
 	is.NoErr(err)
 	want = append([]uuid.UUID{first}, want...)
 	check()
+}
+
+// Pruning keeps the newest deliveries of one webhook and leaves the
+// deliveries of other webhooks alone.
+func TestPruneWebhookDeliveriesKeepsNewest(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+	hook, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 1, true)
+	is.NoErr(err)
+	other, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.35/b", "", 1, true)
+	is.NoErr(err)
+
+	// Eight deliveries one minute apart, inserted oldest first.
+	ids := make([]uuid.UUID, 8)
+	for i := range ids {
+		ids[i] = uuid.New()
+		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, ids[i], hook, 1, "u", "POST", nil, "", "{}", 200, "", ""))
+		_, err := dbx.ExecContext(ctx, `UPDATE webhook_deliveries SET created_at = datetime('2024-01-01 00:00:00', ?) WHERE id = ?;`,
+			fmt.Sprintf("+%d minutes", i), ids[i])
+		is.NoErr(err)
+	}
+	for range 3 {
+		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, uuid.New(), other, 1, "u", "POST", nil, "", "{}", 200, "", ""))
+	}
+
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 5))
+
+	all, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+	is.NoErr(err)
+	is.Equal(len(all), 5)
+	kept := map[uuid.UUID]bool{}
+	for _, d := range all {
+		kept[d.ID] = true
+	}
+	for i, id := range ids {
+		is.Equal(kept[id], i >= 3) // the three oldest are gone
+	}
+
+	others, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, other)
+	is.NoErr(err)
+	is.Equal(len(others), 3)
+
+	// Fewer deliveries than the limit: nothing is deleted.
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 100))
+	all, err = s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+	is.NoErr(err)
+	is.Equal(len(all), 5)
+
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 0))
+	all, err = s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+	is.NoErr(err)
+	is.Equal(len(all), 0)
+}
+
+// Deliveries recorded in the same second share created_at. The ID breaks the
+// tie, so which of them are kept does not depend on the query plan.
+func TestPruneWebhookDeliveriesTieBreaksByID(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+	hook, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 1, true)
+	is.NoErr(err)
+
+	for _, id := range []string{
+		"00000000-0000-0000-0000-000000000003",
+		"00000000-0000-0000-0000-000000000001",
+		"00000000-0000-0000-0000-000000000004",
+		"00000000-0000-0000-0000-000000000002",
+	} {
+		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, uuid.MustParse(id), hook, 1, "u", "POST", nil, "", "{}", 200, "", ""))
+	}
+	_, err = dbx.ExecContext(ctx, `UPDATE webhook_deliveries SET created_at = '2024-01-01 00:00:00';`)
+	is.NoErr(err)
+
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 2))
+
+	all, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+	is.NoErr(err)
+	is.Equal(len(all), 2)
+	kept := map[string]bool{}
+	for _, d := range all {
+		kept[d.ID.String()] = true
+	}
+	is.True(kept["00000000-0000-0000-0000-000000000003"])
+	is.True(kept["00000000-0000-0000-0000-000000000004"])
 }
 
 func idsOf(whs []models.Webhook) []int64 {

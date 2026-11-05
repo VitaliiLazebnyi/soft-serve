@@ -470,6 +470,34 @@ func TestRedeliverFormWebhook(t *testing.T) {
 	}
 }
 
+// A delivery kept by retention pruning can still be redelivered; a pruned one
+// is reported as not found.
+func TestRedeliverAfterPrune(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	id := e.createHook(t, whURL, webhook.EventPush)
+	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
+		return e.be.store.UpdateWebhookByID(e.ctx, tx, e.repo.ID(), id, "http://127.0.0.1:1/", "", int(webhook.ContentTypeJSON), true)
+	}))
+	old := e.seedDelivery(t, id, "http://127.0.0.1:1/", `{"ref":"old"}`)
+	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
+		_, err := tx.ExecContext(e.ctx, tx.Rebind(`UPDATE webhook_deliveries SET created_at = '2000-01-01 00:00:00' WHERE id = ?;`), old)
+		return err
+	}))
+	kept := e.seedDelivery(t, id, "http://127.0.0.1:1/", `{"ref":"new"}`)
+	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
+		return e.be.store.PruneWebhookDeliveries(e.ctx, tx, id, 1)
+	}))
+
+	is.True(errors.Is(e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, old), db.ErrRecordNotFound))
+	is.NoErr(e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, kept))
+
+	// The redelivery is recorded next to the delivery it repeats.
+	list, err := e.be.ListWebhookDeliveries(e.ctx, e.repo, id)
+	is.NoErr(err)
+	is.Equal(len(list), 2)
+}
+
 func TestRedeliverFailures(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)

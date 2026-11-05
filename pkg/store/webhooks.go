@@ -52,4 +52,8 @@ type WebhookStore interface {
 	CreateWebhookDelivery(ctx context.Context, h db.Handler, id uuid.UUID, webhookID int64, event int, url string, method string, requestError error, requestHeaders string, requestBody string, responseStatus int, responseHeaders string, responseBody string) error
 	// DeleteWebhookDeliveryByID deletes a webhook delivery by its ID.
 	DeleteWebhookDeliveryByID(ctx context.Context, h db.Handler, webhookID int64, id uuid.UUID) error
+	// PruneWebhookDeliveries deletes all but the keep most recent deliveries
+	// of a webhook. Deliveries are ordered by creation time, newest first,
+	// with ties broken by ID.
+	PruneWebhookDeliveries(ctx context.Context, h db.Handler, webhookID int64, keep int) error
 }
