@@ -14,7 +14,7 @@ cmpenv stdout help.txt
 [windows] ! stderr .
 
 -- help.txt --
-Soft Serve is a self-hostable Git server for the command line.
+Soft Serve Plus is a self-hostable Git server for the command line.
 
 Usage:
   ssh -p $SSH_PORT localhost [command]

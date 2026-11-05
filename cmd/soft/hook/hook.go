@@ -31,7 +31,7 @@ var (
 	Command = &cobra.Command{
 		Use:    "hook",
 		Short:  "Run git server hooks",
-		Long:   "Handles Soft Serve git server hooks.",
+		Long:   "Handles Soft Serve Plus git server hooks.",
 		Hidden: true,
 		PersistentPreRunE: func(c *cobra.Command, args []string) error {
 			logger := log.FromContext(c.Context())

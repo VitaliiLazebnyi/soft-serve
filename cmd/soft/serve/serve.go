@@ -178,7 +178,7 @@ else
         newrev_type=$(git cat-file -t $newrev)
 fi
 
-echo "Hi from Soft Serve update hook!"
+echo "Hi from Soft Serve Plus update hook!"
 echo
 echo "Repository: $SOFT_SERVE_REPO_NAME"
 echo "RefName: $refname"
