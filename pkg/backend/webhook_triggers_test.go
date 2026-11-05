@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/soft-serve/pkg/access"
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -55,6 +57,35 @@ func (e whEnv) deliveredEvents(t *testing.T, hookID int64) []webhook.Event {
 		out = append(out, d.Event)
 	}
 	return out
+}
+
+// waitFor polls cond until it holds. Changes made through the backend send
+// their events in the background, so tests wait for those sends to finish.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// awaitDeliveries waits until the webhook has recorded exactly want.
+func (e whEnv) awaitDeliveries(t *testing.T, hookID int64, want ...webhook.Event) {
+	t.Helper()
+	waitFor(t, "deliveries", func() bool {
+		return slices.Equal(e.deliveredEvents(t, hookID), want)
+	})
+}
+
+// awaitLog waits until the log contains text.
+func (e whEnv) awaitLog(t *testing.T, text string) {
+	t.Helper()
+	waitFor(t, "log line "+text, func() bool {
+		return strings.Contains(e.logs.String(), text)
+	})
 }
 
 // A branch or tag creation sends branch_tag_create. The update hook is run
@@ -137,7 +168,7 @@ func TestRenameRepositorySendsRepositoryEvent(t *testing.T) {
 
 	is.NoErr(e.be.RenameRepository(e.ctx, "repo", "renamed"))
 
-	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventRepository})
+	e.awaitDeliveries(t, id, webhook.EventRepository)
 }
 
 // A failed event does not undo a committed rename, and the caller sees success.
@@ -153,7 +184,7 @@ func TestRenameRepositoryKeepsChangeWhenEventFails(t *testing.T) {
 	is.NoErr(err)
 	_, err = e.be.Repository(e.ctx, "repo")
 	is.True(errors.Is(err, proto.ErrRepoNotFound))
-	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
+	e.awaitLog(t, "webhook event not delivered")
 }
 
 // A failed event does not undo a committed visibility change.
@@ -168,29 +199,49 @@ func TestSetPrivateKeepsChangeWhenEventFails(t *testing.T) {
 	repo, err := e.be.Repository(e.ctx, "repo")
 	is.NoErr(err)
 	is.True(repo.IsPrivate())
-	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
+	e.awaitLog(t, "webhook event not delivered")
 }
 
-// The repository-deleted event is sent before the rows go. With foreign keys
-// enforced (as on PostgreSQL) the webhook and its deliveries are removed with
-// the repository, so a trigger copies each delivery into a probe table that
-// survives the cascade.
+// The repository-deleted event goes to the subscribers that were read before
+// the rows were removed. The seeded receiver is a loopback address that the
+// SSRF-protected client refuses, so the attempt shows up as a logged failure.
 func TestDeleteRepositorySendsRepositoryEvent(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
-	e.be.db.SetMaxOpenConns(1)
 	e.seedHook(t, webhook.EventRepository)
 
-	_, err := e.be.db.ExecContext(e.ctx, "CREATE TABLE probe_deliveries (event INTEGER)")
-	is.NoErr(err)
-	_, err = e.be.db.ExecContext(e.ctx, "CREATE TRIGGER probe_delivery AFTER INSERT ON webhook_deliveries BEGIN INSERT INTO probe_deliveries (event) VALUES (NEW.event); END;")
-	is.NoErr(err)
+	is.NoErr(e.be.DeleteRepository(e.ctx, "repo"))
+	_, err := e.be.Repository(e.ctx, "repo")
+	is.True(errors.Is(err, proto.ErrRepoNotFound))
+
+	e.awaitLog(t, "webhook event not delivered")
+}
+
+// Deleting a repository removes its webhooks with their events and deliveries,
+// even on a connection that does not enforce foreign keys. No delivery row is
+// written for the repository event, since its webhook is gone.
+func TestDeleteRepositoryRemovesWebhookRows(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	t.Setenv("SOFT_SERVE_USERNAME", "admin")
+	t.Setenv("SOFT_SERVE_PUBLIC_KEY", "")
+	id := e.seedHook(t, webhook.EventBranchTagCreate, webhook.EventRepository)
+	e.be.Update(e.ctx, io.Discard, io.Discard, e.repo.Name(), hooks.HookArg{
+		OldSha: zeroSha, NewSha: someSha, RefName: "refs/heads/feature",
+	})
+	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventBranchTagCreate})
 
 	is.NoErr(e.be.DeleteRepository(e.ctx, "repo"))
 
-	var sent int
-	is.NoErr(e.be.db.GetContext(e.ctx, &sent, "SELECT COUNT(*) FROM probe_deliveries WHERE event = ?", int(webhook.EventRepository)))
-	is.Equal(sent, 1)
+	for _, q := range []string{
+		"SELECT COUNT(*) FROM webhooks WHERE id = ?",
+		"SELECT COUNT(*) FROM webhook_events WHERE webhook_id = ?",
+		"SELECT COUNT(*) FROM webhook_deliveries WHERE webhook_id = ?",
+	} {
+		var n int
+		is.NoErr(e.be.db.GetContext(e.ctx, &n, q, id))
+		is.Equal(n, 0)
+	}
 }
 
 func TestCollaboratorEventsAddAndRemove(t *testing.T) {
@@ -203,7 +254,7 @@ func TestCollaboratorEventsAddAndRemove(t *testing.T) {
 	is.NoErr(e.be.AddCollaborator(e.ctx, "repo", "bob", access.ReadWriteAccess))
 	is.NoErr(e.be.RemoveCollaborator(e.ctx, "repo", "bob"))
 
-	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventCollaborator, webhook.EventCollaborator})
+	e.awaitDeliveries(t, id, webhook.EventCollaborator, webhook.EventCollaborator)
 }
 
 // A failed event does not undo committed collaborator changes.
@@ -222,7 +273,7 @@ func TestCollaboratorChangesKeepWhenEventFails(t *testing.T) {
 	is.NoErr(e.be.RemoveCollaborator(e.ctx, "repo", "bob"))
 	// The repository is public, so a non-collaborator gets read-only.
 	is.Equal(e.be.AccessLevelForUser(e.ctx, "repo", bob), access.ReadOnlyAccess)
-	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
+	e.awaitLog(t, "webhook event not delivered")
 }
 
 func TestRemoveCollaboratorNotFound(t *testing.T) {
@@ -365,20 +416,6 @@ func TestUpdateHookUnknownPublicKey(t *testing.T) {
 	is.Equal(len(e.deliveredEvents(t, id)), 0)
 }
 
-// A failed event does not stop the repository from being deleted.
-func TestDeleteRepositoryProceedsWhenEventFails(t *testing.T) {
-	is := is.New(t)
-	e := newWebhookEnv(t)
-	e.seedHook(t, webhook.EventRepository)
-	_, err := e.be.db.ExecContext(e.ctx, "DROP TABLE webhook_deliveries")
-	is.NoErr(err)
-
-	is.NoErr(e.be.DeleteRepository(e.ctx, "repo"))
-	_, err = e.be.Repository(e.ctx, "repo")
-	is.True(errors.Is(err, proto.ErrRepoNotFound))
-	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
-}
-
 // Collaborator changes validate the username before anything is written.
 func TestAddCollaboratorRejectsInvalidUsername(t *testing.T) {
 	is := is.New(t)
@@ -396,7 +433,7 @@ func TestAddCollaboratorTwice(t *testing.T) {
 	is.NoErr(e.be.AddCollaborator(e.ctx, "repo", "bob", access.ReadWriteAccess))
 
 	is.True(errors.Is(e.be.AddCollaborator(e.ctx, "repo", "bob", access.ReadWriteAccess), proto.ErrCollaboratorExist))
-	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventCollaborator})
+	e.awaitDeliveries(t, id, webhook.EventCollaborator)
 }
 
 // whTestKey returns a fresh ed25519 public key for a test user.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	neturl "net/url"
+	"time"
 
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -200,20 +201,36 @@ func (b *Backend) DeleteWebhook(ctx context.Context, repo proto.Repository, id i
 		if err != nil {
 			return db.WrapError(err)
 		}
-		// SQLite does not enforce the schema's ON DELETE CASCADE (foreign keys
-		// are not enabled per connection), so remove dependent rows explicitly.
-		if err := datastore.DeleteWebhookDeliveriesByWebhookID(ctx, tx, id); err != nil {
-			return db.WrapError(err)
-		}
-		if err := datastore.DeleteWebhookEventsByWebhookID(ctx, tx, id); err != nil {
-			return db.WrapError(err)
-		}
-		if err := datastore.DeleteWebhookForRepoByID(ctx, tx, repo.ID(), id); err != nil {
-			return db.WrapError(err)
-		}
-
-		return nil
+		return db.WrapError(b.deleteWebhookRows(ctx, tx, repo.ID(), id))
 	})
+}
+
+// deleteWebhookRows removes one webhook of a repository together with its
+// events and deliveries. The rows are removed explicitly rather than through
+// ON DELETE CASCADE, which only applies when the connection enables foreign
+// keys; the default SQLite data source does, but a custom one may not.
+func (d *Backend) deleteWebhookRows(ctx context.Context, tx *db.Tx, repoID int64, id int64) error {
+	if err := d.store.DeleteWebhookDeliveriesByWebhookID(ctx, tx, id); err != nil {
+		return err
+	}
+	if err := d.store.DeleteWebhookEventsByWebhookID(ctx, tx, id); err != nil {
+		return err
+	}
+	return d.store.DeleteWebhookForRepoByID(ctx, tx, repoID, id)
+}
+
+// deleteRepoWebhookRows removes every webhook of a repository with its rows.
+func (d *Backend) deleteRepoWebhookRows(ctx context.Context, tx *db.Tx, repoID int64) error {
+	whs, err := d.store.GetWebhooksByRepoID(ctx, tx, repoID)
+	if err != nil {
+		return err
+	}
+	for _, w := range whs {
+		if err := d.deleteWebhookRows(ctx, tx, repoID, w.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ListWebhookDeliveries lists webhook deliveries for a webhook belonging to
@@ -369,11 +386,44 @@ func dedupeEvents(events []webhook.Event) []webhook.Event {
 	return out
 }
 
+// webhookSendTimeout bounds how long the deliveries of one event may take,
+// including waiting on slow receivers.
+const webhookSendTimeout = time.Minute
+
 // sendAfterChange sends the webhook event for a change that is already
-// committed. The change has happened, so a delivery failure is logged rather
-// than returned: returning it would tell the caller the change failed.
+// committed. The subscribers are read now and the deliveries run in the
+// background, so the caller does not wait on receivers. The change has
+// happened, so a failure is logged rather than returned.
 func (d *Backend) sendAfterChange(ctx context.Context, ev webhook.EventPayload) {
-	if err := webhook.SendEvent(ctx, ev); err != nil {
-		d.logger.Error("webhook event not delivered", "event", ev.Event(), "repo_id", ev.RepositoryID(), "err", err)
+	hooks, err := webhook.Subscribers(ctx, ev)
+	if err != nil {
+		d.logEventNotDelivered(ev, err)
+		return
 	}
+	d.deliverAfterChange(ctx, hooks, ev, true)
+}
+
+// deliverAfterChange sends ev to hooks in the background. It is detached from
+// the request's cancellation but still bounded by webhookSendTimeout.
+func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook, ev webhook.EventPayload, record bool) {
+	if len(hooks) == 0 {
+		return
+	}
+	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), webhookSendTimeout)
+	go func() {
+		defer cancel()
+		var err error
+		if record {
+			err = webhook.Deliver(bg, hooks, ev)
+		} else {
+			err = webhook.DeliverUnrecorded(bg, hooks, ev)
+		}
+		if err != nil {
+			d.logEventNotDelivered(ev, err)
+		}
+	}()
+}
+
+func (d *Backend) logEventNotDelivered(ev webhook.EventPayload, err error) {
+	d.logger.Error("webhook event not delivered", "event", ev.Event(), "repo_id", ev.RepositoryID(), "err", err)
 }

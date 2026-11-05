@@ -374,13 +374,17 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 		return err
 	}
 
-	// Send the event before the rows are removed. The repository's webhooks
-	// and their deliveries are deleted with it when foreign keys are enforced
-	// (PostgreSQL), so after the delete there is no webhook to send to.
-	// A failed send is logged and does not stop the delete: the receiver's
-	// outcome is recorded as a delivery, not as a reason to keep the repo.
+	// The subscribers must be read before the rows are removed: the webhooks
+	// are gone after the delete. A failure to read them is logged and does not
+	// stop the delete.
+	var hooks []models.Webhook
 	if wh != nil {
-		d.sendAfterChange(ctx, *wh)
+		subs, subErr := webhook.Subscribers(ctx, *wh)
+		if subErr != nil {
+			d.logEventNotDelivered(*wh, subErr)
+		} else {
+			hooks = subs
+		}
 	}
 
 	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
@@ -415,6 +419,12 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 			}
 		}
 
+		// Remove the webhooks and their rows explicitly, so none are left
+		// behind whether or not the connection enforces foreign keys.
+		if err := d.deleteRepoWebhookRows(ctx, tx, repom.ID); err != nil {
+			return db.WrapError(err)
+		}
+
 		if err := d.store.DeleteRepoByName(ctx, tx, name); err != nil {
 			return db.WrapError(err)
 		}
@@ -422,6 +432,13 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 		return os.RemoveAll(rp)
 	}); err != nil {
 		return wrapRepoError(err)
+	}
+
+	// The repository is gone, so its event is delivered without recording
+	// deliveries: they would refer to webhooks that no longer exist. The
+	// receiver's outcome is only logged, not returned, so it cannot undo the delete.
+	if wh != nil {
+		d.deliverAfterChange(ctx, hooks, *wh, false)
 	}
 
 	return nil

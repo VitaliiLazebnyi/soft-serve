@@ -49,12 +49,13 @@ func TestSetPrivateWebhookOnlyOnChange(t *testing.T) {
 	is.NoErr(be.SetPrivate(ctx, "repo", false))
 	is.Equal(deliveries(), 0)
 
+	// Deliveries run in the background, so the positive checks wait for them.
 	is.NoErr(be.SetPrivate(ctx, "repo", true))
-	is.Equal(deliveries(), 1)
+	waitFor(t, "first visibility delivery", func() bool { return deliveries() == 1 })
 
 	is.NoErr(be.SetPrivate(ctx, "repo", true))
 	is.Equal(deliveries(), 1)
 
 	is.NoErr(be.SetPrivate(ctx, "repo", false))
-	is.Equal(deliveries(), 2)
+	waitFor(t, "second visibility delivery", func() bool { return deliveries() == 2 })
 }

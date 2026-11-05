@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/charmbracelet/soft-serve/pkg/config"
@@ -22,6 +23,25 @@ const (
 	whURLOther = "https://93.184.216.35/hook"
 )
 
+// syncBuffer is a log sink that background deliveries write to while a test
+// may be reading it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // whEnv is a backend wired like a request: config, db and store in the
 // context, an admin user, and one repository.
 type whEnv struct {
@@ -30,13 +50,13 @@ type whEnv struct {
 	cfg   *config.Config
 	admin proto.User
 	repo  proto.Repository
-	logs  *bytes.Buffer
+	logs  *syncBuffer
 }
 
 func newWebhookEnv(t *testing.T) whEnv {
 	t.Helper()
 	is := is.New(t)
-	logs := &bytes.Buffer{}
+	logs := &syncBuffer{}
 	be, cfg := newTestBackendWithLog(t, logs)
 	ctx := config.WithContext(context.Background(), cfg)
 	ctx = db.WithContext(ctx, be.db)

@@ -58,8 +58,15 @@ func do(ctx context.Context, url string, method string, headers http.Header, bod
 	return res, nil
 }
 
-// SendWebhook sends a webhook event.
+// SendWebhook sends a webhook event and records the attempt.
 func SendWebhook(ctx context.Context, w models.Webhook, event Event, payload interface{}) error {
+	return sendWebhook(ctx, w, event, payload, true)
+}
+
+// sendWebhook sends a webhook event. When record is false the attempt is not
+// written to the deliveries table, and the transport error (if any) is returned
+// so the caller can log it.
+func sendWebhook(ctx context.Context, w models.Webhook, event Event, payload interface{}, record bool) error {
 	var buf bytes.Buffer
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
@@ -134,31 +141,57 @@ func SendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 		}
 	}
 
+	if !record {
+		return reqErr
+	}
+
 	return db.WrapError(datastore.CreateWebhookDelivery(ctx, dbx, id, w.ID, int(event), w.URL, http.MethodPost, reqErr, reqHeaders, reqBody, resStatus, resHeaders, resBody))
 }
 
-// SendEvent sends a webhook event.
-func SendEvent(ctx context.Context, payload EventPayload) error {
+// Subscribers returns the webhooks of the payload's repository that subscribe
+// to its event. Call it before a change that removes those webhooks, since
+// they cannot be found afterwards.
+func Subscribers(ctx context.Context, payload EventPayload) ([]models.Webhook, error) {
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
 	webhooks, err := datastore.GetWebhooksByRepoIDWhereEvent(ctx, dbx, payload.RepositoryID(), []int{int(payload.Event())})
 	if err != nil {
-		return db.WrapError(err)
+		return nil, db.WrapError(err)
 	}
+	return webhooks, nil
+}
 
+// Deliver sends the payload to each webhook and records every attempt.
+func Deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload) error {
+	return deliver(ctx, hooks, payload, true)
+}
+
+// DeliverUnrecorded sends the payload to each webhook without recording the
+// attempts. Use it when the webhooks are being removed, so no delivery row is
+// written that refers to a webhook that no longer exists.
+func DeliverUnrecorded(ctx context.Context, hooks []models.Webhook, payload EventPayload) error {
+	return deliver(ctx, hooks, payload, false)
+}
+
+func deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload, record bool) error {
 	// Every webhook is attempted even if an earlier one fails to send or
 	// record, so one bad webhook cannot stop the others from receiving the event.
 	var errs []error
-	for _, w := range webhooks {
-		if err := SendWebhook(ctx, w, payload.Event(), payload); err != nil {
+	for _, w := range hooks {
+		if err := sendWebhook(ctx, w, payload.Event(), payload, record); err != nil {
 			errs = append(errs, err)
 		}
 	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
+	return errors.Join(errs...)
+}
 
-	return nil
+// SendEvent sends a webhook event to the repository's subscribers.
+func SendEvent(ctx context.Context, payload EventPayload) error {
+	hooks, err := Subscribers(ctx, payload)
+	if err != nil {
+		return err
+	}
+	return Deliver(ctx, hooks, payload)
 }
 
 func repoURL(publicURL string, repo string) string {
