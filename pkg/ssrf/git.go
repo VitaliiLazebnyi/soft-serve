@@ -192,7 +192,7 @@ func validateRemoteHost(host string) (netip.Addr, error) {
 	// Telling "cannot resolve" apart from "private address" is kept on
 	// purpose: it is one bit of recon over an authenticated session, and it
 	// is what lets a user notice a typo in the hostname.
-	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
+	ips, err := lookupIPAddr(context.Background(), host)
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("%w: cannot resolve hostname", ErrInvalidURL)
 	}

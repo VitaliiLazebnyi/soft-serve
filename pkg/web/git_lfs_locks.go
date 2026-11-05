@@ -42,10 +42,7 @@ func serviceLfsLocksCreate(w http.ResponseWriter, r *http.Request) {
 	// Checked in withAccess too. Repeated here so a routing or middleware
 	// mistake cannot turn into an unauthorized lock.
 	if access.FromContext(ctx) < access.ReadWriteAccess {
-		askCredentials(w, r)
-		renderJSON(w, http.StatusForbidden, lfs.ErrorResponse{
-			Message: "write access required",
-		})
+		denyLFSWrite(w, r)
 		return
 	}
 

@@ -224,6 +224,19 @@ func badCredentials(err error) bool {
 	return errors.Is(err, ErrInvalidToken) || errors.Is(err, ErrInvalidPassword)
 }
 
+// denyLFSWrite answers an LFS write by a caller without write access. An
+// anonymous caller gets 401 with a credentials challenge, since git-lfs only
+// asks for credentials after a 401 and otherwise gives up on the push. A
+// signed-in caller gets 403.
+func denyLFSWrite(w http.ResponseWriter, r *http.Request) {
+	if proto.UserFromContext(r.Context()) == nil {
+		askCredentials(w, r)
+		renderJSON(w, http.StatusUnauthorized, lfs.ErrorResponse{Message: "credentials needed"})
+		return
+	}
+	renderJSON(w, http.StatusForbidden, lfs.ErrorResponse{Message: "write access required"})
+}
+
 // denyRead answers a caller who may not read the repository. Missing and
 // unreadable repositories get the same answer so neither is revealed.
 func denyRead(w http.ResponseWriter, r *http.Request, err error, lfsJSON bool) {
@@ -282,8 +295,13 @@ const (
 	// unauthorized answers 401 with a credentials challenge: an anonymous
 	// reader who may not write.
 	unauthorized
-	// forbidLFSWrite answers the LFS "write access required" error.
+	// forbidLFSWrite answers the LFS "write access required" error: a
+	// signed-in reader who may not write.
 	forbidLFSWrite
+	// unauthorizedLFS answers an LFS 401 with a credentials challenge: an
+	// anonymous reader who may not write. git-lfs only asks for credentials
+	// after a 401; a 403 ends the push.
+	unauthorizedLFS
 )
 
 // authorize decides what to do with a request without touching the
@@ -300,6 +318,8 @@ func authorize(service git.Service, file, method string, readable bool, level ac
 			return denyUnreadable
 		case badCreds:
 			return forbid
+		case lfsNeedsWrite(file, method) && level < access.ReadWriteAccess && anonymous:
+			return unauthorizedLFS
 		case lfsNeedsWrite(file, method) && level < access.ReadWriteAccess:
 			return forbidLFSWrite
 		}
@@ -410,10 +430,8 @@ func withAccess(next http.Handler) http.HandlerFunc {
 			askCredentials(w, r)
 			renderUnauthorized(w, r)
 			return
-		case forbidLFSWrite:
-			renderJSON(w, http.StatusForbidden, lfs.ErrorResponse{
-				Message: "write access required",
-			})
+		case forbidLFSWrite, unauthorizedLFS:
+			denyLFSWrite(w, r)
 			return
 		}
 

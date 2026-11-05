@@ -179,10 +179,7 @@ func serviceLfsBatch(w http.ResponseWriter, r *http.Request) {
 		// Check authorization
 		accessLevel := access.FromContext(ctx)
 		if accessLevel < access.ReadWriteAccess {
-			askCredentials(w, r)
-			renderJSON(w, http.StatusForbidden, lfs.ErrorResponse{
-				Message: "write access required",
-			})
+			denyLFSWrite(w, r)
 			return
 		}
 
@@ -309,10 +306,7 @@ func serviceLfsBasicUpload(w http.ResponseWriter, r *http.Request) {
 	// Checked in withAccess too. Repeated here so a routing or middleware
 	// mistake cannot turn into an unauthenticated write.
 	if access.FromContext(ctx) < access.ReadWriteAccess {
-		askCredentials(w, r)
-		renderJSON(w, http.StatusForbidden, lfs.ErrorResponse{
-			Message: "write access required",
-		})
+		denyLFSWrite(w, r)
 		return
 	}
 
