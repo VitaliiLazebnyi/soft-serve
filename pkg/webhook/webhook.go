@@ -116,9 +116,11 @@ func SendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 
 		if res.Body != nil {
 			defer res.Body.Close() //nolint: errcheck
+			// A failed read still leaves a delivery record: keep what was
+			// read and report the read error with the request error.
 			b, err := io.ReadAll(res.Body)
 			if err != nil {
-				return err
+				reqErr = errors.Join(reqErr, err)
 			}
 
 			resBody = string(b)
@@ -137,10 +139,16 @@ func SendEvent(ctx context.Context, payload EventPayload) error {
 		return db.WrapError(err)
 	}
 
+	// Every webhook is attempted even if an earlier one fails to send or
+	// record, so one bad webhook cannot stop the others from receiving the event.
+	var errs []error
 	for _, w := range webhooks {
 		if err := SendWebhook(ctx, w, payload.Event(), payload); err != nil {
-			return err
+			errs = append(errs, err)
 		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 
 	return nil
