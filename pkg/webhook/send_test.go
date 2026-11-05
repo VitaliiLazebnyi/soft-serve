@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
@@ -542,4 +543,71 @@ func TestRecordUndeliveredStoresRequestWithoutSending(t *testing.T) {
 	is.NoErr(err)
 	is.Equal(strings.TrimSpace(ds[0].RequestBody), string(want))
 	is.True(strings.Contains(ds[0].RequestHeaders, "X-Softserve-Signature: sha256="))
+}
+
+// endlessServer answers with a 200 and streams a body that never ends, until
+// the client goes away.
+func endlessServer(t *testing.T) string {
+	t.Helper()
+	chunk := []byte(strings.Repeat("x", 4096))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		for r.Context().Err() == nil {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// A receiver that streams without end does not hold the sender until its
+// timeout: only maxResponseBody bytes are read and stored, marked as cut off,
+// and the delivery itself counts as a success.
+func TestSendWebhookResponseBodyIsCapped(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	e := newTestEnv(t)
+	w := e.newWebhook(t, endlessServer(t), "", ContentTypeJSON, EventPush)
+
+	is.NoErr(SendWebhook(e.ctx, w, EventPush, samplePayloadFor(e)))
+
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.Equal(ds[0].RequestError.String, "")
+	is.Equal(ds[0].ResponseStatus, http.StatusOK)
+	is.Equal(ds[0].ResponseBody, strings.Repeat("x", maxResponseBody)+truncatedMarker)
+}
+
+// A body of exactly maxResponseBody bytes is stored whole and not marked.
+func TestSendWebhookResponseBodyAtLimitIsKept(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	e := newTestEnv(t)
+	body := strings.Repeat("y", maxResponseBody)
+	srv, _ := newReceiver(t, http.StatusOK, body)
+	w := e.newWebhook(t, srv.URL, "", ContentTypeJSON, EventPush)
+
+	is.NoErr(SendWebhook(e.ctx, w, EventPush, samplePayloadFor(e)))
+
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.Equal(ds[0].ResponseBody, body)
+}
+
+// A read that fails before the limit keeps what was read and reports the
+// error. A failure after the limit is never reached.
+func TestReadResponseBodyKeepsPartialReadOnError(t *testing.T) {
+	is := is.New(t)
+	boom := errors.New("boom")
+
+	got, err := readResponseBody(io.MultiReader(strings.NewReader("partial"), iotest.ErrReader(boom)))
+	is.True(errors.Is(err, boom))
+	is.Equal(got, "partial")
+
+	long := strings.Repeat("z", maxResponseBody+10)
+	got, err = readResponseBody(io.MultiReader(strings.NewReader(long), iotest.ErrReader(boom)))
+	is.NoErr(err)
+	is.Equal(got, long[:maxResponseBody]+truncatedMarker)
 }

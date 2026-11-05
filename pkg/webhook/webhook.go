@@ -156,12 +156,11 @@ func sendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 			defer res.Body.Close() //nolint: errcheck
 			// A failed read still leaves a delivery record: keep what was
 			// read and report the read error with the request error.
-			b, err := io.ReadAll(res.Body)
+			var err error
+			resBody, err = readResponseBody(res.Body)
 			if err != nil {
 				reqErr = errors.Join(reqErr, err)
 			}
-
-			resBody = string(b)
 		}
 	}
 
@@ -173,6 +172,27 @@ func sendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 	}
 
 	return recordDelivery(ctx, w, event, req, reqErr, resStatus, resHeaders, resBody)
+}
+
+// maxResponseBody is how much of a receiver's response body is read and
+// stored. The rest is not read: the body is closed, so a receiver that streams
+// without end cannot hold the sender for its whole timeout or fill the
+// deliveries table.
+const maxResponseBody = 64 << 10
+
+// truncatedMarker is appended to a stored response body that was cut off at
+// maxResponseBody.
+const truncatedMarker = "\n[response body truncated by Soft Serve]"
+
+// readResponseBody reads at most maxResponseBody bytes of body. A longer body
+// is cut off and marked with truncatedMarker. On a read error it returns what
+// was read so far with the error.
+func readResponseBody(body io.Reader) (string, error) {
+	b, err := io.ReadAll(io.LimitReader(body, maxResponseBody+1))
+	if len(b) > maxResponseBody {
+		return string(b[:maxResponseBody]) + truncatedMarker, err
+	}
+	return string(b), err
 }
 
 // recordDelivery writes one delivery row. It uses a fresh, short context that
