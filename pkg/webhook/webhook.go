@@ -242,7 +242,9 @@ func Subscribers(ctx context.Context, payload EventPayload) ([]models.Webhook, e
 	return webhooks, nil
 }
 
-// Deliver sends the payload to each webhook and records every attempt.
+// Deliver sends the payload to each webhook and records every attempt. Each
+// webhook is re-read just before its send: one deleted or unsubscribed since
+// hooks was read is skipped, and a changed URL or secret is used.
 func Deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload) error {
 	return deliver(ctx, hooks, payload, true)
 }
@@ -261,11 +263,38 @@ func deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload, 
 	// the time of the webhooks after it.
 	var errs []error
 	for _, w := range hooks {
+		if record {
+			var ok bool
+			if w, ok = currentHook(ctx, w, payload.Event()); !ok {
+				continue
+			}
+		}
 		if err := sendWebhook(ctx, w, payload.Event(), payload, record); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// currentHook re-reads w right before it is sent, since a delivery can wait in
+// the background queue while its webhook is changed. It returns the webhook as
+// stored now, so a rotated secret or changed URL is used, and false when the
+// webhook was deleted or no longer subscribes to event. If the webhook cannot
+// be read, w is returned unchanged and the send goes ahead as before, with its
+// outcome recorded as usual.
+func currentHook(ctx context.Context, w models.Webhook, event Event) (models.Webhook, bool) {
+	dbx := db.FromContext(ctx)
+	datastore := store.FromContext(ctx)
+	hooks, err := datastore.GetWebhooksByRepoIDWhereEvent(ctx, dbx, w.RepoID, []int{int(event)})
+	if err != nil {
+		return w, true
+	}
+	for _, h := range hooks {
+		if h.ID == w.ID {
+			return h, true
+		}
+	}
+	return models.Webhook{}, false
 }
 
 // SendEvent sends a webhook event to the repository's subscribers.

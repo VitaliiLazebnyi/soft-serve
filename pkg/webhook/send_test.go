@@ -545,6 +545,49 @@ func TestRecordUndeliveredStoresRequestWithoutSending(t *testing.T) {
 	is.True(strings.Contains(ds[0].RequestHeaders, "X-Softserve-Signature: sha256="))
 }
 
+// Deliver re-reads each webhook before sending, so an event that waited while
+// the webhook was changed goes to its current URL, signed with its current
+// secret, and not to the old receiver.
+func TestDeliverUsesCurrentWebhook(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	e := newTestEnv(t)
+	oldSrv, oldRec := newReceiver(t, http.StatusOK, "")
+	newSrv, newRec := newReceiver(t, http.StatusOK, "")
+	w := e.newWebhook(t, oldSrv.URL, "old-secret", ContentTypeJSON, EventPush)
+	is.NoErr(e.ds.UpdateWebhookByID(e.ctx, e.dbx, e.repo.ID, w.ID, newSrv.URL, "new-secret", int(ContentTypeJSON), true))
+
+	is.NoErr(Deliver(e.ctx, []models.Webhook{w}, samplePayloadFor(e)))
+
+	is.Equal(oldRec.calls, 0)
+	is.Equal(newRec.calls, 1)
+	mac := hmac.New(sha256.New, []byte("new-secret"))
+	mac.Write([]byte(newRec.body))
+	is.Equal(newRec.header.Get("X-SoftServe-Signature"), "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.Equal(ds[0].RequestURL, newSrv.URL)
+}
+
+// A webhook deleted, or no longer subscribed to the event, after the event was
+// read is not sent to.
+func TestDeliverSkipsRemovedOrUnsubscribedWebhook(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	e := newTestEnv(t)
+	srv, rec := newReceiver(t, http.StatusOK, "")
+	deleted := e.newWebhook(t, srv.URL, "", ContentTypeJSON, EventPush)
+	unsubscribed := e.newWebhook(t, srv.URL+"/?other", "", ContentTypeJSON, EventPush)
+	is.NoErr(e.ds.DeleteWebhookForRepoByID(e.ctx, e.dbx, e.repo.ID, deleted.ID))
+	is.NoErr(e.ds.DeleteWebhookEventsByWebhookID(e.ctx, e.dbx, unsubscribed.ID))
+	is.NoErr(e.ds.CreateWebhookEvents(e.ctx, e.dbx, unsubscribed.ID, []int{int(EventBranchTagCreate)}))
+
+	is.NoErr(Deliver(e.ctx, []models.Webhook{deleted, unsubscribed}, samplePayloadFor(e)))
+
+	is.Equal(rec.calls, 0)
+	is.Equal(len(e.deliveries(t, unsubscribed.ID)), 0)
+}
+
 // endlessServer answers with a 200 and streams a body that never ends, until
 // the client goes away.
 func endlessServer(t *testing.T) string {

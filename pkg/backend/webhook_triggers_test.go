@@ -656,7 +656,7 @@ func blockDeliveries(t *testing.T, e whEnv, maxPending int) func() {
 	e.be.deliveries = newDeliveryQueue(1, maxPending, e.be.logger)
 	release := make(chan struct{})
 	started := make(chan struct{})
-	e.be.deliveries.enqueue(func() {
+	e.be.deliveries.enqueue(0, func() {
 		close(started)
 		<-release
 	})
@@ -721,7 +721,7 @@ func TestDeliveryQueueBoundsWorkers(t *testing.T) {
 	var mu sync.Mutex
 	running, peak, ran := 0, 0, 0
 	for i := 0; i < 50; i++ {
-		is.Equal(q.enqueue(func() {
+		is.Equal(q.enqueue(int64(i), func() {
 			mu.Lock()
 			running++
 			peak = max(peak, running)
@@ -737,7 +737,148 @@ func TestDeliveryQueueBoundsWorkers(t *testing.T) {
 	<-finished
 	is.Equal(ran, 50)
 	is.True(peak <= 2)
-	is.Equal(q.enqueue(func() {}), enqueueClosed)
+	is.Equal(q.enqueue(1, func() {}), enqueueClosed)
+}
+
+// blocker returns a job that signals started and then waits for release.
+func blocker(started chan<- struct{}, release <-chan struct{}) func() {
+	return func() {
+		started <- struct{}{}
+		<-release
+	}
+}
+
+// A repository never has more than its share of the senders running, so
+// another repository's delivery starts at once even while the first one has
+// a backlog of deliveries that do not return.
+func TestDeliveryQueueCapsRunningPerRepo(t *testing.T) {
+	is := is.New(t)
+	q := newDeliveryQueue(8, 100, charmlog.New(io.Discard))
+	q.maxRepoRunning = 2
+	started := make(chan struct{}, 5)
+	release := make(chan struct{})
+	for i := 0; i < 5; i++ {
+		is.Equal(q.enqueue(1, blocker(started, release)), enqueued)
+	}
+	<-started
+	<-started
+
+	ran := make(chan struct{})
+	is.Equal(q.enqueue(2, func() { close(ran) }), enqueued)
+	<-ran
+
+	q.mu.Lock()
+	is.Equal(q.repos[1].running, 2)
+	is.Equal(len(q.repos[1].queued), 3)
+	q.mu.Unlock()
+	is.Equal(len(started), 0)
+
+	close(release)
+	_, finished := q.close()
+	<-finished
+	is.Equal(len(started), 3) // the queued ones ran once a share was free
+}
+
+// Once a repository has its cap of deliveries queued or running, its next
+// one is refused, while other repositories can still queue theirs.
+func TestDeliveryQueueCapsPendingPerRepo(t *testing.T) {
+	is := is.New(t)
+	q := newDeliveryQueue(1, 100, charmlog.New(io.Discard))
+	q.maxRepo = 3
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	is.Equal(q.enqueue(1, blocker(started, release)), enqueued)
+	<-started
+
+	is.Equal(q.enqueue(1, func() {}), enqueued)
+	is.Equal(q.enqueue(1, func() {}), enqueued)
+	is.Equal(q.enqueue(1, func() {}), enqueueRepoFull)
+	ran := make(chan struct{})
+	is.Equal(q.enqueue(2, func() { close(ran) }), enqueued)
+
+	close(release)
+	<-ran
+	_, finished := q.close()
+	<-finished
+	is.Equal(len(q.repos), 0)
+}
+
+// Queued deliveries are taken from the repositories in turn, so a repository
+// with a long backlog does not hold back one that queued later.
+func TestDeliveryQueueTakesReposInTurn(t *testing.T) {
+	is := is.New(t)
+	q := newDeliveryQueue(1, 100, charmlog.New(io.Discard))
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	is.Equal(q.enqueue(0, blocker(started, release)), enqueued)
+	<-started
+
+	var order []int64 // written by the single worker only
+	for _, repo := range []int64{1, 1, 1, 2} {
+		is.Equal(q.enqueue(repo, func() { order = append(order, repo) }), enqueued)
+	}
+	close(release)
+	_, finished := q.close()
+	<-finished
+	is.Equal(order, []int64{1, 2, 1, 1})
+}
+
+// An event of a repository that already has its cap of deliveries pending is
+// dropped without blocking the caller, logged, and recorded as a failed
+// delivery so it can be redelivered. Another repository's event is still
+// queued and sent.
+func TestDeliveryForBusyRepoIsDroppedAndRecorded(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	id := e.seedHook(t, webhook.EventRepository)
+	hooks, err := e.be.store.GetWebhooksByRepoID(e.ctx, e.be.db, e.repo.ID())
+	is.NoErr(err)
+	other, err := e.be.CreateRepository(e.ctx, "other", e.admin, proto.RepositoryOptions{})
+	is.NoErr(err)
+	otherID := e.seedHookOn(t, other, webhook.EventRepository)
+	otherHooks, err := e.be.store.GetWebhooksByRepoID(e.ctx, e.be.db, other.ID())
+	is.NoErr(err)
+
+	// The repository's one allowed delivery is running and does not return
+	// until released.
+	e.be.deliveries = newDeliveryQueue(4, 100, e.be.logger)
+	e.be.deliveries.maxRepo = 1
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	is.Equal(e.be.deliveries.enqueue(e.repo.ID(), blocker(started, release)), enqueued)
+	<-started
+
+	ev, err := webhook.NewRepositoryEvent(e.ctx, e.admin, e.repo, webhook.RepositoryEventActionRename)
+	is.NoErr(err)
+	e.be.deliverAfterChange(e.ctx, hooks, ev, true)
+
+	is.True(strings.Contains(e.logs.String(), "webhook event dropped: repository has too many pending deliveries"))
+	list, err := e.be.ListWebhookDeliveries(e.ctx, e.repo, id)
+	is.NoErr(err)
+	is.Equal(len(list), 1)
+	d, err := e.be.WebhookDelivery(e.ctx, e.repo, id, list[0].ID)
+	is.NoErr(err)
+	is.Equal(d.RequestError.String, errRepoDeliveriesFull.Error())
+	is.Equal(d.Event, webhook.EventRepository)
+
+	otherEv, err := webhook.NewRepositoryEvent(e.ctx, e.admin, other, webhook.RepositoryEventActionRename)
+	is.NoErr(err)
+	e.be.deliverAfterChange(e.ctx, otherHooks, otherEv, true)
+
+	unblock()
+	e.be.WaitForDeliveries(e.ctx)
+	list, err = e.be.ListWebhookDeliveries(e.ctx, other, otherID)
+	is.NoErr(err)
+	is.Equal(len(list), 1)
+	d, err = e.be.WebhookDelivery(e.ctx, other, otherID, list[0].ID)
+	is.NoErr(err)
+	// Sent, and refused by the SSRF guard, rather than dropped.
+	is.True(d.RequestError.String != errRepoDeliveriesFull.Error())
+	is.True(d.RequestError.String != errDeliveryQueueFull.Error())
+	is.Equal(len(e.deliveredEvents(t, id)), 1) // the dropped one only
 }
 
 // A panicking delivery is logged and does not take the process down; the
@@ -745,9 +886,9 @@ func TestDeliveryQueueBoundsWorkers(t *testing.T) {
 func TestDeliveryPanicIsRecovered(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
-	is.Equal(e.be.deliveries.enqueue(func() { panic("boom") }), enqueued)
+	is.Equal(e.be.deliveries.enqueue(1, func() { panic("boom") }), enqueued)
 	ran := make(chan struct{})
-	is.Equal(e.be.deliveries.enqueue(func() { close(ran) }), enqueued)
+	is.Equal(e.be.deliveries.enqueue(1, func() { close(ran) }), enqueued)
 	<-ran
 	e.be.WaitForDeliveries(e.ctx)
 	is.True(strings.Contains(e.logs.String(), "webhook delivery panicked"))
@@ -759,7 +900,7 @@ func TestWaitForDeliveriesLogsPendingAndStopsOnCancel(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
 	blockDeliveries(t, e, 1)
-	is.Equal(e.be.deliveries.enqueue(func() {}), enqueued)
+	is.Equal(e.be.deliveries.enqueue(1, func() {}), enqueued)
 
 	ctx, cancel := context.WithCancel(e.ctx)
 	cancel()
