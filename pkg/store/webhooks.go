@@ -40,10 +40,12 @@ type WebhookStore interface {
 
 	// GetWebhookDeliveryByID returns a webhook delivery by its ID.
 	GetWebhookDeliveryByID(ctx context.Context, h db.Handler, webhookID int64, id uuid.UUID) (models.WebhookDelivery, error)
-	// GetWebhookDeliveriesByWebhookID returns all webhook deliveries for a webhook.
+	// GetWebhookDeliveriesByWebhookID returns all webhook deliveries for a
+	// webhook, oldest first.
 	GetWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookDelivery, error)
-	// ListWebhookDeliveriesByWebhookID returns all webhook deliveries for a webhook.
-	// This only returns the delivery ID, response status, and event.
+	// ListWebhookDeliveriesByWebhookID returns all webhook deliveries for a
+	// webhook, oldest first. This only returns the delivery ID, response
+	// status, event, creation time, and sequence number.
 	ListWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookDelivery, error)
 	// CreateWebhookDelivery creates a webhook delivery. It writes nothing if the
 	// webhook no longer exists.

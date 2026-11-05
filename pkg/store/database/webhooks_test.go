@@ -318,6 +318,67 @@ func TestWebhookListsAreOrderedByID(t *testing.T) {
 	}
 }
 
+// Deliveries recorded within the same second list in the order they were
+// inserted, oldest first. created_at has one-second resolution and IDs are
+// random UUIDs, so neither can order them.
+func TestWebhookStoreDeliveriesOrder(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+
+	hook, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 0, true)
+	is.NoErr(err)
+	other, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.35/b", "", 0, true)
+	is.NoErr(err)
+
+	insert := func(webhookID int64) uuid.UUID {
+		id := uuid.New()
+		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, id, webhookID, 1, "https://93.184.216.34/a", "POST", nil, "", "{}", 200, "", ""))
+		return id
+	}
+
+	var want []uuid.UUID
+	for range 20 {
+		want = append(want, insert(hook))
+		insert(other) // interleaved deliveries of another webhook
+	}
+	// Pin every row to the same second.
+	_, err = dbx.ExecContext(ctx, `UPDATE webhook_deliveries SET created_at = '2024-01-01 00:00:00';`)
+	is.NoErr(err)
+
+	check := func() {
+		t.Helper()
+		list, err := s.ListWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+		is.NoErr(err)
+		all, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+		is.NoErr(err)
+		for _, got := range [][]models.WebhookDelivery{list, all} {
+			ids := make([]uuid.UUID, len(got))
+			for i, d := range got {
+				ids[i] = d.ID
+			}
+			is.Equal(ids, want)
+		}
+	}
+	check()
+
+	// Deleting the newest delivery does not let a later one sort before
+	// older ones.
+	is.NoErr(s.DeleteWebhookDeliveryByID(ctx, dbx, hook, want[len(want)-1]))
+	want = want[:len(want)-1]
+	want = append(want, insert(hook))
+	check()
+
+	// The listing follows seq, not the physical row order: a row stored last
+	// with the lowest seq lists first.
+	first := uuid.New()
+	_, err = dbx.ExecContext(ctx, `INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_headers, request_body, response_status, response_headers, response_body, seq)
+		VALUES (?, ?, 1, '', 'POST', '', '{}', 200, '', '', 0);`, first, hook)
+	is.NoErr(err)
+	want = append([]uuid.UUID{first}, want...)
+	check()
+}
+
 func idsOf(whs []models.Webhook) []int64 {
 	out := make([]int64, len(whs))
 	for i, w := range whs {
