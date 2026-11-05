@@ -32,6 +32,7 @@ stdout '✅.*branch_tag_create'
 stdout '✅.*push'
 ! stdout '❌'
 webhook-received
+[windows] dos2unix received.txt
 cmp stdout received.txt
 
 # stop the server

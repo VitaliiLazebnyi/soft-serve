@@ -40,6 +40,7 @@ func newWebhookTestDB(t *testing.T) (context.Context, *db.DB) {
 	is.NoErr(err)
 	return ctx, dbx
 }
+
 func TestWebhookStoreRoundTrip(t *testing.T) {
 	is := is.New(t)
 	ctx, dbx := newWebhookTestDB(t)

@@ -265,7 +265,7 @@ func TestSendWebhookInvalidURLRecorded(t *testing.T) {
 func truncatingServer(t *testing.T) string {
 	t.Helper()
 	is := is.New(t)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	is.NoErr(err)
 	t.Cleanup(func() { ln.Close() }) //nolint:errcheck
 	go func() {
