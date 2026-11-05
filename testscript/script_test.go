@@ -128,13 +128,18 @@ func TestScript(t *testing.T) {
 
 			data := t.TempDir()
 			sshPort := test.RandomPort()
-			sshListen := fmt.Sprintf("localhost:%d", sshPort)
+			// Servers listen on IPv4 loopback and the harness dials it
+			// directly. Dialing "localhost" tries ::1 first, and on a busy
+			// macOS machine a connect to a closed ::1 port can appear to
+			// succeed and then fail the SSH handshake instead of falling
+			// back to 127.0.0.1. Public URLs keep "localhost".
+			sshListen := fmt.Sprintf("%s:%d", loopback, sshPort)
 			gitPort := test.RandomPort()
-			gitListen := fmt.Sprintf("localhost:%d", gitPort)
+			gitListen := fmt.Sprintf("%s:%d", loopback, gitPort)
 			httpPort := test.RandomPort()
-			httpListen := fmt.Sprintf("localhost:%d", httpPort)
+			httpListen := fmt.Sprintf("%s:%d", loopback, httpPort)
 			statsPort := test.RandomPort()
-			statsListen := fmt.Sprintf("localhost:%d", statsPort)
+			statsListen := fmt.Sprintf("%s:%d", loopback, statsPort)
 			serverName := "Test Soft Serve"
 
 			e.Setenv("DATA_PATH", data)
@@ -148,6 +153,14 @@ func TestScript(t *testing.T) {
 			e.Setenv("ATTACKER_AUTHORIZED_KEY", attacker.AuthorizedKey())
 			e.Setenv("SSH_KNOWN_HOSTS_FILE", filepath.Join(t.TempDir(), "known_hosts"))
 			e.Setenv("SSH_KNOWN_CONFIG_FILE", filepath.Join(t.TempDir(), "config"))
+
+			// Every git process the script starts, the server's included,
+			// creates "master" as the default branch, whatever the machine's
+			// git config says (Apple's git ships init.defaultBranch=main).
+			// Config from the environment overrides system and global config.
+			e.Setenv("GIT_CONFIG_COUNT", "1")
+			e.Setenv("GIT_CONFIG_KEY_0", "init.defaultBranch")
+			e.Setenv("GIT_CONFIG_VALUE_0", "master")
 
 			// This is used to set up test specific configuration and http endpoints
 			e.Setenv("SOFT_SERVE_TESTRUN", "1")
@@ -178,10 +191,10 @@ func TestScript(t *testing.T) {
 			cfg.Name = serverName
 			cfg.InitialAdminKeys = []string{admin1.AuthorizedKey()}
 			cfg.SSH.ListenAddr = sshListen
-			cfg.SSH.PublicURL = "ssh://" + sshListen
+			cfg.SSH.PublicURL = fmt.Sprintf("ssh://localhost:%d", sshPort)
 			cfg.Git.ListenAddr = gitListen
 			cfg.HTTP.ListenAddr = httpListen
-			cfg.HTTP.PublicURL = "http://" + httpListen
+			cfg.HTTP.PublicURL = fmt.Sprintf("http://localhost:%d", httpPort)
 			cfg.Stats.ListenAddr = statsListen
 			cfg.LFS.Enabled = true
 
@@ -219,7 +232,7 @@ func cmdSoft(user string, keys ...ssh.Signer) func(ts *testscript.TestScript, ne
 	return func(ts *testscript.TestScript, neg bool, args []string) {
 		cli, err := ssh.Dial(
 			"tcp",
-			net.JoinHostPort("localhost", ts.Getenv("SSH_PORT")),
+			net.JoinHostPort(loopback, ts.Getenv("SSH_PORT")),
 			&ssh.ClientConfig{
 				User:            user,
 				Auth:            []ssh.AuthMethod{ssh.PublicKeys(keys...)},
@@ -254,7 +267,7 @@ func cmdSoft(user string, keys ...ssh.Signer) func(ts *testscript.TestScript, ne
 func cmdKeylessSoft(ts *testscript.TestScript, neg bool, args []string) {
 	cli, err := ssh.Dial(
 		"tcp",
-		net.JoinHostPort("localhost", ts.Getenv("SSH_PORT")),
+		net.JoinHostPort(loopback, ts.Getenv("SSH_PORT")),
 		&ssh.ClientConfig{
 			User: "keyless",
 			Auth: []ssh.AuthMethod{
@@ -287,7 +300,7 @@ func cmdUI(key ssh.Signer) func(ts *testscript.TestScript, neg bool, args []stri
 
 		cli, err := ssh.Dial(
 			"tcp",
-			net.JoinHostPort("localhost", ts.Getenv("SSH_PORT")),
+			net.JoinHostPort(loopback, ts.Getenv("SSH_PORT")),
 			&ssh.ClientConfig{
 				User:            "git",
 				Auth:            []ssh.AuthMethod{ssh.PublicKeys(key)},
@@ -366,10 +379,25 @@ func cmdDos2Unix(ts *testscript.TestScript, neg bool, args []string) {
 	}
 }
 
+// loopback is the address the test servers listen on and the harness dials.
+const loopback = "127.0.0.1"
+
+// loopbackClient sends requests for "localhost" to loopback, for the same
+// reason the servers listen there.
+var loopbackClient = &http.Client{Transport: &http.Transport{
+	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if host, port, err := net.SplitHostPort(addr); err == nil && host == "localhost" {
+			addr = net.JoinHostPort(loopback, port)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	},
+}}
+
 var sshConfig = `
 Host *
   UserKnownHostsFile %q
   StrictHostKeyChecking no
+  AddressFamily inet
   IdentityAgent none
   IdentitiesOnly yes
   ServerAliveInterval 60
@@ -538,7 +566,7 @@ func cmdCurl(ts *testscript.TestScript, neg bool, args []string) {
 				}
 			}
 
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := loopbackClient.Do(req)
 			if err != nil {
 				return err
 			}
@@ -587,7 +615,7 @@ func cmdEnsureServerRunning(ts *testscript.TestScript, neg bool, args []string) 
 	port := ts.Getenv(args[0])
 
 	// verify that the server is up
-	addr := net.JoinHostPort("localhost", port)
+	addr := net.JoinHostPort(loopback, port)
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		conn, _ := net.DialTimeout( //nolint:noctx
@@ -618,7 +646,7 @@ func cmdEnsureServerNotRunning(ts *testscript.TestScript, neg bool, args []strin
 	port := ts.Getenv(args[0])
 
 	// verify that the server is not up
-	addr := net.JoinHostPort("localhost", port)
+	addr := net.JoinHostPort(loopback, port)
 	conn, _ := net.DialTimeout( //nolint:noctx
 		"tcp",
 		addr,
@@ -632,7 +660,7 @@ func cmdEnsureServerNotRunning(ts *testscript.TestScript, neg bool, args []strin
 
 func cmdStopserver(ts *testscript.TestScript, neg bool, args []string) {
 	// stop the server
-	resp, err := http.DefaultClient.Head(fmt.Sprintf("%s/__stop", ts.Getenv("SOFT_SERVE_HTTP_PUBLIC_URL"))) //nolint:noctx
+	resp, err := loopbackClient.Head(fmt.Sprintf("%s/__stop", ts.Getenv("SOFT_SERVE_HTTP_PUBLIC_URL"))) //nolint:noctx
 	check(ts, err, neg)
 	resp.Body.Close()
 	time.Sleep(time.Second * 2) // Allow some time for the server to stop
@@ -698,6 +726,7 @@ func setupPostgres(t testscript.T, cfg *config.Config) (func(), error) {
 		return nil, err
 	}
 
+	defer dbx.Close() //nolint:errcheck
 	if _, err := dbx.ExecContext(context.TODO(), "CREATE DATABASE "+dbName); err != nil {
 		return nil, err
 	}
@@ -707,8 +736,12 @@ func setupPostgres(t testscript.T, cfg *config.Config) (func(), error) {
 		if err != nil {
 			t.Fatal("failed to open database", dbName, err)
 		}
+		defer dbx.Close() //nolint:errcheck
 
-		if _, err := dbx.ExecContext(context.TODO(), "DROP DATABASE "+dbName); err != nil {
+		// FORCE ends connections the script's server may still hold;
+		// without it the drop fails with "database is being accessed by
+		// other users" whenever the server has not fully exited yet.
+		if _, err := dbx.ExecContext(context.TODO(), "DROP DATABASE "+dbName+" WITH (FORCE)"); err != nil {
 			t.Fatal("failed to drop database", dbName, err)
 		}
 	}, nil

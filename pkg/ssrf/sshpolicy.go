@@ -107,8 +107,8 @@ func parseAllowedHost(raw string) (allowedHost, error) {
 	return allowedHost{name: canonicalHostname(host), port: port}, nil
 }
 
-// lookupIPAddr resolves hostnames for CIDR matching. Tests replace it so the
-// matcher can be exercised without DNS.
+// lookupIPAddr resolves hostnames for CIDR matching and git remote
+// validation. Tests replace it so they run without DNS.
 var lookupIPAddr = net.DefaultResolver.LookupIPAddr
 
 // Match reports whether host (and port, "" meaning the ssh default) is

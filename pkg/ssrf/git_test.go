@@ -126,9 +126,8 @@ func TestValidateGitRemote(t *testing.T) {
 // TestValidateGitRemoteResolvesHostnames covers the DNS path, which the main
 // table deliberately avoids so it can run offline.
 func TestValidateGitRemoteResolvesHostnames(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires DNS")
-	}
+	// A fixed public address, so the test needs no network or DNS.
+	fakeResolver(t, map[string][]string{"github.com": {"140.82.112.3"}})
 
 	v, err := ValidateGitRemote("https://github.com/charmbracelet/soft-serve.git", anySSH)
 	if err != nil {
