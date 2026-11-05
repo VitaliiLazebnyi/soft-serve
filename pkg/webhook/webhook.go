@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
+	"strings"
+	"time"
 
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -63,19 +65,30 @@ func SendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 	return sendWebhook(ctx, w, event, payload, true)
 }
 
-// sendWebhook sends a webhook event. When record is false the attempt is not
-// written to the deliveries table, and the transport error (if any) is returned
-// so the caller can log it.
-func sendWebhook(ctx context.Context, w models.Webhook, event Event, payload interface{}, record bool) error {
-	var buf bytes.Buffer
-	dbx := db.FromContext(ctx)
-	datastore := store.FromContext(ctx)
+// sendTimeout bounds the request to one webhook, so a slow receiver cannot use
+// up the time of the other webhooks an event goes to. It matches the cap of
+// the SSRF-protected client. It is a variable so tests can shorten it.
+var sendTimeout = ssrf.ClientTimeout
 
+// recordTimeout bounds writing one delivery row.
+const recordTimeout = 5 * time.Second
+
+// request is a webhook request ready to send or record.
+type request struct {
+	id      uuid.UUID
+	headers http.Header
+	body    string
+}
+
+// newRequest encodes payload for w and builds the request headers, including
+// the signature when w has a secret.
+func newRequest(w models.Webhook, event Event, payload interface{}) (request, error) {
+	var buf bytes.Buffer
 	contentType := ContentType(w.ContentType) //nolint:gosec
 	switch contentType {
 	case ContentTypeJSON:
 		if err := json.NewEncoder(&buf).Encode(payload); err != nil {
-			return err
+			return request{}, err
 		}
 	case ContentTypeForm:
 		// Redeliveries pass the stored form body as url.Values, which is
@@ -86,11 +99,11 @@ func sendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 		}
 		v, err := query.Values(payload)
 		if err != nil {
-			return err
+			return request{}, err
 		}
 		buf.WriteString(v.Encode()) //nolint: errcheck
 	default:
-		return ErrInvalidContentType
+		return request{}, ErrInvalidContentType
 	}
 
 	headers := http.Header{}
@@ -100,23 +113,34 @@ func sendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 
 	id, err := uuid.NewUUID()
 	if err != nil {
-		return err
+		return request{}, err
 	}
 
 	headers.Add("X-SoftServe-Delivery", id.String())
 
-	reqBody := buf.String()
+	body := buf.String()
 	if w.Secret != "" {
 		sig := hmac.New(sha256.New, []byte(w.Secret))
-		sig.Write([]byte(reqBody)) //nolint: errcheck
+		sig.Write([]byte(body)) //nolint: errcheck
 		headers.Add("X-SoftServe-Signature", "sha256="+hex.EncodeToString(sig.Sum(nil)))
 	}
 
-	res, reqErr := do(ctx, w.URL, http.MethodPost, headers, &buf)
-	var reqHeaders string
-	for k, v := range headers {
-		reqHeaders += k + ": " + v[0] + "\n"
+	return request{id: id, headers: headers, body: body}, nil
+}
+
+// sendWebhook sends a webhook event. The request gets its own sendTimeout.
+// When record is false the attempt is not written to the deliveries table,
+// and a transport error or a non-2xx response is returned so the caller can
+// log it.
+func sendWebhook(ctx context.Context, w models.Webhook, event Event, payload interface{}, record bool) error {
+	req, err := newRequest(w, event, payload)
+	if err != nil {
+		return err
 	}
+
+	sctx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
+	res, reqErr := do(sctx, w.URL, http.MethodPost, req.headers, strings.NewReader(req.body))
 
 	resStatus := 0
 	resHeaders := ""
@@ -142,10 +166,47 @@ func sendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 	}
 
 	if !record {
+		if reqErr == nil && (resStatus < 200 || resStatus > 299) {
+			return fmt.Errorf("webhook %d: receiver responded with status %d", w.ID, resStatus)
+		}
 		return reqErr
 	}
 
-	return db.WrapError(datastore.CreateWebhookDelivery(ctx, dbx, id, w.ID, int(event), w.URL, http.MethodPost, reqErr, reqHeaders, reqBody, resStatus, resHeaders, resBody))
+	return recordDelivery(ctx, w, event, req, reqErr, resStatus, resHeaders, resBody)
+}
+
+// recordDelivery writes one delivery row. It uses a fresh, short context that
+// keeps ctx's values but not its cancellation or deadline, so an attempt that
+// ran out of time or was cancelled is still recorded.
+func recordDelivery(ctx context.Context, w models.Webhook, event Event, req request, reqErr error, resStatus int, resHeaders, resBody string) error {
+	dbx := db.FromContext(ctx)
+	datastore := store.FromContext(ctx)
+
+	var reqHeaders string
+	for k, v := range req.headers {
+		reqHeaders += k + ": " + v[0] + "\n"
+	}
+
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	return db.WrapError(datastore.CreateWebhookDelivery(rctx, dbx, req.id, w.ID, int(event), w.URL, http.MethodPost, reqErr, reqHeaders, req.body, resStatus, resHeaders, resBody))
+}
+
+// RecordUndelivered records a delivery of payload to each webhook without
+// sending it, with reason as the request error. Use it when an event cannot
+// be sent at all; the recorded request can be redelivered later.
+func RecordUndelivered(ctx context.Context, hooks []models.Webhook, payload EventPayload, reason error) error {
+	var errs []error
+	for _, w := range hooks {
+		req, err := newRequest(w, payload.Event(), payload)
+		if err == nil {
+			err = recordDelivery(ctx, w, payload.Event(), req, reason, 0, "", "")
+		}
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Subscribers returns the webhooks of the payload's repository that subscribe
@@ -175,7 +236,9 @@ func DeliverUnrecorded(ctx context.Context, hooks []models.Webhook, payload Even
 
 func deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload, record bool) error {
 	// Every webhook is attempted even if an earlier one fails to send or
-	// record, so one bad webhook cannot stop the others from receiving the event.
+	// record, so one bad webhook cannot stop the others from receiving the
+	// event. Each send has its own timeout, so a slow receiver does not use up
+	// the time of the webhooks after it.
 	var errs []error
 	for _, w := range hooks {
 		if err := sendWebhook(ctx, w, payload.Event(), payload, record); err != nil {

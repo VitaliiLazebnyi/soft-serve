@@ -3,12 +3,16 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
+	sqlite "modernc.org/sqlite"
+	sqlitelib "modernc.org/sqlite/lib"
 )
 
 type webhookStore struct{}
@@ -33,7 +37,10 @@ func (*webhookStore) CreateWebhook(ctx context.Context, h db.Handler, repoID int
 // The row is written only if the webhook still exists. A send that was in
 // flight when its webhook was deleted therefore leaves no orphan row, even on
 // a connection that does not enforce foreign keys. In that case nothing is
-// written and no error is returned.
+// written and no error is returned. The same holds when the webhook is
+// deleted between the existence check and the insert, which a concurrent
+// transaction can do on Postgres and which shows up as a foreign key
+// violation.
 func (*webhookStore) CreateWebhookDelivery(ctx context.Context, h db.Handler, id uuid.UUID, webhookID int64, event int, url string, method string, requestError error, requestHeaders string, requestBody string, responseStatus int, responseHeaders string, responseBody string) error {
 	query := h.Rebind(`INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_error, request_headers, request_body, response_status, response_headers, response_body)
 			SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
@@ -44,7 +51,24 @@ func (*webhookStore) CreateWebhookDelivery(ctx context.Context, h db.Handler, id
 		reqErr = sql.NullString{String: requestError.Error(), Valid: true}
 	}
 	_, err := h.ExecContext(ctx, query, id, webhookID, event, url, method, reqErr, requestHeaders, requestBody, responseStatus, responseHeaders, responseBody, webhookID)
+	if isForeignKeyViolation(err) {
+		return nil
+	}
 	return err
+}
+
+// isForeignKeyViolation reports whether err is a foreign key violation from
+// SQLite or Postgres.
+func isForeignKeyViolation(err error) bool {
+	var liteErr *sqlite.Error
+	if errors.As(err, &liteErr) {
+		return liteErr.Code() == sqlitelib.SQLITE_CONSTRAINT_FOREIGNKEY
+	}
+	var pgErr *pq.Error
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23503" // foreign_key_violation
+	}
+	return false
 }
 
 // CreateWebhookEvents implements store.WebhookStore.
@@ -146,7 +170,7 @@ func (*webhookStore) GetWebhookEventByID(ctx context.Context, h db.Handler, id i
 
 // GetWebhookEventsByWebhookID implements store.WebhookStore.
 func (*webhookStore) GetWebhookEventsByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookEvent, error) {
-	query := h.Rebind(`SELECT * FROM webhook_events WHERE webhook_id = ?;`)
+	query := h.Rebind(`SELECT * FROM webhook_events WHERE webhook_id = ? ORDER BY id;`)
 	var whes []models.WebhookEvent
 	err := h.SelectContext(ctx, &whes, query, webhookID)
 	return whes, err
@@ -154,7 +178,7 @@ func (*webhookStore) GetWebhookEventsByWebhookID(ctx context.Context, h db.Handl
 
 // GetWebhooksByRepoID implements store.WebhookStore.
 func (*webhookStore) GetWebhooksByRepoID(ctx context.Context, h db.Handler, repoID int64) ([]models.Webhook, error) {
-	query := h.Rebind(`SELECT * FROM webhooks WHERE repo_id = ?;`)
+	query := h.Rebind(`SELECT * FROM webhooks WHERE repo_id = ? ORDER BY id;`)
 	var whs []models.Webhook
 	err := h.SelectContext(ctx, &whs, query, repoID)
 	return whs, err
@@ -173,7 +197,8 @@ func (*webhookStore) GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Han
 	query := h.Rebind(`SELECT webhooks.*
 			FROM webhooks
 			INNER JOIN webhook_events ON webhooks.id = webhook_events.webhook_id
-			WHERE webhooks.repo_id = ? AND webhook_events.event IN (` + placeholders(len(events)) + `);`)
+			WHERE webhooks.repo_id = ? AND webhook_events.event IN (` + placeholders(len(events)) + `)
+			ORDER BY webhooks.id;`)
 	var whs []models.Webhook
 	err := h.SelectContext(ctx, &whs, query, args...)
 	return whs, err

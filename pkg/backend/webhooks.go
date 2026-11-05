@@ -3,7 +3,9 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	neturl "net/url"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -303,13 +305,13 @@ func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repos
 	// may differ from the webhook's current one if it was changed since. Use
 	// the stored Content-Type header and fall back to the webhook's only when
 	// that header is missing.
+	// An unrecognized stored value is treated like a missing one.
 	ct := webhook.ContentType(wh.ContentType) //nolint:gosec
 	stored, found, err := storedContentType(delivery.RequestHeaders)
-	if err != nil {
-		log.Errorf("error reading webhook delivery content type: %v", err)
-		return err
-	}
-	if found {
+	switch {
+	case err != nil:
+		b.logger.Warn("unrecognized content type in webhook delivery, using the webhook's", "delivery", delID, "webhook", id, "content_type", ct, "err", err)
+	case found:
 		ct = stored
 	}
 	wh.ContentType = int(ct)
@@ -416,19 +418,19 @@ func dedupeEvents(events []webhook.Event) []webhook.Event {
 	return out
 }
 
-// webhookSendTimeout bounds how long the deliveries of one event may take,
-// including waiting on slow receivers. Hooks of one event are sent one after
-// another under this bound, and each request is capped at 30s by the HTTP
-// client in pkg/ssrf. Two receivers that hit that cap therefore fit in the
-// bound. A smaller bound would cut off the later hooks of an event after one
-// slow receiver, so it stays at a minute.
-const webhookSendTimeout = time.Minute
+// ShutdownDeliveryTimeout is how long shutdown waits for background
+// deliveries. It is separate from the shorter HTTP and SSH drain, since a drain
+// that stops early abandons the deliveries. It covers a request that started
+// just before shutdown and runs to the client's cap (ssrf.ClientTimeout), with
+// time left to record it and to send a few queued ones. A second signal stops
+// the wait early.
+const ShutdownDeliveryTimeout = time.Minute
 
-// ShutdownDeliveryTimeout is how long shutdown waits for deliveries that are
-// already running. It equals webhookSendTimeout, so a delivery that started
-// before shutdown can run to its own bound. The shorter HTTP and SSH drain
-// does not apply to it: a drain that stops early abandons the delivery.
-const ShutdownDeliveryTimeout = webhookSendTimeout
+// SendEventAfterChange sends the webhook event for a change that is already
+// committed, the same way the backend's own changes do. See sendAfterChange.
+func (d *Backend) SendEventAfterChange(ctx context.Context, ev webhook.EventPayload) {
+	d.sendAfterChange(ctx, ev)
+}
 
 // sendAfterChange sends the webhook event for a change that is already
 // committed. The subscribers are read now and the deliveries run in the
@@ -444,26 +446,30 @@ func (d *Backend) sendAfterChange(ctx context.Context, ev webhook.EventPayload) 
 }
 
 // maxBackgroundDeliveries caps the goroutines that send events in the
-// background. When all are in use, the next send runs in the caller instead,
-// so an event is slowed down rather than dropped.
-const maxBackgroundDeliveries = 32
+// background, and maxQueuedDeliveries caps the events waiting for one of them.
+// Together they bound the memory and goroutines the deliveries use.
+const (
+	maxBackgroundDeliveries = 32
+	maxQueuedDeliveries     = 1024
+)
 
-// deliverAfterChange sends ev to hooks in the background. It is detached from
-// the request's cancellation but still bounded by webhookSendTimeout. If
-// maxBackgroundDeliveries sends are already running, this one runs before
-// deliverAfterChange returns.
+// errDeliveryQueueFull is recorded for an event that was dropped because the
+// delivery queue was full.
+var errDeliveryQueueFull = errors.New("not sent: webhook delivery queue is full")
+
+// deliverAfterChange sends ev to hooks in the background and never waits on
+// receivers. The send is detached from the request's cancellation; each
+// request is bounded by the webhook package's per-hook timeout.
+//
+// When every sender is busy, the event waits in a bounded queue. When the
+// queue is full too, the event is dropped: it is logged and, if record is
+// set, recorded as a failed delivery so it can be redelivered.
 func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook, ev webhook.EventPayload, record bool) {
 	if len(hooks) == 0 {
 		return
 	}
-	if !d.deliveries.start() {
-		d.logger.Warn("webhook event skipped: server is shutting down", "event", ev.Event(), "repo_id", ev.RepositoryID())
-		return
-	}
-	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), webhookSendTimeout)
+	bg := context.WithoutCancel(ctx)
 	send := func() {
-		defer d.deliveries.done()
-		defer cancel()
 		var err error
 		if record {
 			err = webhook.Deliver(bg, hooks, ev)
@@ -475,65 +481,144 @@ func (d *Backend) deliverAfterChange(ctx context.Context, hooks []models.Webhook
 		}
 	}
 
-	select {
-	case d.deliverySlots <- struct{}{}:
-		go func() {
-			defer func() { <-d.deliverySlots }()
-			send()
-		}()
+	switch d.deliveries.enqueue(send) {
+	case enqueueClosed:
+		d.logger.Warn("webhook event skipped: server is shutting down", "event", ev.Event(), "repo_id", ev.RepositoryID())
+	case enqueueFull:
+		d.logger.Error("webhook event dropped: delivery queue is full", "event", ev.Event(), "repo_id", ev.RepositoryID(), "queued", maxQueuedDeliveries)
+		if record {
+			if err := webhook.RecordUndelivered(bg, hooks, ev, errDeliveryQueueFull); err != nil {
+				d.logger.Error("dropped webhook event not recorded", "event", ev.Event(), "repo_id", ev.RepositoryID(), "err", err)
+			}
+		}
+	}
+}
+
+// enqueueResult is the outcome of deliveryQueue.enqueue.
+type enqueueResult int
+
+const (
+	enqueued enqueueResult = iota
+	enqueueFull
+	enqueueClosed
+)
+
+// deliveryQueue runs webhook deliveries on at most maxWorkers goroutines, with
+// at most maxPending deliveries waiting. It counts every delivery from enqueue
+// until it has run, so shutdown can wait for them. Once closed, it refuses new
+// ones, so a request still running during shutdown cannot add to a count that
+// is already being waited on.
+type deliveryQueue struct {
+	maxWorkers int
+	maxPending int
+	logger     *log.Logger
+
+	mu      sync.Mutex
+	closed  bool
+	workers int
+	queued  []func()
+	count   int // queued plus running
+	idle    chan struct{}
+}
+
+func newDeliveryQueue(maxWorkers, maxPending int, logger *log.Logger) *deliveryQueue {
+	return &deliveryQueue{maxWorkers: maxWorkers, maxPending: maxPending, logger: logger}
+}
+
+// enqueue starts job on a new goroutine if one is free, or queues it. It never
+// blocks on a running job.
+func (q *deliveryQueue) enqueue(job func()) enqueueResult {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	switch {
+	case q.closed:
+		return enqueueClosed
+	case q.workers < q.maxWorkers:
+		q.workers++
+		go q.work(job)
+	case len(q.queued) < q.maxPending:
+		q.queued = append(q.queued, job)
 	default:
-		send()
+		return enqueueFull
+	}
+	q.count++
+	return enqueued
+}
+
+// work runs job, then queued jobs until none are left.
+func (q *deliveryQueue) work(job func()) {
+	for {
+		q.run(job)
+
+		q.mu.Lock()
+		q.count--
+		if q.count == 0 && q.idle != nil {
+			close(q.idle)
+			q.idle = nil
+		}
+		if len(q.queued) == 0 {
+			q.workers--
+			q.mu.Unlock()
+			return
+		}
+		job = q.queued[0]
+		q.queued[0] = nil
+		q.queued = q.queued[1:]
+		q.mu.Unlock()
 	}
 }
 
-// deliveryTracker counts the background webhook deliveries. Once closed, it
-// refuses new ones, so a request still running during shutdown cannot add to a
-// count that is already being waited on.
-type deliveryTracker struct {
-	mu     sync.Mutex
-	closed bool
-	wg     sync.WaitGroup
-}
-
-// start registers a delivery. It reports false once the tracker is closed.
-func (t *deliveryTracker) start() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.closed {
-		return false
-	}
-	t.wg.Add(1)
-	return true
-}
-
-func (t *deliveryTracker) done() {
-	t.wg.Done()
-}
-
-// close refuses new deliveries and returns a channel that is closed once the
-// running ones have finished.
-func (t *deliveryTracker) close() <-chan struct{} {
-	t.mu.Lock()
-	t.closed = true
-	t.mu.Unlock()
-
-	finished := make(chan struct{})
-	go func() {
-		t.wg.Wait()
-		close(finished)
+// run runs one job. A panic in it is logged rather than allowed to crash the
+// process, since no request handler is there to recover it.
+func (q *deliveryQueue) run(job func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			q.logger.Error("webhook delivery panicked", "panic", r, "stack", string(debug.Stack()))
+		}
 	}()
-	return finished
+	job()
+}
+
+// close refuses new deliveries. It returns how many are queued or running and
+// a channel that is closed once they have all run.
+func (q *deliveryQueue) close() (int, <-chan struct{}) {
+	q.mu.Lock()
+	q.closed = true
+	q.mu.Unlock()
+	return q.pending()
+}
+
+// pending returns how many deliveries are queued or running and a channel that
+// is closed once none are.
+func (q *deliveryQueue) pending() (int, <-chan struct{}) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	finished := make(chan struct{})
+	if q.count == 0 {
+		close(finished)
+	} else if q.idle == nil {
+		q.idle = finished
+	} else {
+		finished = q.idle
+	}
+	return q.count, finished
 }
 
 // WaitForDeliveries stops new webhook deliveries from starting and waits for
-// the running ones to finish. It gives up when ctx is done and logs a warning,
-// since the remaining deliveries are then abandoned. Call it after the servers
-// have stopped accepting requests.
+// the queued and running ones to finish. It gives up when ctx is done and logs
+// a warning, since the remaining deliveries are then abandoned. Call it after
+// the servers have stopped accepting requests.
 func (d *Backend) WaitForDeliveries(ctx context.Context) {
+	pending, finished := d.deliveries.close()
+	if pending == 0 {
+		return
+	}
+	d.logger.Info("waiting for webhook deliveries", "pending", pending)
 	select {
-	case <-d.deliveries.close():
+	case <-finished:
 	case <-ctx.Done():
-		d.logger.Warn("shutting down with webhook deliveries still running", "err", ctx.Err())
+		left, _ := d.deliveries.pending()
+		d.logger.Warn("shutting down with webhook deliveries still running", "pending", left, "err", ctx.Err())
 	}
 }
 

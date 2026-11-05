@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"bufio"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/matryer/is"
@@ -199,14 +201,25 @@ func TestSendWebhookSignatureDependsOnSecret(t *testing.T) {
 	is.True(sigOne != sigTwo)
 }
 
+// closingServer reads each request and closes the connection without
+// answering, so every request fails the same way.
+func closingServer(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			conn.Close() //nolint:errcheck
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
 func TestSendWebhookNetworkErrorRecorded(t *testing.T) {
 	is := is.New(t)
 	useHTTPClient(t)
 	e := newTestEnv(t)
-	srv := httptest.NewServer(http.NotFoundHandler())
-	target := srv.URL
-	srv.Close() // nothing listens any more: the connection is refused.
-	w := e.newWebhook(t, target, "", ContentTypeJSON, EventBranchTagCreate)
+	w := e.newWebhook(t, closingServer(t), "", ContentTypeJSON, EventBranchTagCreate)
 
 	is.NoErr(SendWebhook(e.ctx, w, EventBranchTagCreate, samplePayload()))
 
@@ -419,4 +432,114 @@ func TestSendWebhookRecordsEveryHeader(t *testing.T) {
 	is.True(strings.Contains(ds[0].ResponseHeaders, "X-Receiver-A: alpha"))
 	is.True(strings.Contains(ds[0].ResponseHeaders, "X-Receiver-B: beta"))
 	is.Equal(ds[0].ResponseStatus, http.StatusAccepted)
+}
+
+// useSendTimeout shortens the per-webhook send timeout for the test. Like
+// useHTTPClient it swaps a package variable, so tests using it must not call
+// t.Parallel.
+func useSendTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := sendTimeout
+	sendTimeout = d
+	t.Cleanup(func() { sendTimeout = orig })
+}
+
+// hangingServer accepts requests and never answers them until the test ends.
+func hangingServer(t *testing.T) string {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	return srv.URL
+}
+
+// Each webhook gets its own send timeout: a receiver that never answers uses
+// up its own time only, and the webhooks after it are still sent and recorded.
+func TestDeliverSlowWebhookDoesNotStarveOthers(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	useSendTimeout(t, 200*time.Millisecond)
+	e := newTestEnv(t)
+	srv, rec := newReceiver(t, http.StatusOK, "")
+	slow := e.newWebhook(t, hangingServer(t), "", ContentTypeJSON, EventPush)
+	fast := e.newWebhook(t, srv.URL, "", ContentTypeJSON, EventPush)
+
+	is.NoErr(Deliver(e.ctx, []models.Webhook{slow, fast}, samplePayloadFor(e)))
+
+	slowDs := e.deliveries(t, slow.ID)
+	is.Equal(len(slowDs), 1)
+	is.True(strings.Contains(slowDs[0].RequestError.String, "deadline exceeded"))
+	fastDs := e.deliveries(t, fast.ID)
+	is.Equal(len(fastDs), 1)
+	is.Equal(fastDs[0].ResponseStatus, http.StatusOK)
+	is.Equal(rec.calls, 1)
+}
+
+// A send whose context is already done fails, but the attempt is still
+// recorded: the row is written with a context of its own.
+func TestDeliverRecordsAttemptAfterContextDone(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	e := newTestEnv(t)
+	srv, rec := newReceiver(t, http.StatusOK, "")
+	w := e.newWebhook(t, srv.URL, "", ContentTypeJSON, EventPush)
+	ctx, cancel := context.WithCancel(e.ctx)
+	cancel()
+
+	is.NoErr(Deliver(ctx, []models.Webhook{w}, samplePayloadFor(e)))
+
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.True(strings.Contains(ds[0].RequestError.String, "context canceled"))
+	is.Equal(rec.calls, 0)
+}
+
+// Unrecorded deliveries have no row to show a failed status, so a non-2xx
+// response is returned as an error for the caller to log.
+func TestDeliverUnrecordedReportsNonSuccessStatus(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	e := newTestEnv(t)
+	bad, _ := newReceiver(t, http.StatusInternalServerError, "boom")
+	good, _ := newReceiver(t, http.StatusNoContent, "")
+	badHook := e.newWebhook(t, bad.URL, "", ContentTypeJSON, EventPush)
+	goodHook := e.newWebhook(t, good.URL, "", ContentTypeJSON, EventPush)
+
+	err := DeliverUnrecorded(e.ctx, []models.Webhook{badHook}, samplePayloadFor(e))
+	is.True(err != nil)
+	is.True(strings.Contains(err.Error(), "status 500"))
+	is.NoErr(DeliverUnrecorded(e.ctx, []models.Webhook{goodHook}, samplePayloadFor(e)))
+
+	is.Equal(len(e.deliveries(t, badHook.ID)), 0)
+	is.Equal(len(e.deliveries(t, goodHook.ID)), 0)
+}
+
+// RecordUndelivered stores the request it would have sent, with the reason as
+// its error, and sends nothing.
+func TestRecordUndeliveredStoresRequestWithoutSending(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	e := newTestEnv(t)
+	srv, rec := newReceiver(t, http.StatusOK, "")
+	w := e.newWebhook(t, srv.URL, "s3cret", ContentTypeJSON, EventPush)
+	payload := samplePayloadFor(e)
+
+	is.NoErr(RecordUndelivered(e.ctx, []models.Webhook{w}, payload, errors.New("queue full")))
+
+	is.Equal(rec.calls, 0)
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.Equal(ds[0].RequestError.String, "queue full")
+	is.Equal(ds[0].ResponseStatus, 0)
+	is.Equal(ds[0].Event, int(EventPush))
+	want, err := json.Marshal(payload)
+	is.NoErr(err)
+	is.Equal(strings.TrimSpace(ds[0].RequestBody), string(want))
+	is.True(strings.Contains(ds[0].RequestHeaders, "X-Softserve-Signature: sha256="))
 }

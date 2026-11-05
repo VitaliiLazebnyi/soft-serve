@@ -46,14 +46,22 @@ func TestSetPrivateWebhookOnlyOnChange(t *testing.T) {
 		return len(ds)
 	}
 
+	// Deliveries run in the background. The negative checks first wait until
+	// the queue is idle, so a delivery still on its way cannot be missed.
+	idle := func() {
+		_, finished := be.deliveries.pending()
+		<-finished
+	}
+
 	is.NoErr(be.SetPrivate(ctx, "repo", false))
+	idle()
 	is.Equal(deliveries(), 0)
 
-	// Deliveries run in the background, so the positive checks wait for them.
 	is.NoErr(be.SetPrivate(ctx, "repo", true))
 	waitFor(t, "first visibility delivery", func() bool { return deliveries() == 1 })
 
 	is.NoErr(be.SetPrivate(ctx, "repo", true))
+	idle()
 	is.Equal(deliveries(), 1)
 
 	is.NoErr(be.SetPrivate(ctx, "repo", false))

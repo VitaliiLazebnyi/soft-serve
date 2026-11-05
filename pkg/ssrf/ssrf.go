@@ -22,6 +22,10 @@ var (
 	ErrInvalidURL = errors.New("invalid URL")
 )
 
+// ClientTimeout caps each request made by the client from NewSecureClient,
+// including reading the response body.
+const ClientTimeout = 30 * time.Second
+
 // NewSecureClient returns an HTTP client with SSRF protection.
 // It validates resolved IPs at dial time to block connections to private
 // and internal networks. Hostnames are resolved and the validated IP is
@@ -30,7 +34,7 @@ var (
 // client convention and prevent redirect-based SSRF.
 func NewSecureClient() *http.Client {
 	return &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: ClientTimeout,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				host, port, err := net.SplitHostPort(addr)

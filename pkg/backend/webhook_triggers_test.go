@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -9,13 +10,16 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	charmlog "charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/access"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/hooks"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/ssrf"
 	"github.com/charmbracelet/soft-serve/pkg/webhook"
 	"github.com/matryer/is"
 	"golang.org/x/crypto/ssh"
@@ -151,6 +155,8 @@ func TestUpdateHookSurvivesSendFailure(t *testing.T) {
 	e.be.Update(e.ctx, io.Discard, io.Discard, e.repo.Name(), hooks.HookArg{
 		OldSha: zeroSha, NewSha: someSha, RefName: "refs/heads/feature",
 	})
+
+	is.True(strings.Contains(e.logs.String(), "error sending branch_tag webhook"))
 }
 
 // A hook for an unknown user is logged and nothing is sent.
@@ -236,13 +242,12 @@ func TestWaitForDeliveriesCompletesBackgroundSends(t *testing.T) {
 	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
 }
 
-// A delivery that starts before shutdown must be able to finish within the
-// shutdown budget. The per-request HTTP timeout is 30s (pkg/ssrf), and one
-// event may take up to webhookSendTimeout across its hooks.
+// A delivery that starts just before shutdown must be able to finish within
+// the shutdown budget, so the budget must exceed the cap the SSRF-protected
+// client puts on one request.
 func TestShutdownDeliveryBudgetCoversSendTimeout(t *testing.T) {
 	is := is.New(t)
-	is.True(webhookSendTimeout >= 30*time.Second)
-	is.True(ShutdownDeliveryTimeout >= webhookSendTimeout)
+	is.True(ShutdownDeliveryTimeout > ssrf.ClientTimeout)
 }
 
 // Once shutdown has started waiting, a change made by a request that is still
@@ -264,10 +269,12 @@ func TestChangesAfterShutdownStartSkipDelivery(t *testing.T) {
 
 // Deleting a repository removes its webhooks with their events and deliveries,
 // even on a connection that does not enforce foreign keys. No delivery row is
-// written for the repository event, since its webhook is gone.
+// written for the repository event, since its webhook is gone; the attempt is
+// sent unrecorded, so its refusal is logged instead.
 func TestDeleteRepositoryRemovesWebhookRows(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
+	foreignKeysOff(t, e)
 	t.Setenv("SOFT_SERVE_USERNAME", "admin")
 	t.Setenv("SOFT_SERVE_PUBLIC_KEY", "")
 	id := e.seedHook(t, webhook.EventBranchTagCreate, webhook.EventRepository)
@@ -277,6 +284,8 @@ func TestDeleteRepositoryRemovesWebhookRows(t *testing.T) {
 	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventBranchTagCreate})
 
 	is.NoErr(e.be.DeleteRepository(e.ctx, "repo"))
+	e.be.WaitForDeliveries(e.ctx)
+	is.True(strings.Contains(e.logs.String(), "webhook event not delivered"))
 
 	for _, q := range []string{
 		"SELECT COUNT(*) FROM webhooks WHERE id = ?",
@@ -329,6 +338,7 @@ func TestRemoveCollaboratorNotFound(t *testing.T) {
 	id := e.seedHook(t, webhook.EventCollaborator)
 
 	is.True(errors.Is(e.be.RemoveCollaborator(e.ctx, "repo", "bob"), proto.ErrCollaboratorNotFound))
+	e.be.WaitForDeliveries(e.ctx)
 	is.Equal(len(e.deliveredEvents(t, id)), 0)
 }
 
@@ -400,16 +410,23 @@ func TestUpdateHookSurvivesPushSendFailure(t *testing.T) {
 	e.be.Update(e.ctx, io.Discard, io.Discard, "repo", hooks.HookArg{
 		OldSha: zeroSha, NewSha: commit, RefName: "refs/heads/main",
 	})
+
+	is.True(strings.Contains(e.logs.String(), "error sending push webhook"))
 }
 
 // A hook for a repository that does not exist is logged and does nothing.
 func TestUpdateHookUnknownRepository(t *testing.T) {
+	is := is.New(t)
 	e := newWebhookEnv(t)
 	t.Setenv("SOFT_SERVE_USERNAME", "admin")
+	id := e.seedHook(t, webhook.EventBranchTagCreate, webhook.EventPush)
 
 	e.be.Update(e.ctx, io.Discard, io.Discard, "missing", hooks.HookArg{
 		OldSha: zeroSha, NewSha: someSha, RefName: "refs/heads/feature",
 	})
+
+	is.True(strings.Contains(e.logs.String(), "error finding repository"))
+	is.Equal(len(e.deliveredEvents(t, id)), 0)
 }
 
 // The hook identifies the user by public key when SOFT_SERVE_PUBLIC_KEY is
@@ -629,23 +646,34 @@ func TestSetPrivateKeepsChangeWhenEventBuildFails(t *testing.T) {
 	is.True(strings.Contains(e.logs.String(), "visibility change committed but webhook event skipped"))
 }
 
-// When every background slot is in use, a send runs in the caller. Each event
-// is recorded by the time deliverAfterChange returns, so none is dropped.
-func TestDeliveryWithFullBoundRunsInCallerWithoutLoss(t *testing.T) {
+// blockDeliveries replaces the backend's delivery queue with one of one
+// worker and maxPending queued deliveries, and occupies the worker until the
+// returned function is called.
+func blockDeliveries(t *testing.T, e whEnv, maxPending int) func() {
+	t.Helper()
+	e.be.deliveries = newDeliveryQueue(1, maxPending, e.be.logger)
+	release := make(chan struct{})
+	started := make(chan struct{})
+	e.be.deliveries.enqueue(func() {
+		close(started)
+		<-release
+	})
+	<-started
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	return unblock
+}
+
+// When every sender is busy, the event waits in the queue: the caller returns
+// at once, and the event is sent once a sender is free.
+func TestDeliveryWithBusySendersIsQueuedNotRunInCaller(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
 	id := e.seedHook(t, webhook.EventRepository)
 	hooks, err := e.be.store.GetWebhooksByRepoID(e.ctx, e.be.db, e.repo.ID())
 	is.NoErr(err)
-
-	for i := 0; i < maxBackgroundDeliveries; i++ {
-		e.be.deliverySlots <- struct{}{}
-	}
-	defer func() {
-		for i := 0; i < maxBackgroundDeliveries; i++ {
-			<-e.be.deliverySlots
-		}
-	}()
+	unblock := blockDeliveries(t, e, 10)
 
 	const n = 3
 	for i := 0; i < n; i++ {
@@ -653,8 +681,130 @@ func TestDeliveryWithFullBoundRunsInCallerWithoutLoss(t *testing.T) {
 		is.NoErr(err)
 		e.be.deliverAfterChange(e.ctx, hooks, ev, true)
 	}
+	is.Equal(len(e.deliveredEvents(t, id)), 0) // queued, not run in the caller
 
+	unblock()
+	e.be.WaitForDeliveries(e.ctx)
 	is.Equal(len(e.deliveredEvents(t, id)), n)
+}
+
+// When the queue is full too, the event is dropped without blocking the
+// caller. The drop is logged and recorded as a failed delivery.
+func TestDeliveryWithFullQueueIsDroppedAndRecorded(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	id := e.seedHook(t, webhook.EventRepository)
+	hooks, err := e.be.store.GetWebhooksByRepoID(e.ctx, e.be.db, e.repo.ID())
+	is.NoErr(err)
+	blockDeliveries(t, e, 0)
+
+	ev, err := webhook.NewRepositoryEvent(e.ctx, e.admin, e.repo, webhook.RepositoryEventActionRename)
+	is.NoErr(err)
+	e.be.deliverAfterChange(e.ctx, hooks, ev, true)
+
+	is.True(strings.Contains(e.logs.String(), "webhook event dropped: delivery queue is full"))
+	list, err := e.be.ListWebhookDeliveries(e.ctx, e.repo, id)
+	is.NoErr(err)
+	is.Equal(len(list), 1)
+	d, err := e.be.WebhookDelivery(e.ctx, e.repo, id, list[0].ID)
+	is.NoErr(err)
+	is.Equal(d.RequestError.String, errDeliveryQueueFull.Error())
+	is.Equal(d.Event, webhook.EventRepository)
+}
+
+// The queue never runs more than its workers at once, and runs every job.
+func TestDeliveryQueueBoundsWorkers(t *testing.T) {
+	is := is.New(t)
+	q := newDeliveryQueue(2, 100, charmlog.New(io.Discard))
+	var mu sync.Mutex
+	running, peak, ran := 0, 0, 0
+	for i := 0; i < 50; i++ {
+		is.Equal(q.enqueue(func() {
+			mu.Lock()
+			running++
+			peak = max(peak, running)
+			mu.Unlock()
+			time.Sleep(time.Millisecond)
+			mu.Lock()
+			running--
+			ran++
+			mu.Unlock()
+		}), enqueued)
+	}
+	_, finished := q.close()
+	<-finished
+	is.Equal(ran, 50)
+	is.True(peak <= 2)
+	is.Equal(q.enqueue(func() {}), enqueueClosed)
+}
+
+// A panicking delivery is logged and does not take the process down; the
+// queue keeps running later deliveries.
+func TestDeliveryPanicIsRecovered(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	is.Equal(e.be.deliveries.enqueue(func() { panic("boom") }), enqueued)
+	ran := make(chan struct{})
+	is.Equal(e.be.deliveries.enqueue(func() { close(ran) }), enqueued)
+	<-ran
+	e.be.WaitForDeliveries(e.ctx)
+	is.True(strings.Contains(e.logs.String(), "webhook delivery panicked"))
+}
+
+// Shutdown logs how many deliveries it waits for. When its context ends first,
+// as on a second signal, it returns at once and warns that some are left.
+func TestWaitForDeliveriesLogsPendingAndStopsOnCancel(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	blockDeliveries(t, e, 1)
+	is.Equal(e.be.deliveries.enqueue(func() {}), enqueued)
+
+	ctx, cancel := context.WithCancel(e.ctx)
+	cancel()
+	start := time.Now()
+	e.be.WaitForDeliveries(ctx)
+	is.True(time.Since(start) < time.Second)
+
+	logs := e.logs.String()
+	is.True(strings.Contains(logs, "waiting for webhook deliveries"))
+	is.True(strings.Contains(logs, "pending=2"))
+	is.True(strings.Contains(logs, "shutting down with webhook deliveries still running"))
+}
+
+// A change made without a user in the context, as by an initial admin key
+// that has no user row, still sends its event, with an empty sender.
+func TestEventsWithoutUserHaveEmptySender(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	id := e.seedHook(t, webhook.EventRepository, webhook.EventRepositoryVisibilityChange)
+	ctx := proto.WithUserContext(e.ctx, nil)
+
+	is.NoErr(e.be.SetPrivate(ctx, "repo", true))
+	is.NoErr(e.be.RenameRepository(ctx, "repo", "renamed"))
+	e.be.WaitForDeliveries(e.ctx)
+
+	// The two events may be sent by different senders, so in either order.
+	is.Equal(sortedEvents(e.deliveredEvents(t, id)), sortedEvents([]webhook.Event{webhook.EventRepositoryVisibilityChange, webhook.EventRepository}))
+	var bodies []string
+	is.NoErr(e.be.db.SelectContext(e.ctx, &bodies, "SELECT request_body FROM webhook_deliveries WHERE webhook_id = ?", id))
+	for _, b := range bodies {
+		is.True(strings.Contains(b, `"sender":{"id":0,"username":""}`))
+	}
+	is.True(!strings.Contains(e.logs.String(), "panicked"))
+}
+
+// foreignKeysOff pins the pool to one connection and switches foreign keys off
+// on it, so ON DELETE CASCADE does not remove dependent rows and only explicit
+// deletes do.
+func foreignKeysOff(t *testing.T, e whEnv) {
+	t.Helper()
+	is := is.New(t)
+	e.be.db.SetMaxOpenConns(1)
+	_, err := e.be.db.ExecContext(e.ctx, "PRAGMA foreign_keys = OFF")
+	is.NoErr(err)
+	var on int
+	is.NoErr(e.be.db.GetContext(e.ctx, &on, "PRAGMA foreign_keys"))
+	is.Equal(on, 0)
 }
 
 // A send whose webhook is deleted before it records must not leave a delivery

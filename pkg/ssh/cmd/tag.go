@@ -4,6 +4,7 @@ import (
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/access"
+	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/webhook"
 	"github.com/spf13/cobra"
@@ -108,9 +109,9 @@ func tagDeleteCommand() *cobra.Command {
 				return nil
 			}
 
-			if err := webhook.SendEvent(ctx, wh); err != nil {
-				log.Error("tag deleted but webhook event not delivered", "err", err)
-			}
+			// Sent in the background like the backend's own events, so the
+			// session neither waits on receivers nor cancels the delivery.
+			backend.FromContext(ctx).SendEventAfterChange(ctx, wh)
 			return nil
 		},
 	}

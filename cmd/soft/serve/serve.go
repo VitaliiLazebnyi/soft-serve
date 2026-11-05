@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/cmd"
 	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/config"
@@ -130,9 +131,13 @@ var (
 			}
 
 		shutdown:
+			// Waiting for webhook deliveries can take up to a minute; a
+			// second interrupt or terminate signal stops that wait.
+			abort, stopWaiting := abortOnSignal(done, s.logger)
+			defer stopWaiting()
 			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			if err := s.Shutdown(ctx); err != nil {
+			if err := s.Shutdown(ctx, abort); err != nil {
 				return err
 			}
 
@@ -140,6 +145,29 @@ var (
 		},
 	}
 )
+
+// abortOnSignal returns a context that is cancelled when sigs delivers an
+// interrupt or terminate signal. SIGHUP keeps its reload meaning and is
+// ignored here. Call the returned function to stop watching.
+func abortOnSignal(sigs <-chan os.Signal, logger *log.Logger) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			select {
+			case sig := <-sigs:
+				if sig == syscall.SIGHUP {
+					continue
+				}
+				logger.Warn("received second signal, not waiting for webhook deliveries", "signal", sig)
+				cancel()
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return ctx, cancel
+}
 
 func init() {
 	Command.Flags().BoolVarP(&syncHooks, "sync-hooks", "", false, "synchronize hooks for all repositories before running the server")

@@ -48,10 +48,7 @@ func NewCollaboratorEvent(ctx context.Context, user proto.User, repo proto.Repos
 				CreatedAt:   repo.CreatedAt(),
 				UpdatedAt:   repo.UpdatedAt(),
 			},
-			Sender: User{
-				ID:       user.ID(),
-				Username: user.Username(),
-			},
+			Sender: senderOf(user),
 		},
 	}
 
