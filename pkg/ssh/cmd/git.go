@@ -202,8 +202,10 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Set repo in context
-	repo, accessLevel := be.Readable(ctx, name, user)
+	// Set repo in context. readableRepo applies the same server admin rule
+	// as every other SSH command, so a key in initial_admin_keys is admin
+	// here too, even when it belongs to a non-admin account.
+	repo, accessLevel := readableRepo(ctx, name)
 	ctx = proto.WithRepositoryContext(ctx, repo)
 
 	// Environment variables to pass down to git hooks.

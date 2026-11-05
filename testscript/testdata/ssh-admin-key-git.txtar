@@ -1,0 +1,57 @@
+# vi: set ft=conf
+
+# A key in initial_admin_keys is a server admin over SSH git transport too,
+# even when the account it belongs to does not have the admin flag. Other
+# keys keep their account's access.
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# user1 owns a private repo with one commit
+soft user create user1 -k "$USER1_AUTHORIZED_KEY"
+soft user create attacker -k "$ATTACKER_AUTHORIZED_KEY"
+usoft repo create upriv -p
+ugit clone ssh://localhost:$SSH_PORT/upriv upriv
+mkfile ./upriv/README.md '# upriv'
+ugit -C upriv add -A
+ugit -C upriv commit -m 'first'
+ugit -C upriv push origin HEAD
+
+# the admin1 key stays admin through the config, but its account does not
+soft user set-admin admin false
+soft user info admin
+stdout 'Admin: false'
+
+# the admin key can fetch and push a repo its account has no access to
+git clone ssh://localhost:$SSH_PORT/upriv apriv
+exists apriv/README.md
+mkfile ./apriv/ADMIN.md '# admin'
+git -C apriv add -A
+git -C apriv commit -m 'admin'
+git -C apriv push origin HEAD
+git -C apriv archive --remote=ssh://localhost:$SSH_PORT/upriv HEAD -o out.tar
+
+# the admin key can still push-to-create
+mkdir anew
+git -C anew init
+mkfile ./anew/README.md '# anew'
+git -C anew add -A
+git -C anew commit -m 'first'
+git -C anew remote add origin ssh://localhost:$SSH_PORT/anew
+git -C anew push origin HEAD
+soft repo info anew
+stdout 'Repository: anew'
+
+# a non-admin key is unaffected
+! agit clone ssh://localhost:$SSH_PORT/upriv xpriv
+! exists xpriv/README.md
+
+# the owner sees the admin key's push
+ugit -C upriv pull origin master
+exists upriv/ADMIN.md
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .
