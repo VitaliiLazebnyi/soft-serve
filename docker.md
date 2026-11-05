@@ -1,18 +1,24 @@
-# Running Soft-Serve with Docker
+# Running Soft Serve Plus with Docker
 
-The official Soft Serve Docker images are available at [charmcli/soft-serve][docker]. Development and nightly builds are available at [ghcr.io/charmbracelet/soft-serve][ghcr]
+There are no published Soft Serve Plus images yet. The `charmcli/soft-serve`
+and `ghcr.io/charmbracelet/soft-serve` images contain the original Soft Serve,
+without the changes in this fork.
+
+Build the image from a checkout of this repository. The `Dockerfile` copies a
+prebuilt `soft` binary, so build that for Linux first:
 
 ```sh
-docker pull charmcli/soft-serve:latest
+CGO_ENABLED=0 GOOS=linux go build -o soft ./cmd/soft
+docker build -t soft-serve-plus:latest .
 ```
 
-Here’s how you might run `soft-serve` as a container.  Keep in mind that
+Here’s how you might run Soft Serve Plus as a container.  Keep in mind that
 repositories are stored in the `/soft-serve` directory, so you’ll likely want
 to mount that directory as a volume in order keep your repositories backed up.
 
 ```sh
 docker run \
-  --name=soft-serve \
+  --name=soft-serve-plus \
   --volume /path/to/data:/soft-serve \
   --publish 23231:23231 \
   --publish 23232:23232 \
@@ -20,7 +26,7 @@ docker run \
   --publish 9418:9418 \
   -e SOFT_SERVE_INITIAL_ADMIN_KEYS="YOUR_ADMIN_KEY_HERE" \
   --restart unless-stopped \
-  charmcli/soft-serve:latest
+  soft-serve-plus:latest
 ```
 
 Or by using docker-compose:
@@ -29,9 +35,9 @@ Or by using docker-compose:
 ---
 version: "3.1"
 services:
-  soft-serve:
-    image: charmcli/soft-serve:latest
-    container_name: soft-serve
+  soft-serve-plus:
+    image: soft-serve-plus:latest
+    container_name: soft-serve-plus
     volumes:
       - /path/to/data:/soft-serve
     ports:

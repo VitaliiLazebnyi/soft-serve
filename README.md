@@ -1,27 +1,23 @@
-# Sunsetting Soft Serve
-
-To continue innovating in this space and supporting our most important work, we’ve sunset Soft Serve. The code will continue to be open source and publicly available. No further security updates will be applied. If you love this project and would like to maintain a fork, please do.
-
-Thank you to everyone who has supported and contributed to Soft Serve over the years. We appreciate you.
-
-***
-
-# Soft Serve
+# Soft Serve Plus
 
 <p>
-    <img style="width: 451px" src="https://stuff.charm.sh/soft-serve/soft-serve-header.png?0" alt="A nice rendering of some melting ice cream with the words ‘Charm Soft Serve’ next to it"><br>
-    <a href="https://github.com/charmbracelet/soft-serve/releases"><img src="https://img.shields.io/github/release/charmbracelet/soft-serve.svg" alt="Latest Release"></a>
-    <a href="https://pkg.go.dev/github.com/charmbracelet/soft-serve?tab=doc"><img src="https://godoc.org/github.com/golang/gddo?status.svg" alt="GoDoc"></a>
-    <a href="https://github.com/charmbracelet/soft-serve/actions"><img src="https://github.com/charmbracelet/soft-serve/workflows/build/badge.svg" alt="Build Status"></a>
-    <a href="https://nightly.link/charmbracelet/soft-serve/workflows/nightly/main"><img src="https://shields.io/badge/-Nightly%20Builds-orange?logo=hackthebox&logoColor=fff&style=appveyor"/></a>
+    <a href="https://github.com/VitaliiLazebnyi/soft-serve-plus/actions/workflows/build.yml"><img src="https://github.com/VitaliiLazebnyi/soft-serve-plus/actions/workflows/build.yml/badge.svg" alt="Build Status"></a>
 </p>
+
+Soft Serve Plus is a maintained fork of [Soft Serve](https://github.com/charmbracelet/soft-serve) by
+[Charm](https://charm.sh). Charm has sunset the original project and no longer
+ships security updates for it, so fixes and new features land here instead.
+
+The binary is still called `soft`, and configuration, environment variables
+(`SOFT_SERVE_*`) and data layout are unchanged, so an existing Soft Serve
+installation can switch to Soft Serve Plus in place.
 
 A tasty, self-hostable Git server for the command line. 🍦
 
 <picture>
   <source media="(max-width: 750px)" srcset="https://github.com/charmbracelet/soft-serve/assets/42545625/c754c746-dc4c-44a6-9c39-28649264cbf2">
   <source media="(min-width: 750px)" width="750" srcset="https://github.com/charmbracelet/soft-serve/assets/42545625/c754c746-dc4c-44a6-9c39-28649264cbf2">
-  <img src="https://github.com/charmbracelet/soft-serve/assets/42545625/c754c746-dc4c-44a6-9c39-28649264cbf2" alt="Soft Serve screencast">
+  <img src="https://github.com/charmbracelet/soft-serve/assets/42545625/c754c746-dc4c-44a6-9c39-28649264cbf2" alt="Soft Serve Plus screencast">
 </picture>
 
 - Easy to navigate TUI available over SSH
@@ -40,7 +36,7 @@ A tasty, self-hostable Git server for the command line. 🍦
 
 ## Where can I see it?
 
-Just run `ssh git.charm.sh` for an example. You can also try some of the following commands:
+Charm runs a public instance of the original Soft Serve: just run `ssh git.charm.sh` for an example. You can also try some of the following commands:
 
 ```bash
 # Jump directly to a repo in the TUI
@@ -56,58 +52,28 @@ ssh git.charm.sh repo blob soft-serve cmd/soft/main.go
 ssh git.charm.sh repo blob soft-serve cmd/soft/main.go -c -l
 ```
 
-Or you can use Soft Serve to browse local repositories using `soft browse
+Or you can use Soft Serve Plus to browse local repositories using `soft browse
 [directory]` or running `soft` within a Git repository.
 
 ## Installation
 
-Soft Serve is a single binary called `soft`. You can get it from a package
-manager:
+Soft Serve Plus is a single binary called `soft`. There are no prebuilt
+packages or images for the fork yet, so build it from source (Go is required):
 
 ```bash
-# macOS or Linux
-brew install charmbracelet/tap/soft-serve
-
-# Windows (with Winget)
-winget install charmbracelet.soft-serve
-
-# Arch Linux
-pacman -S soft-serve
-
-# Nix
-nix-env -iA nixpkgs.soft-serve
-
-# Debian/Ubuntu
-sudo mkdir -p /etc/apt/keyrings
-curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
-echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list
-sudo apt update && sudo apt install soft-serve
-
-# Fedora/RHEL
-echo '[charm]
-name=Charm
-baseurl=https://repo.charm.sh/yum/
-enabled=1
-gpgcheck=1
-gpgkey=https://repo.charm.sh/yum/gpg.key' | sudo tee /etc/yum.repos.d/charm.repo
-sudo yum install soft-serve
+git clone https://github.com/VitaliiLazebnyi/soft-serve-plus.git
+cd soft-serve-plus
+go install ./cmd/soft
 ```
 
-You can also download a binary from the [releases][releases] page. Packages are
-available in Alpine, Debian, and RPM formats. Binaries are available for Linux,
-macOS, and Windows.
+> [!NOTE]
+> The upstream packages (`brew install charmbracelet/tap/soft-serve`, the Charm
+> Apt/Yum repositories, Winget, Arch, Nix, `charmcli/soft-serve` images) install
+> the original Soft Serve, without the changes in this fork.
 
-[releases]: https://github.com/charmbracelet/soft-serve/releases
+You can also [build a Docker image][docker] yourself.
 
-Or just install it with `go`:
-
-```bash
-go install github.com/charmbracelet/soft-serve/cmd/soft@latest
-```
-
-A [Docker image][docker] is also available.
-
-[docker]: https://github.com/charmbracelet/soft-serve/blob/main/docker.md
+[docker]: https://github.com/VitaliiLazebnyi/soft-serve-plus/blob/main/docker.md
 
 ## Setting up a server
 
@@ -127,12 +93,12 @@ To change the default data path use `SOFT_SERVE_DATA_PATH` environment variable.
 SOFT_SERVE_DATA_PATH=/var/lib/soft-serve soft serve
 ```
 
-When you run Soft Serve for the first time, make sure you have the
+When you run Soft Serve Plus for the first time, make sure you have the
 `SOFT_SERVE_INITIAL_ADMIN_KEYS` environment variable is set to your ssh
 authorized key. Any added key to this variable will be treated as admin with
 full privileges.
 
-Using this environment variable, Soft Serve will create a new `admin` user that
+Using this environment variable, Soft Serve Plus will create a new `admin` user that
 has full privileges. You can rename and change the user settings later.
 
 If you'd like a repository to exist the moment the server finishes booting,
@@ -153,11 +119,11 @@ boot, not its reachability, which is still governed entirely by the
 `anon-access`/`allow-keyless` settings described below. Booting again against
 the same data directory is a no-op if the repository already exists.
 
-Check out [Systemd][systemd] on how to run Soft Serve as a service using
-Systemd. Soft Serve packages in our Apt/Yum repositories come with Systemd
+Check out [Systemd][systemd] on how to run Soft Serve Plus as a service using
+Systemd. The upstream Soft Serve packages in Charm's Apt/Yum repositories come with Systemd
 service units.
 
-[systemd]: https://github.com/charmbracelet/soft-serve/blob/main/systemd.md
+[systemd]: https://github.com/VitaliiLazebnyi/soft-serve-plus/blob/main/systemd.md
 
 ### Server Configuration
 
@@ -338,9 +304,9 @@ name all in uppercase. Here are some examples:
 
 #### Database Configuration
 
-Soft Serve supports both SQLite and Postgres for its database. Like all other Soft Serve settings, you can change the database _driver_ and _data source_ using either `config.yaml` or environment variables. The default config uses SQLite as the default database driver.
+Soft Serve Plus supports both SQLite and Postgres for its database. Like all other Soft Serve Plus settings, you can change the database _driver_ and _data source_ using either `config.yaml` or environment variables. The default config uses SQLite as the default database driver.
 
-To use Postgres as your database, first create a Soft Serve database:
+To use Postgres as your database, first create a Soft Serve Plus database:
 
 ```sh
 psql -h<hostname> -p<port> -U<user> -c 'CREATE DATABASE soft_serve'
@@ -366,7 +332,7 @@ You can specify a database connection password in the _data source_ url. For exa
 
 #### LFS Configuration
 
-Soft Serve supports both Git LFS [HTTP](https://github.com/git-lfs/git-lfs/blob/main/docs/api/README.md) and [SSH](https://github.com/git-lfs/git-lfs/blob/main/docs/proposals/ssh_adapter.md) protocols out of the box, there is no need to do any extra set up.
+Soft Serve Plus supports both Git LFS [HTTP](https://github.com/git-lfs/git-lfs/blob/main/docs/api/README.md) and [SSH](https://github.com/git-lfs/git-lfs/blob/main/docs/proposals/ssh_adapter.md) protocols out of the box, there is no need to do any extra set up.
 
 Use the `lfs` config section to customize your Git LFS server.
 
@@ -374,7 +340,7 @@ Use the `lfs` config section to customize your Git LFS server.
 
 ## Server Access
 
-Soft Serve at its core manages your server authentication and authorization. Authentication verifies the identity of a user, while authorization determines their access rights to a repository.
+Soft Serve Plus at its core manages your server authentication and authorization. Authentication verifies the identity of a user, while authorization determines their access rights to a repository.
 
 To manage the server users, access, and repos, you can use the SSH command line interface.
 
@@ -383,10 +349,10 @@ you use your key here.
 
 > **Note** The `IdentitiesOnly` option is used to prevent SSH from using any
 > other keys in your `~/.ssh` directory. This is useful when you have multiple
-> keys, and you want to use a specific key for Soft Serve.
+> keys, and you want to use a specific key for Soft Serve Plus.
 
 For ease of use, instead of specifying the key, port, and hostname every time
-you SSH into Soft Serve, add your own Soft Serve instance entry to your SSH
+you SSH into Soft Serve Plus, add your own Soft Serve Plus instance entry to your SSH
 config. For instance, to use `ssh soft` instead of typing `ssh localhost -i
 ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -p 23231`, we can define a `soft` entry in our SSH config
 file `~/.ssh/config`.
@@ -399,7 +365,7 @@ Host soft
   IdentitiesOnly yes
 ```
 
-Now, we can do `ssh soft` to SSH into Soft Serve. Since `git` is also aware of
+Now, we can do `ssh soft` to SSH into Soft Serve Plus. Since `git` is also aware of
 this config, you can use `soft` as the hostname for your clone commands.
 
 ```sh
@@ -415,9 +381,9 @@ git push origin main
 ### Authentication
 
 Everything that needs authentication is done using SSH. Make sure you have
-added an entry for your Soft Serve instance in your `~/.ssh/config` file.
+added an entry for your Soft Serve Plus instance in your `~/.ssh/config` file.
 
-By default, Soft Serve gives read-only permission to anonymous connections to
+By default, Soft Serve Plus gives read-only permission to anonymous connections to
 any of the above protocols. This is controlled by two settings `anon-access`
 and `allow-keyless`.
 
@@ -492,11 +458,11 @@ SOFT_SERVE_ALLOW_KEYLESS=true \
 
 #### SSH
 
-Soft Serve doesn't allow duplicate SSH public keys for users. A public key can be associated with one user only. This makes SSH authentication simple and straight forward, add your public key to your Soft Serve user to be able to access Soft Serve.
+Soft Serve Plus doesn't allow duplicate SSH public keys for users. A public key can be associated with one user only. This makes SSH authentication simple and straight forward, add your public key to your Soft Serve Plus user to be able to access Soft Serve Plus.
 
 #### HTTP
 
-You can generate user access tokens through the SSH command line interface. Access tokens can have an optional expiration date. Use your access token as the basic auth user to access your Soft Serve repos through HTTP.
+You can generate user access tokens through the SSH command line interface. Access tokens can have an optional expiration date. Use your access token as the basic auth user to access your Soft Serve Plus repos through HTTP.
 
 ```sh
 # Create a user token
@@ -517,7 +483,7 @@ git clone http://ss_98fghi1234abc56789012345678901234de246d7@localhost:23232/my-
 
 ### Authorization
 
-Soft Serve offers a simple access control. There are four access levels,
+Soft Serve Plus offers a simple access control. There are four access levels,
 no-access, read-only, read-write, and admin-access.
 
 `admin-access` has full control of the server and can make changes to users and repos.
@@ -633,7 +599,7 @@ ssh -p 23231 localhost repo create icecream -p '-d "This is an Ice Cream descrip
 ssh -p 23231 localhost repo create -h
 ```
 
-Or you can add your Soft Serve server as a remote to any existing repo, given
+Or you can add your Soft Serve Plus server as a remote to any existing repo, given
 you have write access, and push to remote:
 
 ```
@@ -665,7 +631,7 @@ git push charm main
 You can also *import* repositories from any public remote. Use the `repo import` command.
 
 ```sh
-ssh -p 23231 localhost repo import soft-serve https://github.com/charmbracelet/soft-serve
+ssh -p 23231 localhost repo import soft-serve-plus https://github.com/VitaliiLazebnyi/soft-serve-plus
 ```
 
 Use `--mirror` or `-m` to mark the repository as a *pull* mirror.
@@ -694,17 +660,17 @@ be achieved by adding a collaborator to your repository.
 Use the `repo collab <command> <repo>` command to manage repo collaborators.
 
 ```sh
-# Add collaborator to soft-serve
-ssh -p 23231 localhost repo collab add soft-serve frankie
+# Add collaborator to soft-serve-plus
+ssh -p 23231 localhost repo collab add soft-serve-plus frankie
 
 # Add collaborator with a specific access level
-ssh -p 23231 localhost repo collab add soft-serve beatrice read-only
+ssh -p 23231 localhost repo collab add soft-serve-plus beatrice read-only
 
 # Remove collaborator
-ssh -p 23231 localhost repo collab remove soft-serve beatrice
+ssh -p 23231 localhost repo collab remove soft-serve-plus beatrice
 
 # List collaborators
-ssh -p 23231 localhost repo collab list soft-serve
+ssh -p 23231 localhost repo collab list soft-serve-plus
 ```
 
 ### Repository Metadata
@@ -738,30 +704,30 @@ also use `repo branch default` to set or get the repository default branch.
 ### Repository Tree
 
 To print a file tree for the project, just use the `repo tree` command along with
-the repo name as the SSH command to your Soft Serve server:
+the repo name as the SSH command to your Soft Serve Plus server:
 
 ```sh
-ssh -p 23231 localhost repo tree soft-serve
+ssh -p 23231 localhost repo tree soft-serve-plus
 ```
 
 You can also specify the sub-path and a specific reference or branch.
 
 ```sh
-ssh -p 23231 localhost repo tree soft-serve server/config
-ssh -p 23231 localhost repo tree soft-serve main server/config
+ssh -p 23231 localhost repo tree soft-serve-plus server/config
+ssh -p 23231 localhost repo tree soft-serve-plus main server/config
 ```
 
 From there, you can print individual files using the `repo blob` command:
 
 ```sh
-ssh -p 23231 localhost repo blob soft-serve cmd/soft/main.go
+ssh -p 23231 localhost repo blob soft-serve-plus cmd/soft/main.go
 ```
 
 You can add the `-c` flag to enable syntax coloring and `-l` to print line
 numbers:
 
 ```sh
-ssh -p 23231 localhost repo blob soft-serve cmd/soft/main.go -c -l
+ssh -p 23231 localhost repo blob soft-serve-plus cmd/soft/main.go -c -l
 
 ```
 
@@ -769,7 +735,7 @@ Use `--raw` to print raw file contents. This is useful for dumping binary data.
 
 ### Repository webhooks
 
-Soft Serve supports repository webhooks using the `repo webhook` command. You
+Soft Serve Plus supports repository webhooks using the `repo webhook` command. You
 can create and manage webhooks for different repository events such as _push_,
 _collaborators_, and _branch_tag_create_ events.
 
@@ -793,11 +759,11 @@ Flags:
   -h, --help   help for webhook
 ```
 
-## The Soft Serve TUI
+## The Soft Serve Plus TUI
 
 <img src="https://stuff.charm.sh/soft-serve/soft-serve-demo-commit.png" width="750" alt="TUI example showing a diff">
 
-Soft Serve TUI is mainly used to browse repos over SSH. You can also use it to
+Soft Serve Plus TUI is mainly used to browse repos over SSH. You can also use it to
 browse local repositories with `soft browse` or running `soft` within a Git
 repository.
 
@@ -808,7 +774,7 @@ ssh localhost -p 23231
 It's also possible to “link” to a specific repo:
 
 ```sh
-ssh -p 23231 localhost -t soft-serve
+ssh -p 23231 localhost -t soft-serve-plus
 ```
 
 You can copy text to your clipboard over SSH. For instance, you can press
@@ -821,7 +787,7 @@ You can copy text to your clipboard over SSH. For instance, you can press
 
 ## Hooks
 
-Soft Serve supports git server-side hooks `pre-receive`, `update`,
+Soft Serve Plus supports git server-side hooks `pre-receive`, `update`,
 `post-update`, and `post-receive`. This means you can define your own hooks to
 run on repository push events. Hooks can be defined as a per-repository hook,
 and/or global hooks that run for all repositories.
@@ -880,7 +846,7 @@ Now, you should get a message after pushing changes to any repository.
 
 ## A note about RSA keys
 
-Unfortunately, due to a shortcoming in Go’s `x/crypto/ssh` package, Soft Serve
+Unfortunately, due to a shortcoming in Go’s `x/crypto/ssh` package, Soft Serve Plus
 does not currently support access via new SSH RSA keys: only the old SHA-1
 ones will work.
 
@@ -902,24 +868,17 @@ If you’re curious about the inner workings of this problem have a look at:
 
 See [contributing][contribute].
 
-[contribute]: https://github.com/charmbracelet/soft-serve/contribute
+[contribute]: https://github.com/VitaliiLazebnyi/soft-serve-plus/pulls
 
 ## Feedback
 
-We’d love to hear your thoughts on this project. Feel free to drop us a note!
-
-- [Twitter](https://twitter.com/charmcli)
-- [The Fediverse](https://mastodon.social/@charmcli)
-- [Discord](https://charm.sh/chat)
+Found a bug or have an idea? Please open a [pull request](https://github.com/VitaliiLazebnyi/soft-serve-plus/pulls).
 
 ## License
 
-[MIT](https://github.com/charmbracelet/soft-serve/raw/main/LICENSE)
+[MIT](https://github.com/VitaliiLazebnyi/soft-serve-plus/raw/main/LICENSE)
 
 ---
 
-Part of [Charm](https://charm.sh).
-
-<a href="https://charm.sh/"><img alt="The Charm logo" src="https://stuff.charm.sh/charm-badge.jpg" width="400"></a>
-
-Charm热爱开源 • Charm loves open source
+Based on [Soft Serve](https://github.com/charmbracelet/soft-serve) by [Charm](https://charm.sh). Thank you to
+everyone who built and contributed to the original project.
