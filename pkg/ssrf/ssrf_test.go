@@ -275,13 +275,16 @@ func TestIsLocalhost(t *testing.T) {
 }
 
 // TestValidateURLErrorsHideResolver mirrors the import check for webhook
-// URLs, whose validation error is shown to the repository admin.
+// URLs, whose validation error is shown to the repository admin. The fake
+// resolver fails the way the system one does, naming the DNS server, so the
+// test runs offline and still proves that detail is dropped.
 func TestValidateURLErrorsHideResolver(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires DNS")
-	}
+	t.Parallel()
 
-	err := ValidateURL("https://does-not-exist.invalid/hook")
+	lookup := func(_ context.Context, host string) ([]net.IPAddr, error) {
+		return nil, &net.DNSError{Err: "no such host", Name: host, Server: "10.0.0.53:53", IsNotFound: true}
+	}
+	err := validateURL("https://does-not-exist.invalid/hook", lookup)
 	if !errors.Is(err, ErrInvalidURL) {
 		t.Fatalf("ValidateURL() error = %v, want ErrInvalidURL", err)
 	}
@@ -289,5 +292,38 @@ func TestValidateURLErrorsHideResolver(t *testing.T) {
 		if strings.Contains(err.Error(), leak) {
 			t.Errorf("ValidateURL() error %q leaks resolver detail %q", err, leak)
 		}
+	}
+}
+
+// TestValidateURLResolvesHostnames covers the DNS path of ValidateURL with a
+// fake resolver, so it runs offline.
+func TestValidateURLResolvesHostnames(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		ips     []string
+		wantErr error
+	}{
+		{"public", []string{"140.82.112.3"}, nil},
+		{"private", []string{"10.0.0.1"}, ErrPrivateIP},
+		{"public and private", []string{"140.82.112.3", "169.254.169.254"}, ErrPrivateIP},
+		{"does not resolve", nil, ErrInvalidURL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			table := map[string][]string{}
+			if tt.ips != nil {
+				table["hooks.example"] = tt.ips
+			}
+			err := validateURL("https://hooks.example/hook", fakeLookup(table))
+			if tt.wantErr == nil && err != nil {
+				t.Fatalf("validateURL() = %v, want nil", err)
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("validateURL() = %v, want %v", err, tt.wantErr)
+			}
+		})
 	}
 }

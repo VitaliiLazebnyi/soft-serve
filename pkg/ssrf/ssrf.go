@@ -152,6 +152,12 @@ func isPrivateOrInternal(ip net.IP) bool {
 // It checks that the scheme is http/https, the hostname is not localhost,
 // and all resolved IPs are public.
 func ValidateURL(rawURL string) error {
+	return validateURL(rawURL, nil)
+}
+
+// validateURL is ValidateURL with the resolver used for hostnames; nil means
+// net.DefaultResolver.
+func validateURL(rawURL string, lookup lookupFunc) error {
 	if rawURL == "" {
 		return ErrInvalidURL
 	}
@@ -181,7 +187,7 @@ func ValidateURL(rawURL string) error {
 		return nil
 	}
 
-	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), hostname)
+	ips, err := lookup.resolve(context.Background(), hostname)
 	if err != nil {
 		// See validateRemoteHost: the resolver error names the resolver.
 		return fmt.Errorf("%w: cannot resolve hostname", ErrInvalidURL)
