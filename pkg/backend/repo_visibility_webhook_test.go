@@ -27,7 +27,7 @@ func TestSetPrivateWebhookOnlyOnChange(t *testing.T) {
 	is.NoErr(err)
 	ctx = proto.WithUserContext(ctx, admin)
 
-	repo, err := seedCreate(be, ctx, "repo", nil, proto.RepositoryOptions{})
+	repo, err := be.CreateRepository(ctx, "repo", nil, proto.RepositoryOptions{})
 	is.NoErr(err)
 
 	// Deliveries to this address fail fast, but are still recorded.

@@ -27,8 +27,8 @@ func newTestBackend(t *testing.T) (*Backend, *config.Config) {
 	cfg.DataPath = dp
 	cfg.DB.Driver = "sqlite"
 	cfg.DB.DataSource = dp + "/test.db"
-	// Backend tests run with admin-only creation on; flag-off cases set it themselves.
-	cfg.AdminOnlyCreate = true
+	// AdminOnlyCreate is left at its default (off); tests of the restricted
+	// policy turn it on themselves.
 
 	ctx = config.WithContext(ctx, cfg)
 	dbx, err := db.Open(ctx, cfg.DB.Driver, cfg.DB.DataSource)

@@ -33,11 +33,14 @@ func TestOrphanRepoDirectoryIsNotClaimable(t *testing.T) {
 	is.Equal(be.AccessLevelForUser(ctx, "orphan", user), access.NoAccess)
 	is.Equal(be.AccessLevelForUser(ctx, "orphan", nil), access.NoAccess)
 
-	_, err = seedCreate(be, ctx, "orphan", user, proto.RepositoryOptions{})
+	_, err = be.CreateRepository(ctx, "orphan", user, proto.RepositoryOptions{})
 	is.True(errors.Is(err, proto.ErrRepoExist))
 
-	// A genuinely new name is not creatable by a non-admin (with admin-only creation on).
+	// A genuinely new name is still creatable, unless admin-only creation is on.
+	is.Equal(be.AccessLevelForUser(ctx, "fresh", user), access.ReadWriteAccess)
+	cfg.AdminOnlyCreate = true
 	is.Equal(be.AccessLevelForUser(ctx, "fresh", user), access.ReadOnlyAccess)
+	is.Equal(be.AccessLevelForUser(ctx, "orphan", user), access.NoAccess)
 }
 
 // TestCaseVariantOfExistingRepo verifies that a name differing only by case
@@ -55,20 +58,20 @@ func TestCaseVariantOfExistingRepo(t *testing.T) {
 	attacker, err := be.CreateUser(ctx, "attacker", proto.UserOptions{})
 	is.NoErr(err)
 
-	_, err = seedCreate(be, ctx, "secret", owner, proto.RepositoryOptions{Private: true})
+	_, err = be.CreateRepository(ctx, "secret", owner, proto.RepositoryOptions{Private: true})
 	is.NoErr(err)
 
 	_, statErr := os.Stat(filepath.Join(cfg.DataPath, "repos", "SECRET.git"))
 	caseInsensitive := statErr == nil
 
 	level := be.AccessLevelForUser(ctx, "SECRET", attacker)
-	_, createErr := seedCreate(be, ctx, "SECRET", attacker, proto.RepositoryOptions{})
+	_, createErr := be.CreateRepository(ctx, "SECRET", attacker, proto.RepositoryOptions{})
 
 	if caseInsensitive {
 		is.Equal(level, access.NoAccess)
 		is.True(errors.Is(createErr, proto.ErrRepoExist))
 	} else {
-		is.Equal(level, access.ReadOnlyAccess) // admin-only creation on: non-admins cannot create
+		is.Equal(level, access.ReadWriteAccess)
 		is.NoErr(createErr)
 	}
 
@@ -78,6 +81,18 @@ func TestCaseVariantOfExistingRepo(t *testing.T) {
 	is.True(r.IsPrivate())
 	is.Equal(r.UserID(), owner.ID())
 	is.Equal(be.AccessLevelForUser(ctx, "secret", attacker), access.NoAccess)
+
+	// With admin-only creation on, no case variant is creatable by the
+	// attacker, whatever the filesystem.
+	cfg.AdminOnlyCreate = true
+	level = be.AccessLevelForUser(ctx, "Secret", attacker)
+	_, createErr = be.CreateRepository(ctx, "Secret", attacker, proto.RepositoryOptions{})
+	is.True(errors.Is(createErr, proto.ErrUnauthorized))
+	if caseInsensitive {
+		is.Equal(level, access.NoAccess)
+	} else {
+		is.Equal(level, access.ReadOnlyAccess)
+	}
 }
 
 // TestConcurrentCreateSameName verifies that racing creates of one name yield
@@ -86,10 +101,6 @@ func TestConcurrentCreateSameName(t *testing.T) {
 	is := is.New(t)
 	be, cfg := newTestBackend(t)
 	ctx := context.Background()
-	// The race is about the directory claim, not the create policy, so the
-	// policy is off for the racing creates (the goroutines below are joined
-	// before this test returns).
-	cfg.AdminOnlyCreate = false
 
 	const workers = 8
 	errs := make(chan error, workers)
@@ -150,7 +161,7 @@ func TestRegisterRepositoryAdoptsClaimedPath(t *testing.T) {
 	is.Equal(be.AccessLevelForUser(ctx, "imported", owner), access.AdminAccess)
 
 	// The name is now taken on both axes.
-	_, err = seedCreate(be, ctx, "imported", owner, proto.RepositoryOptions{})
+	_, err = be.CreateRepository(ctx, "imported", owner, proto.RepositoryOptions{})
 	is.True(errors.Is(err, proto.ErrRepoExist))
 	_, err = be.Repository(ctx, "imported")
 	is.NoErr(err)

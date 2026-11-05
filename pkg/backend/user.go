@@ -34,6 +34,18 @@ func (d *Backend) isAdminKey(pk ssh.PublicKey) bool {
 	return false
 }
 
+// isServerAdmin reports whether the caller is a server admin: user has the
+// admin flag, or the public key on ctx is one of the configured admin keys.
+// Admin keys are only seeded into the database on first migration, so a key
+// added to initial_admin_keys later is checked here. It matches the SSH
+// layer's isServerAdmin.
+func (d *Backend) isServerAdmin(ctx context.Context, user proto.User) bool {
+	if user != nil && user.IsAdmin() {
+		return true
+	}
+	return d.isAdminKey(sshutils.PublicKeyFromContext(ctx))
+}
+
 // AccessLevelByPublicKey returns the access level of a user's public key for a repository.
 //
 // It implements backend.Backend.
@@ -98,6 +110,8 @@ func (d *Backend) ReadableByPublicKey(ctx context.Context, name string, pk ssh.P
 // baseAccessLevel is the level user holds for a repository that does not
 // exist.
 //
+// Server admins (see isServerAdmin) get admin access whatever the flag.
+//
 // With AdminOnlyCreate set, only admins may create repositories: registered
 // non-admins get read-only, which keeps their SSH session valid (session.go
 // needs >= read-only) but fails every create path: repo create, repo import,
@@ -110,7 +124,7 @@ func (d *Backend) baseAccessLevel(ctx context.Context, user proto.User) access.A
 	anon := d.AnonAccess(ctx)
 	adminOnly := d.cfg.AdminOnlyCreate
 	switch {
-	case user != nil && user.IsAdmin():
+	case d.isServerAdmin(ctx, user):
 		return access.AdminAccess
 	case adminOnly && (user != nil || anon > access.ReadOnlyAccess):
 		// Never read-write or above on a missing name, so never a create.

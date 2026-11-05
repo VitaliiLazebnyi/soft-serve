@@ -152,6 +152,10 @@ func TestParseMultipleMethods(t *testing.T) {
 
 func TestAdminOnlyCreateOffByDefault(t *testing.T) {
 	is := is.New(t)
+	// Ignore any value exported in the environment running the tests;
+	// t.Setenv restores it afterwards.
+	t.Setenv("SOFT_SERVE_ADMIN_ONLY_CREATE", "")
+	is.NoErr(os.Unsetenv("SOFT_SERVE_ADMIN_ONLY_CREATE"))
 	cfg := DefaultConfig()
 	is.NoErr(cfg.ParseEnv())
 	is.True(!cfg.AdminOnlyCreate)
