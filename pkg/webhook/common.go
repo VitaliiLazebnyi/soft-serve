@@ -1,6 +1,10 @@
 package webhook
 
-import "time"
+import (
+	"time"
+
+	"github.com/charmbracelet/soft-serve/pkg/proto"
+)
 
 // EventPayload is a webhook event payload.
 type EventPayload interface {
@@ -92,4 +96,14 @@ type Commit struct {
 	Committer Author `json:"committer" url:"committer"`
 	// Timestamp is the commit timestamp.
 	Timestamp time.Time `json:"timestamp" url:"timestamp"`
+}
+
+// senderOf returns the event sender for user. A change can be made without a
+// user in the context, for example by an initial admin key that has no user
+// row; the sender is then left empty.
+func senderOf(user proto.User) User {
+	if user == nil {
+		return User{}
+	}
+	return User{ID: user.ID(), Username: user.Username()}
 }

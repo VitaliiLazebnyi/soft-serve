@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/access"
@@ -221,4 +223,29 @@ func TestEnsureDefaultRepoCreateErrorSkipped(t *testing.T) {
 	repos, err := be.Repositories(ctx)
 	is.NoErr(err)
 	is.Equal(len(repos), 0)
+}
+
+// During shutdown, a second interrupt or terminate signal ends the wait for
+// webhook deliveries. SIGHUP keeps meaning "reload" and does not.
+func TestAbortOnSignal(t *testing.T) {
+	is := is.New(t)
+	var logs bytes.Buffer
+	sigs := make(chan os.Signal, 1)
+	abort, stop := abortOnSignal(sigs, log.New(&logs))
+	defer stop()
+
+	sigs <- syscall.SIGHUP
+	select {
+	case <-abort.Done():
+		t.Fatal("SIGHUP aborted the wait")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	sigs <- syscall.SIGTERM
+	select {
+	case <-abort.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("SIGTERM did not abort the wait")
+	}
+	is.True(strings.Contains(logs.String(), "not waiting for webhook deliveries"))
 }

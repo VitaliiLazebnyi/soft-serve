@@ -44,7 +44,7 @@ var repoScopedCommands = [][]string{
 	{"mirror", "REPO"},
 	{"mirror", "REPO", "true"},
 	{"webhook", "list", "REPO"},
-	{"webhook", "create", "REPO", "https://example.com", "-e", "push"},
+	{"webhook", "create", "REPO", "https://93.184.216.34", "-e", "push"},
 	{"webhook", "delete", "REPO", "1"},
 	{"webhook", "update", "REPO", "1"},
 	{"webhook", "deliveries", "list", "REPO", "1"},

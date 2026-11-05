@@ -36,7 +36,7 @@ func TestWebhookDeliveriesAreScopedToRepository(t *testing.T) {
 	victim := proto.UserFromContext(victimCtx)
 	victimRepo, err := be.CreateRepository(victimCtx, "victim-repo", victim, proto.RepositoryOptions{Private: true})
 	is.NoErr(err)
-	is.NoErr(be.CreateWebhook(victimCtx, victimRepo, "http://example.com/hook", webhook.ContentTypeJSON, "s3cret", []webhook.Event{webhook.EventPush}, true))
+	is.NoErr(be.CreateWebhook(victimCtx, victimRepo, "http://93.184.216.34/hook", webhook.ContentTypeJSON, "s3cret", []webhook.Event{webhook.EventPush}, true))
 
 	victimHooks, err := be.ListWebhooks(victimCtx, victimRepo)
 	is.NoErr(err)
@@ -50,7 +50,7 @@ func TestWebhookDeliveriesAreScopedToRepository(t *testing.T) {
 	deliveryID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	is.NoErr(store.FromContext(ctx).CreateWebhookDelivery(
 		ctx, db.FromContext(ctx), deliveryID, victimHookID, int(webhook.EventPush),
-		"http://example.com/hook", "POST", nil,
+		"http://93.184.216.34/hook", "POST", nil,
 		secretSignature, secretBody, 200, "Content-Type: text/plain\n", "victim response body",
 	))
 

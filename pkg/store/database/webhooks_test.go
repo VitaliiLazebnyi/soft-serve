@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/migrate"
+	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/matryer/is"
 )
 
@@ -245,4 +248,79 @@ func TestWebhookStoreErrorsOnClosedDB(t *testing.T) {
 			t.Errorf("%s: no error on closed database", name)
 		}
 	}
+}
+
+// A webhook deleted after the existence check but before the insert makes the
+// insert violate the foreign key. That is the same outcome as a webhook that
+// is already gone: nothing is written and no error is returned. A trigger
+// deletes the webhook in that window.
+func TestCreateWebhookDeliveryForeignKeyViolationIsSkipped(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+	id, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 1, true)
+	is.NoErr(err)
+	_, err = dbx.ExecContext(ctx, `CREATE TRIGGER vanish BEFORE INSERT ON webhook_deliveries
+		BEGIN DELETE FROM webhooks WHERE id = NEW.webhook_id; END;`)
+	is.NoErr(err)
+
+	is.NoErr(s.CreateWebhookDelivery(ctx, dbx, uuid.New(), id, 1, "https://93.184.216.34/a", "POST", nil, "", "{}", 200, "", ""))
+
+	var n int
+	is.NoErr(dbx.GetContext(ctx, &n, "SELECT COUNT(*) FROM webhook_deliveries"))
+	is.Equal(n, 0)
+}
+
+// Both drivers' forms of a foreign key violation are recognized, and nothing
+// else is.
+func TestIsForeignKeyViolation(t *testing.T) {
+	is := is.New(t)
+	is.True(isForeignKeyViolation(fmt.Errorf("wrapped: %w", &pq.Error{Code: "23503"})))
+	is.True(!isForeignKeyViolation(&pq.Error{Code: "23505"}))
+	is.True(!isForeignKeyViolation(errors.New("FOREIGN KEY constraint failed")))
+	is.True(!isForeignKeyViolation(nil))
+
+	// A real SQLite foreign key violation.
+	ctx, dbx := newWebhookTestDB(t)
+	_, err := dbx.ExecContext(ctx, `INSERT INTO webhook_events (webhook_id, event) VALUES (424242, 1)`)
+	is.True(err != nil)
+	is.True(isForeignKeyViolation(err))
+}
+
+// Webhooks and their events are listed in creation order. Without ORDER BY,
+// SQLite returns webhooks in URL order through the unique (repo_id, url)
+// index, so "n=10" came before "n=9".
+func TestWebhookListsAreOrderedByID(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+	var ids []int64
+	for _, n := range []int{9, 10, 1} {
+		id, err := s.CreateWebhook(ctx, dbx, 7, fmt.Sprintf("https://93.184.216.34/?n=%d", n), "", 1, true)
+		is.NoErr(err)
+		is.NoErr(s.CreateWebhookEvents(ctx, dbx, id, []int{3, 1, 2}))
+		ids = append(ids, id)
+	}
+
+	list, err := s.GetWebhooksByRepoID(ctx, dbx, 7)
+	is.NoErr(err)
+	byEvent, err := s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, []int{1})
+	is.NoErr(err)
+	for _, got := range [][]int64{idsOf(list), idsOf(byEvent)} {
+		is.Equal(got, ids)
+	}
+
+	events, err := s.GetWebhookEventsByWebhookID(ctx, dbx, ids[0])
+	is.NoErr(err)
+	for i := 1; i < len(events); i++ {
+		is.True(events[i-1].ID < events[i].ID)
+	}
+}
+
+func idsOf(whs []models.Webhook) []int64 {
+	out := make([]int64, len(whs))
+	for i, w := range whs {
+		out[i] = w.ID
+	}
+	return out
 }

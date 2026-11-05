@@ -4,13 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/charmbracelet/soft-serve/pkg/access"
 	"github.com/charmbracelet/soft-serve/pkg/backend"
+	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
@@ -21,7 +26,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const whURL = "https://example.com/hook"
+// Webhook URLs are literal public addresses: validation accepts them without a
+// DNS lookup. Tests that send to a webhook store a loopback URL for it
+// directly (see whPointAtLoopback), which the SSRF-protected client refuses
+// before any packet is sent.
+const (
+	whURL      = "https://93.184.216.34/hook"
+	whURLOther = "https://93.184.216.35"
+)
 
 // whRepo creates the repository "hooks", owned by a fresh non-admin user, and
 // returns that user's context.
@@ -67,21 +79,41 @@ func whSnapshot(t *testing.T, ctx context.Context, be *backend.Backend) string {
 	return b.String()
 }
 
-// whSeq numbers the webhooks created by whCreate, so their URLs differ.
-var whSeq int
+// whSeq numbers the webhooks created by whCreate, so their URLs differ. It is
+// atomic so the helper stays safe if tests are ever run in parallel.
+var whSeq atomic.Int64
 
 // whCreate creates a webhook on "hooks" with a URL unique to this call, since
-// a repository cannot hold two webhooks with the same URL.
+// a repository cannot hold two webhooks with the same URL, and returns its ID.
 func whCreate(t *testing.T, ctx context.Context, be *backend.Backend, extra ...string) int64 {
 	t.Helper()
 	is := is.New(t)
-	whSeq++
-	url := fmt.Sprintf("%s?n=%d", whURL, whSeq)
+	url := fmt.Sprintf("%s?n=%d", whURL, whSeq.Add(1))
 	args := append([]string{"webhook", "create", "hooks", url}, extra...)
 	_, _, err := runRepoOutput(t, ctx, args...)
 	is.NoErr(err)
-	hooks := whHooks(t, ctx, be, "hooks")
-	return hooks[len(hooks)-1].ID
+	for _, h := range whHooks(t, ctx, be, "hooks") {
+		if h.URL == url {
+			return h.ID
+		}
+	}
+	t.Fatalf("webhook %s not found", url)
+	return 0
+}
+
+// whPointAtLoopback stores a loopback URL for the webhook without validation.
+// Sends to it then fail in the SSRF-protected client before anything goes on
+// the network, and are recorded as failed deliveries.
+func whPointAtLoopback(t *testing.T, ctx context.Context, repo string, hookID int64) {
+	t.Helper()
+	is := is.New(t)
+	be := backend.FromContext(ctx)
+	r, err := be.Repository(ctx, repo)
+	is.NoErr(err)
+	h, err := be.Webhook(ctx, r, hookID)
+	is.NoErr(err)
+	is.NoErr(store.FromContext(ctx).UpdateWebhookByID(ctx, db.FromContext(ctx), r.ID(), hookID,
+		"http://127.0.0.1:1/", h.Secret, int(h.ContentType), h.Active))
 }
 
 func whInsertDelivery(t *testing.T, ctx context.Context, hookID int64, id uuid.UUID, status int) {
@@ -153,31 +185,38 @@ func TestWebhookCreateTrimsURL(t *testing.T) {
 	is.Equal(whHooks(t, ownerCtx, be, "hooks")[0].URL, whURL)
 }
 
-// Every invalid create input is refused and leaves nothing behind.
+// Every invalid create input is refused for its own reason and leaves nothing
+// behind. Each case names the error text it must fail with.
 func TestWebhookCreateRejectsInvalidInput(t *testing.T) {
-	cases := map[string][]string{
-		"unknown event":       {"webhook", "create", "hooks", whURL, "-e", "bogus"},
-		"unknown content":     {"webhook", "create", "hooks", whURL, "-c", "xml"},
-		"private target":      {"webhook", "create", "hooks", "http://127.0.0.1/x"},
-		"loopback hostname":   {"webhook", "create", "hooks", "http://localhost/x"},
-		"not a url":           {"webhook", "create", "hooks", "::not a url"},
-		"missing url":         {"webhook", "create", "hooks"},
-		"missing repository":  {"webhook", "create"},
-		"unsupported scheme":  {"webhook", "create", "hooks", "ftp://example.com/x"},
-		"unknown repository":  {"webhook", "create", "nope", whURL},
-		"empty content type":  {"webhook", "create", "hooks", whURL, "-c", ""},
-		"space-only content":  {"webhook", "create", "hooks", whURL, "-c", "   "},
-		"bad event in middle": {"webhook", "create", "hooks", whURL, "-e", "push", "-e", "nope"},
+	cases := map[string]struct {
+		args []string
+		want string
+	}{
+		"unknown event":       {[]string{"webhook", "create", "hooks", whURL, "-e", "bogus"}, webhook.ErrInvalidEvent.Error()},
+		"unknown content":     {[]string{"webhook", "create", "hooks", whURL, "-c", "xml"}, webhook.ErrInvalidContentType.Error()},
+		"private target":      {[]string{"webhook", "create", "hooks", "http://127.0.0.1/x"}, webhook.ErrPrivateIP.Error()},
+		"loopback hostname":   {[]string{"webhook", "create", "hooks", "http://localhost/x"}, webhook.ErrPrivateIP.Error()},
+		"not a url":           {[]string{"webhook", "create", "hooks", "::not a url"}, "cannot parse URL"},
+		"missing url":         {[]string{"webhook", "create", "hooks"}, "accepts 2 arg(s), received 1"},
+		"missing repository":  {[]string{"webhook", "create"}, "accepts 2 arg(s), received 0"},
+		"unsupported scheme":  {[]string{"webhook", "create", "hooks", "ftp://93.184.216.34/x"}, webhook.ErrInvalidScheme.Error()},
+		"unknown repository":  {[]string{"webhook", "create", "nope", whURL}, proto.ErrRepoNotFound.Error()},
+		"empty content type":  {[]string{"webhook", "create", "hooks", whURL, "-c", ""}, webhook.ErrInvalidContentType.Error()},
+		"space-only content":  {[]string{"webhook", "create", "hooks", whURL, "-c", "   "}, webhook.ErrInvalidContentType.Error()},
+		"bad event in middle": {[]string{"webhook", "create", "hooks", whURL, "-e", "push", "-e", "nope"}, webhook.ErrInvalidEvent.Error()},
 	}
-	for name, args := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			is := is.New(t)
 			ctx, be := newAuthTestContext(t)
 			ownerCtx := whRepo(t, ctx, be)
 			before := whSnapshot(t, ownerCtx, be)
 
-			_, _, err := runRepoOutput(t, ownerCtx, args...)
+			_, _, err := runRepoOutput(t, ownerCtx, tc.args...)
 			is.True(err != nil)
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not contain %q", err, tc.want)
+			}
 			is.Equal(whSnapshot(t, ownerCtx, be), before)
 		})
 	}
@@ -300,10 +339,10 @@ func TestWebhookUpdateChangesEveryFlag(t *testing.T) {
 	ids := strconv.FormatInt(id, 10)
 
 	is.NoErr(runRepo(t, ownerCtx, "webhook", "update", "hooks", ids,
-		"-u", "https://example.org/new", "-s", "new", "-c", "FORM", "-e", "repository", "-e", "collaborator", "-a", "false"))
+		"-u", whURLOther+"/new", "-s", "new", "-c", "FORM", "-e", "repository", "-e", "collaborator", "-a", "false"))
 
 	h := whHooks(t, ownerCtx, be, "hooks")[0]
-	is.Equal(h.URL, "https://example.org/new")
+	is.Equal(h.URL, whURLOther+"/new")
 	is.Equal(h.Secret, "new")
 	is.Equal(h.ContentType, webhook.ContentTypeForm)
 	is.Equal(eventNames(h.Events), []string{"collaborator", "repository"})
@@ -317,7 +356,7 @@ func TestWebhookUpdateRejectsInvalidInput(t *testing.T) {
 		"bad event":        {"-e", "bogus"},
 		"private url":      {"-u", "http://10.0.0.1/x"},
 		"loopback url":     {"-u", "http://127.0.0.1/x"},
-		"bad url scheme":   {"-u", "gopher://example.com/x"},
+		"bad url scheme":   {"-u", "gopher://93.184.216.34/x"},
 	}
 	for name, flags := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -549,6 +588,7 @@ func TestWebhookRedeliverRecordsNewDelivery(t *testing.T) {
 	ownerCtx := whRepo(t, ctx, be)
 	id := whCreate(t, ownerCtx, be)
 	ids := strconv.FormatInt(id, 10)
+	whPointAtLoopback(t, ownerCtx, "hooks", id)
 	delID := uuid.MustParse("00000000-0000-0000-0000-0000000000f1")
 	whInsertDelivery(t, ctx, id, delID, 200)
 
@@ -658,8 +698,8 @@ func TestWebhookUpdateTrimsURLLikeCreate(t *testing.T) {
 	ownerCtx := whRepo(t, ctx, be)
 	id := strconv.FormatInt(whCreate(t, ownerCtx, be), 10)
 
-	is.NoErr(runRepo(t, ownerCtx, "webhook", "update", "hooks", id, "-u", "  https://example.org/padded  "))
-	is.Equal(whHooks(t, ownerCtx, be, "hooks")[0].URL, "https://example.org/padded")
+	is.NoErr(runRepo(t, ownerCtx, "webhook", "update", "hooks", id, "-u", "  "+whURLOther+"/padded  "))
+	is.Equal(whHooks(t, ownerCtx, be, "hooks")[0].URL, whURLOther+"/padded")
 }
 
 // requireRepo normally resolves the repository before RunE runs. Each leaf
@@ -719,4 +759,72 @@ func TestWebhookListReportsStoreFailure(t *testing.T) {
 	is.True(err != nil)
 	is.True(strings.Contains(err.Error(), "store unavailable"))
 	is.Equal(stdout, "")
+}
+
+// whPushRefs pushes one commit to the "hooks" repository as the branches main,
+// feature and other, and the tag v1. main is the default branch.
+func whPushRefs(t *testing.T, ctx context.Context) {
+	t.Helper()
+	is := is.New(t)
+	bare := filepath.Join(config.FromContext(ctx).DataPath, "repos", "hooks.git")
+	work := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com"}, args...)...) //nolint:noctx
+		cmd.Dir = work
+		// Ignore the user's git config, which may sign or annotate tags.
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	git("commit", "-q", "--allow-empty", "-m", "first")
+	git("tag", "v1")
+	git("push", "-q", bare, "main", "main:feature", "main:other", "v1")
+	is.NoErr(exec.Command("git", "--git-dir", bare, "symbolic-ref", "HEAD", "refs/heads/main").Run()) //nolint:noctx
+}
+
+// Branch delete, tag delete and default branch change send their events
+// through the backend's background deliveries: the session ending does not
+// cancel them, and once shutdown has closed the queue no new one starts.
+func TestBranchAndTagEventsUseBackgroundDeliveries(t *testing.T) {
+	is := is.New(t)
+	ctx, be := newAuthTestContext(t)
+	ownerCtx := whRepo(t, ctx, be)
+	whPushRefs(t, ownerCtx)
+	id := whCreate(t, ownerCtx, be, "-e", "branch_tag_delete", "-e", "repository")
+	whPointAtLoopback(t, ownerCtx, "hooks", id)
+
+	// Each command runs in a session context that is cancelled right after it.
+	run := func(args ...string) {
+		t.Helper()
+		sess, cancel := context.WithCancel(ownerCtx)
+		is.NoErr(runRepo(t, sess, args...))
+		cancel()
+	}
+	run("branch", "delete", "hooks", "feature")
+	run("tag", "delete", "hooks", "v1")
+	run("branch", "default", "hooks", "other")
+
+	be.WaitForDeliveries(context.Background())
+	r, err := be.Repository(ownerCtx, "hooks")
+	is.NoErr(err)
+	events := func() []string {
+		ds, err := be.ListWebhookDeliveries(ownerCtx, r, id)
+		is.NoErr(err)
+		out := make([]string, 0, len(ds))
+		for _, d := range ds {
+			out = append(out, d.Event.String())
+		}
+		sort.Strings(out)
+		return out
+	}
+	is.Equal(events(), []string{"branch_tag_delete", "branch_tag_delete", "repository"})
+
+	// The queue is closed now, as during shutdown: the change still happens,
+	// but its event is skipped.
+	run("branch", "delete", "hooks", "main")
+	is.Equal(events(), []string{"branch_tag_delete", "branch_tag_delete", "repository"})
 }

@@ -97,6 +97,7 @@ func (e *testEnv) deliveries(t *testing.T, webhookID int64) []models.WebhookDeli
 // useHTTPClient replaces the SSRF-protected client for the duration of the
 // test. The SSRF client refuses loopback targets, which httptest servers use.
 // Only test code calls this; production always uses the protected client.
+// It swaps a package variable, so tests that use it must not call t.Parallel.
 func useHTTPClient(t *testing.T) {
 	t.Helper()
 	orig := secureHTTPClient

@@ -336,13 +336,15 @@ func TestDeleteWebhookScopedToRepo(t *testing.T) {
 	is.Equal(len(hooks), 1)
 }
 
-// Suspected bug: on SQLite the schema's ON DELETE CASCADE is not enforced
-// because foreign keys are only switched on during migration 0001, so
-// deleting a webhook leaves its events behind.
+// Deleting a webhook removes its events and deliveries itself, rather than
+// relying on ON DELETE CASCADE, which applies only on a connection that
+// enforces foreign keys. The test runs on one that does not.
 func TestDeleteWebhookRemovesEvents(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
+	foreignKeysOff(t, e)
 	id := e.createHook(t, whURL, webhook.EventPush, webhook.EventRepository)
+	e.seedDelivery(t, id, whURL, `{}`)
 
 	is.NoErr(e.be.DeleteWebhook(e.ctx, e.repo, id))
 
@@ -353,6 +355,9 @@ func TestDeleteWebhookRemovesEvents(t *testing.T) {
 	events, err := e.be.store.GetWebhookEventsByWebhookID(e.ctx, e.be.db, id)
 	is.NoErr(err)
 	is.Equal(len(events), 0)
+	deliveries, err := e.be.store.GetWebhookDeliveriesByWebhookID(e.ctx, e.be.db, id)
+	is.NoErr(err)
+	is.Equal(len(deliveries), 0)
 }
 
 // seedDelivery stores a delivery row directly, so the read paths can be
@@ -680,5 +685,38 @@ func TestRedeliverUsesStoredContentTypeAfterWebhookChanged(t *testing.T) {
 		is.NoErr(err)
 		is.Equal(rd.RequestBody, body)
 		is.True(strings.Contains(rd.RequestHeaders, "Content-Type: application/x-www-form-urlencoded"))
+	}
+}
+
+// A stored Content-Type that is not a known content type does not stop a
+// redelivery: the webhook's current content type is used and the fallback is
+// logged.
+func TestRedeliverFallsBackOnUnknownStoredContentType(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	id := e.createHook(t, whURL, webhook.EventPush)
+	delID := uuid.New()
+	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
+		return e.be.store.CreateWebhookDelivery(e.ctx, tx, delID, id, int(webhook.EventPush), "http://127.0.0.1:1/", "POST",
+			nil, "Content-Type: text/xml\nX-Test: 1\n", `{"ref":"main"}`, 200, "", "ok")
+	}))
+	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
+		return e.be.store.UpdateWebhookByID(e.ctx, tx, e.repo.ID(), id, "http://127.0.0.1:1/", "", int(webhook.ContentTypeJSON), true)
+	}))
+
+	is.NoErr(e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, delID))
+
+	is.True(strings.Contains(e.logs.String(), "unrecognized content type in webhook delivery"))
+	list, err := e.be.ListWebhookDeliveries(e.ctx, e.repo, id)
+	is.NoErr(err)
+	is.Equal(len(list), 2)
+	for _, d := range list {
+		if d.ID == delID {
+			continue
+		}
+		rd, err := e.be.WebhookDelivery(e.ctx, e.repo, id, d.ID)
+		is.NoErr(err)
+		is.True(strings.Contains(rd.RequestHeaders, "Content-Type: application/json"))
+		is.Equal(strings.TrimSpace(rd.RequestBody), `{"ref":"main"}`)
 	}
 }

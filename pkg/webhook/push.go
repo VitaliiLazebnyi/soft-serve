@@ -45,10 +45,7 @@ func NewPushEvent(ctx context.Context, user proto.User, repo proto.Repository, r
 				CreatedAt:   repo.CreatedAt(),
 				UpdatedAt:   repo.UpdatedAt(),
 			},
-			Sender: User{
-				ID:       user.ID(),
-				Username: user.Username(),
-			},
+			Sender: senderOf(user),
 		},
 	}
 

@@ -55,10 +55,7 @@ func NewBranchTagEvent(ctx context.Context, user proto.User, repo proto.Reposito
 				CreatedAt:   repo.CreatedAt(),
 				UpdatedAt:   repo.UpdatedAt(),
 			},
-			Sender: User{
-				ID:       user.ID(),
-				Username: user.Username(),
-			},
+			Sender: senderOf(user),
 		},
 	}
 
