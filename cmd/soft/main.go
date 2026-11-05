@@ -39,7 +39,7 @@ var (
 	rootCmd = &cobra.Command{
 		Use:          "soft",
 		Short:        "A self-hostable Git server for the command line",
-		Long:         "Soft Serve is a self-hostable Git server for the command line.",
+		Long:         "Soft Serve Plus is a self-hostable Git server for the command line.",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return browse.Command.RunE(cmd, args)

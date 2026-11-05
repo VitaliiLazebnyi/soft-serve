@@ -1,4 +1,4 @@
-# Soft Serve Server configurations
+# Soft Serve Plus Server configurations
 
 name: "Test server name"
 default_repo: "gitops"

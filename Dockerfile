@@ -26,4 +26,6 @@ ENTRYPOINT [ "/usr/local/bin/soft", "serve" ]
 
 RUN apk update && apk add --update git bash openssh && rm -rf /var/cache/apk/*
 
-COPY soft /usr/local/bin/soft
+# GoReleaser puts the binary for each platform under <os>/<arch>[/<variant>]/.
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/soft /usr/local/bin/soft

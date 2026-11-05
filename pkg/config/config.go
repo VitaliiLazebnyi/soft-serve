@@ -427,7 +427,7 @@ func (c *Config) Exist() bool {
 // Use Validate() to validate the config and ensure absolute paths.
 func DefaultConfig() *Config {
 	return &Config{
-		Name: "Soft Serve",
+		Name: "Soft Serve Plus",
 		// DefaultRepo: "",
 		DataPath: DefaultDataPath(),
 		SSH: SSHConfig{

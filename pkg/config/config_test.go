@@ -75,11 +75,11 @@ func TestCustomConfigLocation(t *testing.T) {
 	// If we unset the custom location, then use the default location.
 	is.NoErr(os.Unsetenv("SOFT_SERVE_CONFIG_LOCATION"))
 	cfg = DefaultConfig()
-	is.Equal(cfg.Name, "Soft Serve")
+	is.Equal(cfg.Name, "Soft Serve Plus")
 	// Test that if the custom config location doesn't exist, default to datapath config.
 	is.NoErr(os.Setenv("SOFT_SERVE_CONFIG_LOCATION", "testdata/config_nonexistent.yaml"))
 	cfg = DefaultConfig()
-	is.Equal(cfg.Name, "Soft Serve")
+	is.Equal(cfg.Name, "Soft Serve Plus")
 }
 
 func TestDefaultRepoDisabledByDefault(t *testing.T) {
