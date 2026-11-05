@@ -45,19 +45,54 @@ var secureHTTPClient = ssrf.NewSecureClient()
 
 // do sends a webhook.
 // Caller must close the returned body.
+// A returned error never contains the webhook URL's path, query, fragment or
+// user info, which can hold secrets (see redactURLError).
 func do(ctx context.Context, url string, method string, headers http.Header, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	req.Header = headers
 	res, err := secureHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	return res, nil
+}
+
+// redactedURLPart replaces the parts of a webhook URL that are left out of
+// errors.
+const redactedURLPart = "[redacted]"
+
+// redactURL returns rawURL reduced to its scheme and host. Many receivers
+// (Slack, Discord, Teams and the like) put a token in the path or query, so
+// those parts, the fragment and any user info are replaced with
+// redactedURLPart. A URL that cannot be parsed is replaced entirely.
+func redactURL(rawURL string) string {
+	u, err := neturl.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return redactedURLPart
+	}
+	redacted := u.Scheme + "://" + u.Host
+	if u.Opaque != "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		redacted += "/" + redactedURLPart
+	}
+	return redacted
+}
+
+// redactURLError redacts the URL of a *url.Error, which the HTTP client
+// returns for every failed request and which prints the whole URL except for
+// a password. The returned error keeps the operation and the underlying
+// error, so errors.Is and errors.As (context.DeadlineExceeded, net.Error
+// timeouts and so on) still work. Any other error is returned unchanged.
+func redactURLError(err error) error {
+	uerr, ok := err.(*neturl.Error) //nolint:errorlint // only the top-level error is replaced
+	if !ok {
+		return err
+	}
+	return &neturl.Error{Op: uerr.Op, URL: redactURL(uerr.URL), Err: uerr.Err}
 }
 
 // SendWebhook sends a webhook event and records the attempt.
