@@ -105,7 +105,7 @@ func secureDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	var firstErr error
 	failed := 0
 	for i, ip := range ips {
-		if ctx.Err() != nil {
+		if dialStopped(ctx) != nil {
 			break
 		}
 		attemptCtx, cancel := context.WithDeadline(ctx, attemptDeadline(ctx, len(ips)-i))
@@ -125,7 +125,7 @@ func secureDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	// Untried addresses are those past the cap and those the loop never
 	// reached because the budget (or the caller's deadline) ran out.
 	if failed == 0 {
-		return nil, fmt.Errorf("connect to %s: %w", host, ctx.Err())
+		return nil, fmt.Errorf("connect to %s: %w", host, dialStopped(ctx))
 	}
 	untried := total - failed
 	if untried == 0 {
@@ -137,10 +137,25 @@ func secureDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	if failed < len(ips) {
 		// The loop stopped early: say why.
 		return nil, fmt.Errorf("connect to %s: %s failed, %d more not tried: %w; first: %w",
-			host, plural(failed, "address", "addresses"), untried, ctx.Err(), firstErr)
+			host, plural(failed, "address", "addresses"), untried, dialStopped(ctx), firstErr)
 	}
 	return nil, fmt.Errorf("connect to %s: %s failed, %d more not tried; first: %w",
 		host, plural(failed, "address", "addresses"), untried, firstErr)
+}
+
+// dialStopped reports why no further address may be dialed: ctx is done, or
+// its deadline has passed. The deadline is checked directly because the last
+// attempt's context carries the same deadline on its own timer, which can
+// fire before ctx's does, and the next attempt would then be counted as a
+// failure rather than as untried.
+func dialStopped(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 // plural formats n with the singular or plural noun.
