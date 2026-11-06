@@ -155,7 +155,8 @@ func hasTable(tx *db.Tx, tableName string) bool {
 		// which follows search_path and is not necessarily "public".
 		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?"
 	case "mysql":
-		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?"
+		// A MySQL schema is a database; look in the connection's current one.
+		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
 	}
 
 	query = tx.Rebind(query)
