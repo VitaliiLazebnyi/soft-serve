@@ -54,8 +54,7 @@ type Server struct {
 // server key-pair will be created if none exists.
 // It expects a context with *backend.Backend, *db.DB, *log.Logger, and
 // *config.Config attached.
-func NewServer(ctx context.Context) (*Server, error) {
-	var err error
+func NewServer(ctx context.Context) (_ *Server, err error) {
 	cfg := config.FromContext(ctx)
 	be := backend.FromContext(ctx)
 	db := db.FromContext(ctx)
@@ -67,6 +66,14 @@ func NewServer(ctx context.Context) (*Server, error) {
 		logger:  log.FromContext(ctx).WithPrefix("server"),
 		ctx:     ctx,
 	}
+
+	// If a later step fails, close what was already built rather than leave
+	// it to the caller, which only gets the error.
+	defer func() {
+		if err != nil {
+			closeFailedServer(srv)
+		}
+	}()
 
 	// Add cron jobs.
 	sched := cron.NewScheduler(ctx)
@@ -348,19 +355,34 @@ func (s *Server) Shutdown(ctx context.Context, abort context.Context) error {
 	return err
 }
 
-// Close closes the SSH server.
+// closeFailedServer closes a server NewServer could not finish building.
+// Tests replace it to see which server NewServer closed.
+var closeFailedServer = func(s *Server) { _ = s.Close() }
+
+// Close closes the servers. It skips the ones that were never built, so it
+// also closes a server NewServer failed to finish.
 func (s *Server) Close() error {
 	s.markClosed()
 	s.closeListeners()
 	var errg errgroup.Group
-	errg.Go(s.GitDaemon.Close)
-	errg.Go(s.HTTPServer.Close)
-	errg.Go(s.SSHServer.Close)
-	errg.Go(s.StatsServer.Close)
-	errg.Go(func() error {
-		s.Cron.Stop()
-		return nil
-	})
+	if s.GitDaemon != nil {
+		errg.Go(s.GitDaemon.Close)
+	}
+	if s.HTTPServer != nil {
+		errg.Go(s.HTTPServer.Close)
+	}
+	if s.SSHServer != nil {
+		errg.Go(s.SSHServer.Close)
+	}
+	if s.StatsServer != nil {
+		errg.Go(s.StatsServer.Close)
+	}
+	if s.Cron != nil {
+		errg.Go(func() error {
+			s.Cron.Stop()
+			return nil
+		})
+	}
 	// defer s.DB.Close() // nolint: errcheck
 	return errg.Wait()
 }

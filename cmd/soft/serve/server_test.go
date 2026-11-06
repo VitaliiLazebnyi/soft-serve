@@ -3,8 +3,10 @@ package serve
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,9 +20,12 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/access"
 	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/config"
+	"github.com/charmbracelet/soft-serve/pkg/cron"
+	"github.com/charmbracelet/soft-serve/pkg/daemon"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/migrate"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	sshsrv "github.com/charmbracelet/soft-serve/pkg/ssh"
 	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/charmbracelet/soft-serve/pkg/store/database"
 	"github.com/charmbracelet/soft-serve/pkg/test"
@@ -524,4 +529,80 @@ func TestStartReturnsWhenAServerFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "HTTP server") {
 		t.Fatalf("Start returned %v, want the HTTP server's error", err)
 	}
+}
+
+// requireServerClosed fails the test unless serve, run on a listener that is
+// already closed, reports want, which each server returns only once it has
+// been closed itself. A server that is still open reports the listener's
+// error instead.
+func requireServerClosed(t *testing.T, name string, serve func(net.Listener) error, want error) {
+	t.Helper()
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = l.Close()
+	if err := serve(l); !errors.Is(err, want) {
+		t.Errorf("%s: Serve returned %v, want %v: it was not closed", name, err, want)
+	}
+}
+
+// When NewServer fails, here because the TLS certificate cannot be loaded, it
+// closes the servers it already built instead of dropping them.
+func TestNewServerClosesWhatItBuiltOnError(t *testing.T) {
+	ctx, cfg, be, dbx := setupTestBackendWithDB(t)
+	ctx = backend.WithContext(ctx, be)
+	ctx = db.WithContext(ctx, dbx)
+	ctx = log.WithContext(ctx, log.New(io.Discard))
+	cfg.HTTP.TLSCertPath = filepath.Join(t.TempDir(), "missing.crt")
+	cfg.HTTP.TLSKeyPath = filepath.Join(t.TempDir(), "missing.key")
+
+	var closed []*Server
+	orig := closeFailedServer
+	closeFailedServer = func(s *Server) {
+		closed = append(closed, s)
+		orig(s)
+	}
+	t.Cleanup(func() { closeFailedServer = orig })
+
+	s, err := NewServer(ctx)
+	if err == nil || !strings.Contains(err.Error(), "create cert reloader") {
+		t.Fatalf("NewServer returned %v, want a cert reloader error", err)
+	}
+	if s != nil {
+		t.Fatalf("NewServer returned a server along with its error")
+	}
+	if len(closed) != 1 {
+		t.Fatalf("NewServer closed %d servers, want 1", len(closed))
+	}
+	// The SSH server is left out: it can serve again after Close, so serving
+	// on a closed listener does not tell whether it was closed.
+	srv := closed[0]
+	requireServerClosed(t, "Git daemon", srv.GitDaemon.Serve, daemon.ErrServerClosed)
+	requireServerClosed(t, "HTTP server", srv.HTTPServer.Serve, http.ErrServerClosed)
+	requireServerClosed(t, "Stats server", srv.StatsServer.Serve, http.ErrServerClosed)
+}
+
+// Close skips the servers that were never built, so that it can close a
+// server NewServer failed to finish, here one that got no further than its
+// Git daemon.
+func TestCloseSkipsServersNotBuilt(t *testing.T) {
+	ctx, _, be, dbx := setupTestBackendWithDB(t)
+	ctx = backend.WithContext(ctx, be)
+	ctx = db.WithContext(ctx, dbx)
+	ctx = log.WithContext(ctx, log.New(io.Discard))
+
+	sshSrv, err := sshsrv.NewSSHServer(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitDaemon, err := daemon.NewGitDaemon(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Cron: cron.NewScheduler(ctx), SSHServer: sshSrv, GitDaemon: gitDaemon}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	requireServerClosed(t, "Git daemon", gitDaemon.Serve, daemon.ErrServerClosed)
 }
