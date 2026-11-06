@@ -14,7 +14,8 @@ type WebhookStore interface {
 	GetWebhookByID(ctx context.Context, h db.Handler, repoID int64, id int64) (models.Webhook, error)
 	// GetWebhooksByRepoID returns all webhooks for a repository.
 	GetWebhooksByRepoID(ctx context.Context, h db.Handler, repoID int64) ([]models.Webhook, error)
-	// GetWebhooksByRepoIDWhereEvent returns all webhooks for a repository where event is in the events.
+	// GetWebhooksByRepoIDWhereEvent returns the active webhooks for a repository where event is in the events.
+	// Inactive webhooks are left out, since events are not sent to them.
 	GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Handler, repoID int64, events []int) ([]models.Webhook, error)
 	// CreateWebhook creates a webhook.
 	CreateWebhook(ctx context.Context, h db.Handler, repoID int64, url string, secret string, contentType int, active bool) (int64, error)

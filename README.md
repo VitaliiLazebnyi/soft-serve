@@ -171,7 +171,13 @@ ssh:
   # client key above is presented to every host a user imports from, so list
   # only hosts you trust that key with. Entries are hostnames, IP addresses,
   # or CIDR ranges, each with an optional port. When the list is empty, only
-  # server admins may import from or mirror ssh remotes.
+  # server admins may import from or mirror ssh remotes. Once the list is
+  # non-empty it binds admins too: they may then reach only the hosts it
+  # names. A mirror is synced with its owner's privileges, so a key in
+  # initial_admin_keys that belongs to a non-admin account may import from
+  # ssh but not mirror from it, nor turn mirroring on later. To let such an
+  # account mirror, give it the admin flag, or list the host here, keeping
+  # in mind that the list then limits every admin as well.
   # CIDR entries are checked against DNS only at import or sync time and ssh
   # resolves the name again, so prefer hostnames for anything you do not
   # control. The list is matched against the name given to ssh; your

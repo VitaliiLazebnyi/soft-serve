@@ -141,6 +141,15 @@ func TestWebhookStoreEvents(t *testing.T) {
 	is.Equal(len(whs), 1)
 	is.Equal(whs[0].ID, hook)
 
+	// An inactive webhook subscribed to the same event is left out.
+	inactive, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.36/c", "", 0, false)
+	is.NoErr(err)
+	is.NoErr(s.CreateWebhookEvents(ctx, dbx, inactive, []int{4}))
+	whs, err = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, []int{4})
+	is.NoErr(err)
+	is.Equal(len(whs), 1)
+	is.Equal(whs[0].ID, hook)
+
 	whs, err = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, []int{99})
 	is.NoErr(err)
 	is.Equal(len(whs), 0)
