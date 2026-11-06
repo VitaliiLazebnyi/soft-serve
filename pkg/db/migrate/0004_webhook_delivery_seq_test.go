@@ -1,8 +1,12 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
+
+	"charm.land/log/v2"
 
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -149,4 +153,47 @@ func hasColumn(ctx context.Context, t *testing.T, dbx *db.DB, table, column stri
 		t.Fatal(err)
 	}
 	return n > 0
+}
+
+// On SQLite, the migration logs a VACUUM hint when it copied existing
+// deliveries, and stays quiet on an empty table, such as a fresh install.
+func TestWebhookDeliverySeqVacuumHint(t *testing.T) {
+	all := migrations
+	t.Cleanup(func() { migrations = all })
+	for _, withRows := range []bool{false, true} {
+		var buf bytes.Buffer
+		ctx := config.WithContext(context.TODO(), config.DefaultConfig())
+		ctx = log.WithContext(ctx, log.New(&buf))
+		dbx, err := test.OpenSqlite(ctx, t)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		migrations = all[:webhookDeliverySeqVersion-1]
+		if err := Migrate(ctx, dbx); err != nil {
+			t.Fatalf("Migrate() before seq => %v", err)
+		}
+		if withRows {
+			for _, q := range []string{
+				`INSERT INTO users (id, username, admin, updated_at) VALUES (100, 'u', false, CURRENT_TIMESTAMP)`,
+				`INSERT INTO repos (id, name, project_name, description, private, mirror, hidden, user_id, updated_at)
+					VALUES (1, 'r', 'r', '', false, false, false, 100, CURRENT_TIMESTAMP)`,
+				`INSERT INTO webhooks (id, repo_id, url, secret, content_type, active, updated_at)
+					VALUES (1, 1, 'https://example.com', '', 0, true, CURRENT_TIMESTAMP)`,
+				`INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_headers, request_body, response_status, response_headers, response_body)
+					VALUES ('` + uuid.NewString() + `', 1, 1, 'https://example.com', 'POST', '', '{}', 200, '', '')`,
+			} {
+				if _, err := dbx.ExecContext(ctx, q); err != nil {
+					t.Fatalf("%s: %v", q, err)
+				}
+			}
+		}
+		migrations = all[:webhookDeliverySeqVersion]
+		if err := Migrate(ctx, dbx); err != nil {
+			t.Fatalf("Migrate() => %v", err)
+		}
+		if got := strings.Contains(buf.String(), "VACUUM"); got != withRows {
+			t.Errorf("with rows %v: VACUUM hint logged = %v, want %v; log:\n%s", withRows, got, withRows, buf.String())
+		}
+	}
 }

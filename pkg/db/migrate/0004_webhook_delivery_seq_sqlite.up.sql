@@ -9,7 +9,13 @@
 -- Existing rows are numbered by created_at, then by insertion order (rowid).
 -- The copy rewrites the whole table once, bodies included, in the migration
 -- transaction. Deliveries are never pruned, so this can take a while on a
--- server that has recorded many of them.
+-- server that has recorded many of them. Both copies exist until the commit,
+-- so the database file grows by about the size of the deliveries table and
+-- needs that much free disk; without it the migration fails and rolls back.
+-- The old table's pages stay in the file as free pages afterwards (deleting
+-- deliveries first does not shrink the file either). VACUUM cannot run in a
+-- transaction, so the migration logs a hint to run it once the server is
+-- stopped, e.g. `sqlite3 soft-serve.db VACUUM`.
 CREATE TABLE webhook_deliveries_new (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   id TEXT UNIQUE,
