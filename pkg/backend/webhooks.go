@@ -293,13 +293,16 @@ func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repos
 			log.Errorf("error getting webhook: %v", err)
 			return db.WrapError(err)
 		}
-		if !wh.Active {
-			return webhook.ErrWebhookInactive
-		}
 
 		delivery, err = datastore.GetWebhookDeliveryByID(ctx, tx, id, delID)
 		if err != nil {
 			return db.WrapError(err)
+		}
+
+		// Checked after the lookup, so an unknown delivery is reported as
+		// not found whether or not the webhook is active.
+		if !wh.Active {
+			return webhook.ErrWebhookInactive
 		}
 
 		return nil

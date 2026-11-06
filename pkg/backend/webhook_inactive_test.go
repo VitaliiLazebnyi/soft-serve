@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/hooks"
 	"github.com/charmbracelet/soft-serve/pkg/webhook"
+	"github.com/google/uuid"
 	"github.com/matryer/is"
 )
 
@@ -125,6 +126,10 @@ func TestRedeliverInactiveWebhookRefused(t *testing.T) {
 	err := e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, delID)
 	is.True(errors.Is(err, webhook.ErrWebhookInactive))
 	is.Equal(len(e.deliveredEvents(t, id)), 1)
+
+	// An unknown delivery is reported as not found, not as inactive.
+	err = e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, uuid.New())
+	is.True(errors.Is(err, db.ErrRecordNotFound))
 
 	e.setHookActive(t, id, true)
 	is.NoErr(e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, delID))
