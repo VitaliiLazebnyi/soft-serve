@@ -66,10 +66,6 @@ var stringEvent = map[string]Event{
 // ErrInvalidEvent is returned when the event is invalid.
 var ErrInvalidEvent = errors.New("invalid event")
 
-// ErrWebhookInactive is returned when a delivery is redelivered to a webhook
-// that is not active. Activate the webhook first to send to it again.
-var ErrWebhookInactive = errors.New("webhook is not active")
-
 // ParseEvent parses an event string and returns the event.
 func ParseEvent(s string) (Event, error) {
 	e, ok := stringEvent[s]

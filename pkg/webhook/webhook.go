@@ -40,6 +40,10 @@ type Delivery struct {
 	Event Event
 }
 
+// ErrWebhookInactive is returned when a delivery is redelivered to a webhook
+// that is not active. Activate the webhook first to send to it again.
+var ErrWebhookInactive = errors.New("webhook is not active")
+
 // secureHTTPClient is an HTTP client with SSRF protection.
 var secureHTTPClient = ssrf.NewSecureClient()
 
