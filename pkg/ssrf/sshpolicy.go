@@ -40,9 +40,9 @@ type GitRemotePolicy struct {
 
 // checkSSH applies the policy to an ssh host and port ("" meaning the ssh
 // default).
-func (p GitRemotePolicy) checkSSH(host, port string) error {
+func (p GitRemotePolicy) checkSSH(ctx context.Context, host, port string) error {
 	if len(p.AllowedSSHHosts) > 0 {
-		return p.AllowedSSHHosts.match(host, port, p.lookup)
+		return p.AllowedSSHHosts.match(ctx, host, port, p.lookup)
 	}
 	if p.AllowAnySSHHost {
 		return nil
@@ -132,12 +132,12 @@ func (f lookupFunc) resolve(ctx context.Context, host string) ([]net.IPAddr, err
 // ssh resolves the name again itself, so a CIDR match only says where the
 // name pointed at validation time. Hostname entries are the robust form.
 func (a AllowedHosts) Match(host, port string) error {
-	return a.match(host, port, nil)
+	return a.match(context.Background(), host, port, nil)
 }
 
-// match is Match with the resolver used for CIDR entries; nil means
-// net.DefaultResolver.
-func (a AllowedHosts) match(host, port string, lookup lookupFunc) error {
+// match is Match with any hostname lookup bounded by ctx, using lookup for
+// CIDR entries; nil means net.DefaultResolver.
+func (a AllowedHosts) match(ctx context.Context, host, port string, lookup lookupFunc) error {
 	if port == "" {
 		port = "22"
 	}
@@ -172,7 +172,7 @@ func (a AllowedHosts) match(host, port string, lookup lookupFunc) error {
 		return notAllowed
 	}
 
-	ips, err := lookup.resolve(context.Background(), host)
+	ips, err := lookup.resolve(ctx, host)
 	if err != nil || len(ips) == 0 {
 		return fmt.Errorf("%w: %q does not resolve", ErrSSHHostNotAllowed, host)
 	}

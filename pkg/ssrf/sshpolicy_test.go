@@ -114,7 +114,7 @@ func TestAllowedHostsMatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := mustAllowedHosts(t, tt.allow...).match(tt.host, tt.port, lookup)
+			err := mustAllowedHosts(t, tt.allow...).match(context.Background(), tt.host, tt.port, lookup)
 			if tt.wantErr == nil && err != nil {
 				t.Fatalf("Match(%q, %q) = %v, want nil", tt.host, tt.port, err)
 			}
