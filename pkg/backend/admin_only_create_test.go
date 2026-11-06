@@ -1,11 +1,15 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	charmssh "charm.land/ssh"
 	"github.com/charmbracelet/soft-serve/pkg/access"
@@ -273,4 +277,117 @@ func TestBackendAllowsAdminKeyCreatesWhenFlagOn(t *testing.T) {
 			is.NoErr(err)
 		})
 	}
+}
+
+// Over HTTP (token, password or JWT) there is no public key on the context,
+// so the only server-admin signal is the account's admin flag. Owning a key
+// listed in initial_admin_keys must not count: `pubkey add` attaches a key
+// without proof of holding its private half, so a user could claim a key
+// before an operator lists it and become an admin over HTTP.
+func TestHTTPAdminOnlyByAdminFlag(t *testing.T) {
+	is := is.New(t)
+	be, cfg := newTestBackend(t)
+	ctx := backendTestContext(be, cfg)
+	cfg.AdminOnlyCreate = true
+
+	claimed := newTestPublicKey(t)
+	_, err := be.CreateUser(ctx, "mallory", proto.UserOptions{PublicKeys: []ssh.PublicKey{claimed}})
+	is.NoErr(err)
+	_, err = be.CreateUser(ctx, "boss", proto.UserOptions{Admin: true, PublicKeys: []ssh.PublicKey{newTestPublicKey(t)}})
+	is.NoErr(err)
+
+	// The operator lists the key after mallory attached it.
+	cfg.InitialAdminKeys = append(cfg.InitialAdminKeys, sshutils.MarshalAuthorizedKey(claimed))
+
+	// Load the users the way the HTTP layer does: by name (password, JWT)
+	// and by access token.
+	load := func(name string) []proto.User {
+		u, err := be.User(ctx, name)
+		is.NoErr(err)
+		tok, err := be.CreateAccessToken(ctx, u, "t", time.Time{})
+		is.NoErr(err)
+		byToken, err := be.UserByAccessToken(ctx, tok)
+		is.NoErr(err)
+		return []proto.User{u, byToken}
+	}
+
+	for i, u := range load("mallory") {
+		is.True(!u.IsAdmin())
+		is.Equal(be.AccessLevelForUser(ctx, "fresh", u), access.ReadOnlyAccess)
+		_, err := be.CreateRepository(ctx, fmt.Sprintf("mallory-%d", i), u, proto.RepositoryOptions{})
+		is.True(errors.Is(err, proto.ErrUnauthorized))
+	}
+	for i, u := range load("boss") {
+		is.Equal(be.AccessLevelForUser(ctx, "fresh", u), access.AdminAccess)
+		_, err := be.CreateRepository(ctx, fmt.Sprintf("boss-%d", i), u, proto.RepositoryOptions{})
+		is.NoErr(err)
+	}
+}
+
+// A key listed in initial_admin_keys that a non-admin account owns does not
+// resolve to that account: the owner may have claimed it with `pubkey add`
+// before it was listed. The lookup returns ErrAdminKeyNonAdminOwner naming
+// the account (the SSH server refuses the session with it), and the warning
+// is logged once per key. A listed key owned by an admin account resolves
+// as before, and so does the owner once promoted or once the key is
+// unlisted.
+func TestListedAdminKeyOwnedByNonAdminHasNoAccount(t *testing.T) {
+	is := is.New(t)
+	var logs bytes.Buffer
+	be, cfg := newTestBackendWithLog(t, &logs)
+	ctx := backendTestContext(be, cfg)
+
+	claimed := newTestPublicKey(t)
+	_, err := be.CreateUser(ctx, "mallory", proto.UserOptions{PublicKeys: []ssh.PublicKey{claimed}})
+	is.NoErr(err)
+	bossKey := newTestPublicKey(t)
+	_, err = be.CreateUser(ctx, "boss", proto.UserOptions{Admin: true, PublicKeys: []ssh.PublicKey{bossKey}})
+	is.NoErr(err)
+
+	u, err := be.UserByPublicKey(ctx, claimed)
+	is.NoErr(err)
+	is.Equal(u.Username(), "mallory")
+
+	orig := cfg.InitialAdminKeys
+	cfg.InitialAdminKeys = append(append([]string{}, orig...),
+		sshutils.MarshalAuthorizedKey(claimed), sshutils.MarshalAuthorizedKey(bossKey))
+
+	for range 3 {
+		_, err = be.UserByPublicKey(ctx, claimed)
+		is.True(errors.Is(err, proto.ErrUserNotFound))
+		var owned *ErrAdminKeyNonAdminOwner
+		is.True(errors.As(err, &owned))
+		is.Equal(owned.Username, "mallory")
+		is.True(strings.Contains(err.Error(), "user set-admin mallory true"))
+		is.True(strings.Contains(err.Error(), "user remove-pubkey mallory KEY"))
+	}
+	is.Equal(strings.Count(logs.String(), "admin key is owned by a non-admin account"), 1)
+	is.Equal(be.BaseAccessLevelByPublicKey(ctx, claimed), access.AdminAccess)
+
+	// A private repository made with the key goes to the default admin,
+	// and mallory gets nothing on it.
+	r, err := be.CreateRepository(ctx, "secret", nil, proto.RepositoryOptions{Private: true})
+	is.NoErr(err)
+	mallory, err := be.User(ctx, "mallory")
+	is.NoErr(err)
+	is.True(r.UserID() != mallory.ID())
+	is.Equal(be.AccessLevelForUser(ctx, "secret", mallory), access.NoAccess)
+
+	u, err = be.UserByPublicKey(ctx, bossKey)
+	is.NoErr(err)
+	is.Equal(u.Username(), "boss")
+
+	cfg.InitialAdminKeys = orig
+	u, err = be.UserByPublicKey(ctx, claimed)
+	is.NoErr(err)
+	is.Equal(u.Username(), "mallory")
+
+	// Promoting the owner (the fix when the key is theirs) resolves the
+	// listed key to them again, keeping their account.
+	cfg.InitialAdminKeys = append(append([]string{}, orig...), sshutils.MarshalAuthorizedKey(claimed))
+	is.NoErr(be.SetAdmin(ctx, "mallory", true))
+	u, err = be.UserByPublicKey(ctx, claimed)
+	is.NoErr(err)
+	is.Equal(u.Username(), "mallory")
+	is.True(u.IsAdmin())
 }

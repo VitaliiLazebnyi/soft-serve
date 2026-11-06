@@ -1,0 +1,72 @@
+# vi: set ft=conf
+
+# FIXME: don't skip windows
+[windows] skip 'curl makes github actions hang'
+
+# An operator lists an existing user's own key in initial_admin_keys. The
+# key is attached to a non-admin account, so SSH sessions with it are
+# refused with an error saying to run `user set-admin`, rather than
+# silently running with no account (which locked the user out of their own
+# repositories). After `user set-admin`, the user keeps their account,
+# repositories and tokens, and is an admin.
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# user1 is an ordinary user with a private repository and a token
+soft user create user1 --key "$USER1_AUTHORIZED_KEY"
+usoft repo create mine -p
+ugit clone ssh://localhost:$SSH_PORT/mine mine
+mkfile ./mine/README.md '# mine'
+ugit -C mine add -A
+ugit -C mine commit -m 'first'
+ugit -C mine push origin HEAD
+usoft token create 'mine'
+stdout 'ss_*'
+cp stdout utokenfile
+envfile UTOKEN=utokenfile
+
+# the operator lists user1's own key as an admin key
+stopserver
+ensureservernotrunning SSH_PORT
+env SOFT_SERVE_INITIAL_ADMIN_KEYS=$USER1_AUTHORIZED_KEY
+exec soft serve &
+ensureserverrunning SSH_PORT
+
+# SSH sessions with the key are refused with the fix in the message
+! usoft info
+stderr 'this key is listed in initial_admin_keys but is attached to non-admin account "user1"'
+stderr 'user set-admin user1 true'
+! ugit clone ssh://localhost:$SSH_PORT/mine mine2
+stderr 'user set-admin user1 true'
+
+# HTTP is unchanged: the token acts as user1, who is not an admin yet
+curl http://$UTOKEN@localhost:$HTTP_PORT/mine.git/info/refs?service=git-upload-pack
+stdout '.*git-upload-pack.*'
+soft repo create adminonly -p
+curl http://$UTOKEN@localhost:$HTTP_PORT/adminonly.git/info/refs?service=git-upload-pack
+! stdout '.*git-upload-pack.*'
+
+# the admin promotes user1; the key then resolves to user1 as before
+soft user set-admin user1 true
+usoft info
+stdout 'Username: user1'
+stdout 'Admin: true'
+ugit clone ssh://localhost:$SSH_PORT/mine mine2
+exists mine2/README.md
+mkfile ./mine2/NEW.md 'new'
+ugit -C mine2 add -A
+ugit -C mine2 commit -m 'second'
+ugit -C mine2 push origin HEAD
+usoft repo private mine
+stdout 'true'
+usoft token list
+stdout 'mine'
+curl http://$UTOKEN@localhost:$HTTP_PORT/adminonly.git/info/refs?service=git-upload-pack
+stdout '.*git-upload-pack.*'
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .

@@ -103,6 +103,33 @@ full privileges.
 Using this environment variable, Soft Serve Plus will create a new `admin` user that
 has full privileges. You can rename and change the user settings later.
 
+The keys are reconciled every time `soft serve` starts, not only the first
+time (`soft admin migrate` does not do this). A key you add to
+`initial_admin_keys` later is attached to the admin user that owns the other
+configured keys, or, if no admin owns one, to the admin named `admin` (created
+if there is no admin at all). If the configured keys belong to several admins,
+or there are admins but none is named `admin`, the key is not attached to
+anyone and a warning is logged; it is still an admin key through the config.
+A key that already belongs to a non-admin user is left on that user, who is
+not promoted; a warning is logged.
+
+To rotate a key, replace it in `initial_admin_keys` and restart. A key that
+was attached on a later start is removed from the user it was attached to when
+it leaves the config, even if that user is no longer an admin. Keys seeded on
+the very first start, and keys added or removed with the `user` commands
+since, stay in the database when you remove them from the config: remove those
+with `user remove-pubkey`. To keep an attached key after dropping it from the
+config, run `user remove-pubkey` and then `user add-pubkey` for it first.
+
+Blank lines and lines starting with `#` are ignored, and so is an entry that is
+neither a key nor a file path (a warning counts them). But while an entry names
+a key file that cannot be read or holds no key (for example a secret that is
+not mounted yet, or a stale path), no key is removed, since the file may hold
+a key that is still wanted: an error names the file and every key kept because
+of it. Fix or remove the entry to let the removal happen. Every instance that
+shares a database must use the same `initial_admin_keys`: a run with a
+different list attaches and removes keys to match its own list.
+
 If you'd like a repository to exist the moment the server finishes booting,
 with no human logging in to run `repo create`, set `SOFT_SERVE_DEFAULT_REPO`
 to a repository name. This is useful for GitOps tools like ArgoCD that need a
@@ -171,7 +198,13 @@ ssh:
   # client key above is presented to every host a user imports from, so list
   # only hosts you trust that key with. Entries are hostnames, IP addresses,
   # or CIDR ranges, each with an optional port. When the list is empty, only
-  # server admins may import from or mirror ssh remotes.
+  # server admins may import from or mirror ssh remotes. Once the list is
+  # non-empty it binds admins too: they may then reach only the hosts it
+  # names. A mirror is synced with its owner's privileges, so a key in
+  # initial_admin_keys that belongs to a non-admin account may import from
+  # ssh but not mirror from it, nor turn mirroring on later. To let such an
+  # account mirror, give it the admin flag, or list the host here, keeping
+  # in mind that the list then limits every admin as well.
   # CIDR entries are checked against DNS only at import or sync time and ssh
   # resolves the name again, so prefer hostnames for anything you do not
   # control. The list is matched against the name given to ssh; your
@@ -560,6 +593,27 @@ ssh -p 23231 localhost set-username yolo
 ssh -p 23231 localhost info
 ```
 
+`pubkey add` does not ask for proof that you hold the key's private half, so
+keys listed in `initial_admin_keys` get extra care:
+
+- Only an admin can attach a listed key to an account (`user add-pubkey
+  USERNAME KEY`). A non-admin running `pubkey add` with one gets an error
+  saying the key is listed in `initial_admin_keys`. If you are a new admin
+  whose key was just listed, ask an existing admin to attach it, or log in
+  with that key: it already has admin rights from the config.
+- If a listed key belongs to a non-admin account (for example, someone
+  added it before it was listed), the server refuses SSH sessions with that
+  key and logs a warning. The error names the account. If the account is
+  the key holder's own, make it an admin with `user set-admin USERNAME
+  true`; otherwise remove the key from it with `user remove-pubkey USERNAME
+  KEY` (and attach it to the right account with `user add-pubkey`). HTTP
+  access is not affected: it is admin only for accounts with the admin
+  flag.
+
+To promote an existing user, run `user set-admin USERNAME true`. Listing
+their key in `initial_admin_keys` alone locks them out over SSH until you
+do.
+
 ## Repositories
 
 You can manage repositories using the `repo` command.
@@ -782,6 +836,19 @@ Available Commands:
 Flags:
   -h, --help   help for webhook
 ```
+
+Every attempt to send an event is recorded as a delivery, which `repo webhook
+deliveries` lists and can redeliver. Each webhook keeps its 100 most recent
+deliveries: recording one deletes the older ones. While deliveries are being
+recorded concurrently, or if a cleanup fails, a webhook can briefly hold a few
+more until its next delivery is recorded. Upgrading trims existing deliveries
+to the same limit. The trim frees space inside the database but does not shrink
+its files. On SQLite, stop the server and run `sqlite3 <database file> VACUUM`
+to shrink the file; VACUUM writes a full copy, so it needs free disk space up
+to about the size of the file. On Postgres, autovacuum makes the space
+reusable, and `VACUUM FULL webhook_deliveries` returns it to the system.
+
+A repository can have at most 20 webhooks.
 
 ## The Soft Serve Plus TUI
 

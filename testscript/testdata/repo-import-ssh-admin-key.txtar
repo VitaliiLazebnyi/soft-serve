@@ -1,0 +1,62 @@
+# vi: set ft=conf
+
+# Test ssh imports by a caller whose key is listed in initial_admin_keys.
+#
+# A listed key that no account holds is attached to the admin account at
+# startup, and an ssh session on a listed key that a non-admin account holds
+# is refused until that account is made an admin. Once it is, the key may
+# import from any ssh host when ssh.client_allowed_hosts is empty, and may
+# create ssh mirrors, since their owner is an admin.
+
+# first boot seeds the admin account with admin1's key only; user1 gets an
+# ordinary account
+exec soft serve &
+ensureserverrunning SSH_PORT
+soft user create user1 --key "$USER1_AUTHORIZED_KEY"
+# stopserver goes through the HTTP server, which may start after ssh
+ensureserverrunning HTTP_PORT
+stopserver
+ensureservernotrunning SSH_PORT
+
+# user1's key becomes an admin key; startup leaves it on user1's account
+env SOFT_SERVE_INITIAL_ADMIN_KEYS=$USER1_AUTHORIZED_KEY
+exec soft serve &
+ensureserverrunning SSH_PORT
+soft user info user1
+stdout 'Admin: false'
+
+# while user1 is not an admin, its sessions on the listed key are refused
+! usoft repo import user1 ssh://git@127.0.0.1:1/x.git
+stderr 'attached to non-admin account "user1"'
+! usoft repo import --mirror user2 ssh://git@127.0.0.1:1/x.git
+stderr 'attached to non-admin account "user1"'
+
+soft user set-admin user1 true
+
+# remotes that pass policy fail only at the clone, since nothing listens on
+# loopback port 1
+! usoft repo import user1 ssh://git@127.0.0.1:1/x.git
+stderr 'import failed'
+! stderr 'unauthorized'
+! usoft repo import --mirror user2 ssh://git@127.0.0.1:1/x.git
+stderr 'import failed'
+! stderr 'unauthorized'
+
+# a reachable ssh host works, for a plain import and for a mirror: the
+# server itself, reading a public repository with its own client key
+soft repo create src
+usoft repo import user3 ssh://git@127.0.0.1:$SSH_PORT/src
+usoft repo mirror user3
+stdout 'false'
+usoft repo import --mirror user4 ssh://git@127.0.0.1:$SSH_PORT/src
+usoft repo mirror user4
+stdout 'true'
+
+soft repo list
+! stdout 'user[12]'
+stdout 'user3'
+stdout 'user4'
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .

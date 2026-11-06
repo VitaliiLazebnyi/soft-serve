@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -65,7 +66,19 @@ func AuthenticationMiddleware(sh ssh.Handler) ssh.Handler {
 		// Set the auth'd user, or anon, in the context
 		var user proto.User
 		if pk != nil {
-			user, _ = be.UserByPublicKey(ctx, pk)
+			var err error
+			user, err = be.UserByPublicKey(ctx, pk)
+			// A listed admin key attached to a non-admin account is
+			// refused outright: acting as that account could hand a
+			// claimer the key holder's work, and acting as nobody strands
+			// a promoted owner. The error says how an admin fixes it.
+			// Auth already succeeded with this key, so the session cannot
+			// fall back to another key or to keyless access.
+			var owned *backend.ErrAdminKeyNonAdminOwner
+			if errors.As(err, &owned) {
+				wish.Fatalln(s, owned)
+				return
+			}
 		}
 		ctx.SetValue(proto.ContextKeyUser, user)
 

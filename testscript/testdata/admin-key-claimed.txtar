@@ -1,0 +1,95 @@
+# vi: set ft=conf
+
+# FIXME: don't skip windows
+[windows] skip 'curl makes github actions hang'
+
+# A key in initial_admin_keys that is owned by a non-admin account is
+# refused for SSH sessions. `pubkey add` takes any public key without proof
+# of holding its private half, so user1 can claim admin2's public key before
+# an operator lists it. When admin2 later logs in with that key, the session
+# must not belong to user1 (user1 would own every repository admin2 creates)
+# and must not fall back to anonymous or keyless access either. admin2 gets
+# an error saying how an admin fixes it.
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# user1 claims admin2's public key, which is not an admin key yet
+soft user create user1 --key "$USER1_AUTHORIZED_KEY"
+usoft pubkey add "$ADMIN2_AUTHORIZED_KEY"
+usoft token create 'read'
+stdout 'ss_*'
+cp stdout utokenfile
+envfile UTOKEN=utokenfile
+
+# before it is listed, the key simply belongs to user1
+a2soft info
+stdout 'Username: user1'
+
+# the operator now lists admin2's key as an admin key
+stopserver
+ensureservernotrunning SSH_PORT
+env SOFT_SERVE_INITIAL_ADMIN_KEYS=$ADMIN2_AUTHORIZED_KEY
+exec soft serve &
+ensureserverrunning SSH_PORT
+
+# every SSH session with the key is refused with an actionable error, git
+# included; nothing runs as user1, as anonymous or as admin
+! a2soft info
+stderr 'this key is listed in initial_admin_keys but is attached to non-admin account "user1"'
+stderr 'user remove-pubkey user1 KEY'
+! a2soft token create 'stolen'
+stderr 'attached to non-admin account "user1"'
+! a2soft repo create secret -p
+stderr 'attached to non-admin account "user1"'
+soft repo list
+! stdout 'secret'
+! a2git clone ssh://localhost:$SSH_PORT/secret secret
+stderr 'attached to non-admin account "user1"'
+! a2git -C . push ssh://localhost:$SSH_PORT/secret HEAD
+! exists secret
+soft repo list
+! stdout 'secret'
+
+# user1's own key and token are unaffected and stay non-admin
+usoft info
+stdout 'Username: user1'
+stdout 'Admin: false'
+! usoft user list
+
+# the fix for a claimed key: move it to the holder's admin account
+soft user remove-pubkey user1 "$ADMIN2_AUTHORIZED_KEY"
+soft user create admin2 --admin --key "$ADMIN2_AUTHORIZED_KEY"
+a2soft info
+stdout 'Username: admin2'
+stdout 'Admin: true'
+
+# admin2 creates a private repository and uses it over SSH git
+a2soft repo create secret -p
+a2git clone ssh://localhost:$SSH_PORT/secret secret
+mkfile ./secret/README.md '# secret'
+a2git -C secret add -A
+a2git -C secret commit -m 'first'
+a2git -C secret push origin HEAD
+a2git clone ssh://localhost:$SSH_PORT/secret secret2
+exists secret2/README.md
+
+# user1 got nothing from it, over SSH or HTTP
+! usoft repo private secret
+! usoft repo private secret false
+! usoft repo collab add secret user1
+! ugit clone ssh://localhost:$SSH_PORT/secret usecret
+curl http://$UTOKEN@localhost:$HTTP_PORT/secret.git/info/refs?service=git-upload-pack
+! stdout '.*git-upload-pack.*'
+
+# the server admin sees it, and user1 is not a collaborator
+soft repo private secret
+stdout 'true'
+soft repo collab list secret
+! stdout 'user1'
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .

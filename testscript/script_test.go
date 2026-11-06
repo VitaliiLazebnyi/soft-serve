@@ -3,6 +3,7 @@ package testscript
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,10 +15,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -47,6 +50,12 @@ func PrepareBuildCommand(binPath string) *exec.Cmd {
 }
 
 func TestMain(m *testing.M) {
+	if os.Getenv("WAITEXIT_CHILD") == "1" {
+		// A process for TestWaitExit that runs until its stdin closes.
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	}
+
 	tmp, err := os.MkdirTemp("", "soft-serve*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create temporary directory: %s", err)
@@ -83,7 +92,7 @@ func TestScript(t *testing.T) {
 	}
 
 	admin1Key, admin1 := mkkey("admin1")
-	_, admin2 := mkkey("admin2")
+	admin2Key, admin2 := mkkey("admin2")
 	user1Key, user1 := mkkey("user1")
 	attackerKey, attacker := mkkey("attacker")
 	attackerSigner := &maliciousSigner{
@@ -97,14 +106,17 @@ func TestScript(t *testing.T) {
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
 			"soft":                   cmdSoft("admin", admin1.Signer()),
 			"usoft":                  cmdSoft("user1", user1.Signer()),
+			"a2soft":                 cmdSoft("admin2", admin2.Signer()),
 			"attacksoft":             cmdSoft("attacker", attackerSigner, attacker.Signer()),
 			"ksoft":                  cmdKeylessSoft,
 			"git":                    cmdGit(admin1Key),
 			"ugit":                   cmdGit(user1Key),
+			"a2git":                  cmdGit(admin2Key),
 			"agit":                   cmdGit(attackerKey),
 			"curl":                   cmdCurl,
 			"mkfile":                 cmdMkfile,
 			"envfile":                cmdEnvfile,
+			"envmatch":               cmdEnvmatch,
 			"readfile":               cmdReadfile,
 			"dos2unix":               cmdDos2Unix,
 			"new-webhook":            cmdNewWebhook,
@@ -157,7 +169,12 @@ func TestScript(t *testing.T) {
 			// Every git process the script starts, the server's included,
 			// creates "master" as the default branch, whatever the machine's
 			// git config says (Apple's git ships init.defaultBranch=main).
-			// Config from the environment overrides system and global config.
+			// System and global config are not read at all, so nothing else
+			// from the machine (credential helpers, signing, hooksPath, ...)
+			// leaks in either. The branch is still pinned explicitly because
+			// git's own default is moving from "master" to "main".
+			e.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+			e.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 			e.Setenv("GIT_CONFIG_COUNT", "1")
 			e.Setenv("GIT_CONFIG_KEY_0", "init.defaultBranch")
 			e.Setenv("GIT_CONFIG_VALUE_0", "master")
@@ -468,6 +485,30 @@ func cmdEnvfile(ts *testscript.TestScript, neg bool, args []string) {
 	}
 }
 
+// cmdEnvmatch sets key to the first submatch of regexp in file, or to the
+// whole match when regexp has no group. Use it to pick an ID out of a
+// command's output: envmatch ID stdout 'id: (\S+)'. It fails when the value
+// it would set is empty.
+func cmdEnvmatch(ts *testscript.TestScript, neg bool, args []string) {
+	if neg || len(args) != 3 {
+		ts.Fatalf("usage: envmatch key file regexp")
+	}
+	re, err := regexp.Compile(args[2])
+	ts.Check(err)
+	m := re.FindStringSubmatch(ts.ReadFile(args[1]))
+	if m == nil {
+		ts.Fatalf("no match for %q in %s", args[2], args[1])
+	}
+	v := m[0]
+	if len(m) > 1 {
+		v = m[1]
+	}
+	if v == "" {
+		ts.Fatalf("match for %q in %s is empty", args[2], args[1])
+	}
+	ts.Setenv(args[0], v)
+}
+
 // cmdNewWebhook sets env-name to a webhook target URL. The host is a literal
 // public address, so the URL passes the server's SSRF validation without a DNS
 // lookup. The soft binary is built with the webhooktest tag, which dials every
@@ -618,18 +659,18 @@ func cmdEnsureServerRunning(ts *testscript.TestScript, neg bool, args []string) 
 	addr := net.JoinHostPort(loopback, port)
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		conn, _ := net.DialTimeout( //nolint:noctx
+		conn, err := net.DialTimeout( //nolint:noctx
 			"tcp",
 			addr,
 			time.Second,
 		)
-		if conn != nil {
+		if err == nil {
 			ts.Logf("Server is running on port: %s", port)
 			conn.Close()
 			break
 		}
 		if time.Now().After(deadline) {
-			ts.Fatalf("server on port %s did not start within 30 seconds", port)
+			ts.Fatalf("server on port %s did not start within 30 seconds: %v", port, err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -660,10 +701,101 @@ func cmdEnsureServerNotRunning(ts *testscript.TestScript, neg bool, args []strin
 
 func cmdStopserver(ts *testscript.TestScript, neg bool, args []string) {
 	// stop the server
-	resp, err := loopbackClient.Head(fmt.Sprintf("%s/__stop", ts.Getenv("SOFT_SERVE_HTTP_PUBLIC_URL"))) //nolint:noctx
+	publicURL := ts.Getenv("SOFT_SERVE_HTTP_PUBLIC_URL")
+	resp, err := loopbackClient.Head(fmt.Sprintf("%s/__stop", publicURL)) //nolint:noctx
 	check(ts, err, neg)
+	if err != nil {
+		return // only reached under "! stopserver", where failing is expected
+	}
 	resp.Body.Close()
-	time.Sleep(time.Second * 2) // Allow some time for the server to stop
+
+	// Wait for the server process to exit. A fixed sleep was not always long
+	// enough under load, and a server that is still shutting down when the
+	// script goes on to skip or end is killed, which fails the script.
+	if procs := serverProcesses(ts.BackgroundCmds(), publicURL); len(procs) > 0 {
+		for _, p := range procs {
+			if err := waitExit(p, 30*time.Second); err != nil {
+				ts.Fatalf("server did not stop: %v", err)
+			}
+		}
+		return
+	}
+
+	// No server process to wait for, so wait until every listener is
+	// closed. Only a refused connection counts as closed: a dial that times
+	// out on a loaded machine says nothing. The ports are checked at once
+	// because on Windows a refusal takes about two seconds to arrive.
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i, env := range []string{"SSH_PORT", "GIT_PORT", "HTTP_PORT", "STATS_PORT"} {
+		wg.Go(func() {
+			errs[i] = waitClosed(net.JoinHostPort(loopback, ts.Getenv(env)), 30*time.Second)
+		})
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			ts.Fatalf("%v", err)
+		}
+	}
+}
+
+// serverProcesses returns the processes of the background "soft serve"
+// commands that were started with publicURL as their HTTP public URL, that
+// is, the servers a stop request sent to publicURL stops. A script that runs
+// another server at the same time gives it a different URL, so stopserver
+// does not wait for it.
+func serverProcesses(cmds []*exec.Cmd, publicURL string) []*os.Process {
+	var procs []*os.Process
+	for _, c := range cmds {
+		if len(c.Args) > 1 && c.Args[1] == "serve" && c.Process != nil &&
+			envValue(c.Env, "SOFT_SERVE_HTTP_PUBLIC_URL") == publicURL {
+			procs = append(procs, c.Process)
+		}
+	}
+	return procs
+}
+
+// envValue returns the value of key in env, where a later entry overrides an
+// earlier one, as it does for the process.
+func envValue(env []string, key string) string {
+	var v string
+	for _, kv := range env {
+		if k, val, ok := strings.Cut(kv, "="); ok && k == key {
+			v = val
+		}
+	}
+	return v
+}
+
+// waitClosed waits until connecting to addr is refused, that is, until
+// nothing listens on it.
+func waitClosed(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 5*time.Second) //nolint:noctx
+		if err == nil {
+			conn.Close()
+		} else if connRefused(err) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("server on %s did not stop within %v (last dial: %v)", addr, timeout, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// connRefused reports whether err from a dial means that nothing listens on
+// the address.
+func connRefused(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	// On Windows, syscall.ECONNREFUSED is not the code Winsock returns.
+	const wsaeconnrefused = 10061
+	return errno == syscall.ECONNREFUSED || runtime.GOOS == "windows" && errno == wsaeconnrefused
 }
 
 func setupPostgres(t testscript.T, cfg *config.Config) (func(), error) {
