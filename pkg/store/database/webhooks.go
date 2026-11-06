@@ -145,8 +145,9 @@ func (*webhookStore) GetWebhookByID(ctx context.Context, h db.Handler, repoID in
 }
 
 // GetWebhookDeliveriesByWebhookID implements store.WebhookStore.
+// Deliveries are returned oldest first, in the order they were recorded.
 func (*webhookStore) GetWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookDelivery, error) {
-	query := h.Rebind(`SELECT * FROM webhook_deliveries WHERE webhook_id = ?;`)
+	query := h.Rebind(`SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY seq;`)
 	var whds []models.WebhookDelivery
 	err := h.SelectContext(ctx, &whds, query, webhookID)
 	return whds, err
@@ -207,8 +208,9 @@ func (*webhookStore) GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Han
 }
 
 // ListWebhookDeliveriesByWebhookID implements store.WebhookStore.
+// Deliveries are returned oldest first, in the order they were recorded.
 func (*webhookStore) ListWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookDelivery, error) {
-	query := h.Rebind(`SELECT id, response_status, event FROM webhook_deliveries WHERE webhook_id = ?;`)
+	query := h.Rebind(`SELECT id, response_status, event, created_at, seq FROM webhook_deliveries WHERE webhook_id = ? ORDER BY seq;`)
 	var whds []models.WebhookDelivery
 	err := h.SelectContext(ctx, &whds, query, webhookID)
 	return whds, err
