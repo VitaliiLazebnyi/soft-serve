@@ -65,6 +65,7 @@ git -C repo1 tag v0.1.0
 env GIT_TRACE=1
 git -C repo1 push origin HEAD
 stderr 'git-lfs-transfer'
+stderr 'pure SSH connection successful'
 ! stderr 'pure SSH protocol connection failed'
 ! stderr 'git-lfs-authenticate'
 env GIT_TRACE=
@@ -79,6 +80,7 @@ git -C repo1 push origin HEAD --tags
 env GIT_TRACE=1
 git clone -c filter.lfs.process='git-lfs filter-process' -c filter.lfs.required=true ssh://localhost:$SSH_PORT/repo1 repo1c
 stderr 'git-lfs-transfer'
+stderr 'pure SSH connection successful'
 ! stderr 'pure SSH protocol connection failed'
 ! stderr 'git-lfs-authenticate'
 env GIT_TRACE=
