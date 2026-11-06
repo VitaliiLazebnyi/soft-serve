@@ -6,10 +6,17 @@
 # convert crlf to lf on windows
 [windows] dos2unix http1.txt http2.txt http3.txt goget.txt gitclone.txt
 
+# git and git-lfs dial the remote and the LFS action URLs (built from the
+# public URL) themselves, so both name the address the server listens on
+env SOFT_SERVE_HTTP_PUBLIC_URL=http://127.0.0.1:$HTTP_PORT
+
 # start soft serve
 exec soft serve &
 # wait for SSH server to start
 ensureserverrunning SSH_PORT
+# something else holds the HTTP port on ::1; clients must not depend on
+# which address "localhost" resolves to first
+occupyipv6 HTTP_PORT
 
 # create user
 soft user create user1 --key "$USER1_AUTHORIZED_KEY"
@@ -36,7 +43,7 @@ mkfile ./repo2/bar.png 'bar'
 # redirected, drops them, and fails the push. Tests do not read system or
 # global git config, so the empty helper (which resets the helper list) is
 # only a guard that keeps the token from being stored outside the test.
-git -C repo2 remote add origin http://localhost:$HTTP_PORT/repo2
+git -C repo2 remote add origin http://127.0.0.1:$HTTP_PORT/repo2
 git -C repo2 config credential.helper ''
 git -C repo2 config --add credential.helper '!f() { echo username=soft; echo password='$TOKEN'; }; f'
 git -C repo2 lfs install --local
