@@ -785,7 +785,13 @@ deliveries` lists and can redeliver. Each webhook keeps its 100 most recent
 deliveries: recording one deletes the older ones. While deliveries are being
 recorded concurrently, or if a cleanup fails, a webhook can briefly hold a few
 more until its next delivery is recorded. Upgrading trims existing deliveries
-to the same limit. A repository can have at most 20 webhooks.
+to the same limit. The trim frees space inside the database but does not shrink
+its files. On SQLite, stop the server and run `sqlite3 <database file> VACUUM`
+to shrink the file; VACUUM writes a full copy, so it needs free disk space up
+to about the size of the file. On Postgres, autovacuum makes the space
+reusable, and `VACUUM FULL webhook_deliveries` returns it to the system.
+
+A repository can have at most 20 webhooks.
 
 ## The Soft Serve Plus TUI
 
