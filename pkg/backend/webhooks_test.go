@@ -230,6 +230,53 @@ func TestCreateWebhookCapsWebhooksPerRepo(t *testing.T) {
 	e.createHook(t, whURL+"/extra", webhook.EventPush)
 }
 
+// Concurrent creates on SQLite must not fail with "database is locked". A
+// transaction that reads before it writes cannot wait for another writer
+// (SQLite returns SQLITE_BUSY at once, without busy_timeout), so the cap is
+// checked after the insert.
+func TestCreateWebhookConcurrentSQLite(t *testing.T) {
+	testConcurrentCreates(t, newWebhookEnv(t))
+}
+
+// testConcurrentCreates starts twice MaxWebhooksPerRepo creates on one
+// repository at once. Exactly MaxWebhooksPerRepo must succeed and the rest be
+// refused with ErrTooManyWebhooks; any other error fails the test.
+func testConcurrentCreates(t *testing.T, e whEnv) {
+	t.Helper()
+	is := is.New(t)
+	const n = 2 * webhook.MaxWebhooksPerRepo
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range n {
+		wg.Go(func() {
+			<-start
+			errs <- e.be.CreateWebhook(e.ctx, e.repo, fmt.Sprintf("%s/%d", whURL, i),
+				webhook.ContentTypeJSON, "", []webhook.Event{webhook.EventPush}, true)
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	var ok, capped int
+	for err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, webhook.ErrTooManyWebhooks):
+			capped++
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	is.Equal(ok, webhook.MaxWebhooksPerRepo)
+	is.Equal(capped, n-webhook.MaxWebhooksPerRepo)
+	hooks, err := e.be.ListWebhooks(e.ctx, e.repo)
+	is.NoErr(err)
+	is.Equal(len(hooks), webhook.MaxWebhooksPerRepo)
+}
+
 func TestUpdateWebhookChangesEverything(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)

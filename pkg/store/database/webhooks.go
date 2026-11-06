@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -215,15 +216,30 @@ func (*webhookStore) GetWebhooksByRepoID(ctx context.Context, h db.Handler, repo
 // LockAndCountWebhooks implements store.WebhookStore.
 //
 // Postgres runs transactions in READ COMMITTED, where two transactions can
-// each count the same webhooks and both insert one more. Locking the
-// repository row first makes the second wait until the first commits; its
-// COUNT then runs with a fresh snapshot and sees the first one's webhook.
-// SQLite has no FOR UPDATE and needs none: it allows one writer at a time.
+// each insert a webhook and count without seeing the other's. Locking the
+// repository row before the COUNT makes the second wait until the first
+// commits; its COUNT then runs with a fresh snapshot and sees the first one's
+// webhook. FOR NO KEY UPDATE conflicts only with itself and FOR UPDATE, so
+// unlike FOR UPDATE it does not block the key-share locks that inserts into
+// tables referencing the repository take, including the caller's own insert
+// in another transaction.
+//
+// SQLite has no row locks and needs none here: a transaction that has
+// already written holds the database's write lock until it ends, so callers
+// that insert before they count take turns.
 func (*webhookStore) LockAndCountWebhooks(ctx context.Context, h db.Handler, repoID int64) (int, error) {
-	if d, ok := h.(interface{ DriverName() string }); ok && d.DriverName() == "postgres" {
-		if _, err := h.ExecContext(ctx, `SELECT 1 FROM repos WHERE id = $1 FOR UPDATE;`, repoID); err != nil {
+	d, ok := h.(interface{ DriverName() string })
+	if !ok {
+		return 0, fmt.Errorf("lock and count webhooks: handler %T does not report its driver", h)
+	}
+	switch driver := d.DriverName(); driver {
+	case "postgres":
+		if _, err := h.ExecContext(ctx, `SELECT 1 FROM repos WHERE id = $1 FOR NO KEY UPDATE;`, repoID); err != nil {
 			return 0, err
 		}
+	case "sqlite", "sqlite3":
+	default:
+		return 0, fmt.Errorf("lock and count webhooks: unsupported database driver %q", driver)
 	}
 	var n int
 	err := h.GetContext(ctx, &n, h.Rebind(`SELECT COUNT(*) FROM webhooks WHERE repo_id = ?;`), repoID)

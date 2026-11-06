@@ -31,19 +31,24 @@ func (b *Backend) CreateWebhook(ctx context.Context, repo proto.Repository, url 
 	events = dedupeEvents(events)
 
 	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
-		// Counted in the same transaction as the insert, with the repository
-		// locked on Postgres, so creates racing at the cap cannot all fit.
-		existing, err := datastore.LockAndCountWebhooks(ctx, tx, repo.ID())
-		if err != nil {
-			return db.WrapError(err)
-		}
-		if existing >= webhook.MaxWebhooksPerRepo {
-			return webhook.ErrTooManyWebhooks
-		}
-
 		lastID, err := datastore.CreateWebhook(ctx, tx, repo.ID(), url, secret, int(contentType), active)
 		if err != nil {
 			return db.WrapError(err)
+		}
+
+		// The cap is checked after the insert, in the same transaction, which
+		// rolls the insert back if the repository is over it. Inserting first
+		// matters on SQLite: a transaction that reads before its first write
+		// cannot wait for another writer and fails with SQLITE_BUSY, while
+		// one that writes first waits (busy_timeout) and then holds the write
+		// lock through the count. On Postgres the count locks the repository
+		// first, so creates racing at the cap take turns.
+		total, err := datastore.LockAndCountWebhooks(ctx, tx, repo.ID())
+		if err != nil {
+			return db.WrapError(err)
+		}
+		if total > webhook.MaxWebhooksPerRepo {
+			return webhook.ErrTooManyWebhooks
 		}
 
 		evs := make([]int, len(events))

@@ -16,8 +16,10 @@ type WebhookStore interface {
 	GetWebhooksByRepoID(ctx context.Context, h db.Handler, repoID int64) ([]models.Webhook, error)
 	// LockAndCountWebhooks returns how many webhooks a repository has. On
 	// Postgres it first locks the repository's row until the transaction
-	// ends, so that concurrent callers that count and then insert in one
-	// transaction take turns; SQLite already runs one writer at a time.
+	// ends, so that concurrent callers that insert and then count in one
+	// transaction take turns. On SQLite callers take turns because the
+	// insert already holds the write lock; counting before the insert would
+	// make concurrent callers fail with SQLITE_BUSY instead of waiting.
 	LockAndCountWebhooks(ctx context.Context, h db.Handler, repoID int64) (int, error)
 	// GetWebhooksByRepoIDWhereEvent returns all webhooks for a repository where event is in the events.
 	GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Handler, repoID int64, events []int) ([]models.Webhook, error)
