@@ -354,8 +354,9 @@ func (c *Config) ParseFile() error {
 
 // parseEnv parses the environment variables as a configuration file.
 func parseEnv(cfg *Config) error {
-	// Merge initial admin keys from both config file and environment variables.
-	initialAdminKeys := append([]string{}, cfg.InitialAdminKeys...)
+	// Initial admin keys from the config file and the environment are
+	// merged, not overridden. Keep the file keys to add them back below.
+	fileAdminKeys := slices.Clone(cfg.InitialAdminKeys)
 
 	// Override with environment variables
 	if err := env.ParseWithOptions(cfg, env.Options{
@@ -364,12 +365,28 @@ func parseEnv(cfg *Config) error {
 		return fmt.Errorf("parse environment variables: %w", err)
 	}
 
-	// Merge initial admin keys from environment variables.
-	if initialAdminKeysEnv := os.Getenv("SOFT_SERVE_INITIAL_ADMIN_KEYS"); initialAdminKeysEnv != "" {
-		cfg.InitialAdminKeys = append(cfg.InitialAdminKeys, initialAdminKeys...)
-	}
+	// The env parser leaves the list alone when the variable is unset and
+	// replaces it otherwise. Either way, the env keys come first, followed
+	// by each file key not already listed.
+	cfg.InitialAdminKeys = mergeAdminKeys(cfg.InitialAdminKeys, fileAdminKeys)
 
 	return cfg.Validate()
+}
+
+// mergeAdminKeys returns the entries of a followed by those of b, each
+// listed once. Entries are compared after trimming surrounding space.
+func mergeAdminKeys(a, b []string) []string {
+	merged := make([]string, 0, len(a)+len(b))
+	seen := make(map[string]struct{}, len(a)+len(b))
+	for _, k := range slices.Concat(a, b) {
+		key := strings.TrimSpace(k)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, k)
+	}
+	return merged
 }
 
 // ParseEnv parses the config from the environment variables.
@@ -598,21 +615,48 @@ func parseAuthKeys(aks []string) authKeys {
 		if key == "" || strings.HasPrefix(key, "#") {
 			continue
 		}
-		isFile := false
 		if bts, err := os.ReadFile(key); err == nil {
-			// key is a file
-			key = strings.TrimSpace(string(bts))
-			isFile = true
+			// key is a file in authorized_keys format: one key per line.
+			var found bool
+			var bad []string
+			for _, line := range strings.Split(string(bts), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				pk, _, err := sshutils.ParseAuthorizedKey(line)
+				if err != nil {
+					bad = append(bad, line)
+					continue
+				}
+				found = true
+				id := string(pk.Marshal())
+				if _, ok := exist[id]; !ok {
+					r.pks = append(r.pks, pk)
+					exist[id] = struct{}{}
+				}
+			}
+			if !found {
+				r.unreadable = append(r.unreadable, key)
+				continue
+			}
+			// A file that holds keys was read; its other lines are
+			// mistyped keys.
+			r.ignored = append(r.ignored, bad...)
+			continue
 		}
 
 		pk, _, err := sshutils.ParseAuthorizedKey(key)
 		switch {
 		case err == nil:
-			if _, ok := exist[key]; !ok {
+			// Compare the key itself, not its text: a key file, a comment
+			// or extra spacing must not list the same key twice.
+			id := string(pk.Marshal())
+			if _, ok := exist[id]; !ok {
 				r.pks = append(r.pks, pk)
-				exist[key] = struct{}{}
+				exist[id] = struct{}{}
 			}
-		case isFile || looksLikePath(key):
+		case looksLikePath(key):
 			r.unreadable = append(r.unreadable, strings.TrimSpace(entry))
 		default:
 			r.ignored = append(r.ignored, key)

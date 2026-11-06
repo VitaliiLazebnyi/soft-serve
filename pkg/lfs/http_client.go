@@ -27,10 +27,21 @@ var _ Client = (*httpClient)(nil)
 // receiving any data before it is closed. Tests lower it.
 var stallTimeout = ssrf.ClientTimeout
 
-// newHTTPClient returns a new Git LFS client.
-func newHTTPClient(endpoint Endpoint) *httpClient {
+// secureHTTPClient is the SSRF-protected HTTP client shared by every LFS
+// client, so they all draw from one connection pool instead of each keeping
+// its own idle connections. Its transfer timeouts are set once here, as
+// setTransferTimeouts wraps the shared transport's dialer.
+var secureHTTPClient = newSecureHTTPClient()
+
+func newSecureHTTPClient() *http.Client {
 	client := ssrf.NewSecureClient()
 	setTransferTimeouts(client)
+	return client
+}
+
+// newHTTPClient returns a new Git LFS client.
+func newHTTPClient(endpoint Endpoint) *httpClient {
+	client := secureHTTPClient
 	return &httpClient{
 		client:   client,
 		endpoint: endpoint,
