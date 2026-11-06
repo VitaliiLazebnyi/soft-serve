@@ -203,8 +203,9 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 	}
 
 	// Set repo in context. readableRepo applies the same server admin rule
-	// as every other SSH command, so a key in initial_admin_keys is admin
-	// here too, even when it belongs to a non-admin account.
+	// as every other SSH command, so a key in initial_admin_keys that no
+	// account holds is admin here too. (A listed key held by a non-admin
+	// account never gets this far: the SSH middleware refuses its session.)
 	repo, accessLevel := readableRepo(ctx, name)
 	ctx = proto.WithRepositoryContext(ctx, repo)
 
@@ -324,10 +325,11 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 			// git-lfs-authenticate issues a token for the account, and the
 			// HTTP LFS endpoint checks that token against the account's own
 			// access; it knows nothing about admin keys. Authorize with the
-			// account's access here too, so a key whose admin rights come
-			// only from initial_admin_keys is refused now instead of getting
-			// a token the HTTP endpoint will reject. git-lfs-transfer stays
-			// on SSH and keeps the admin key's access.
+			// account's access here too, so a listed admin key with no
+			// account is refused with a plain "not authorized" instead of
+			// reaching the handler, which has no account to issue a token
+			// for. git-lfs-transfer stays on SSH and keeps the admin key's
+			// access.
 			repo, accessLevel = be.Readable(ctx, name, user)
 			// Keep the context in step with the repo checked here, so the
 			// handler never sees the one readableRepo looked up.
