@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 
 	"charm.land/log/v2"
 
@@ -40,6 +41,13 @@ type Server struct {
 
 	logger *log.Logger
 	ctx    context.Context
+
+	// mu guards listeners and closed. Start keeps the listeners it bound
+	// so that Shutdown and Close can close them even if they run before the
+	// servers have started serving on them.
+	mu        sync.Mutex
+	listeners []net.Listener
+	closed    bool
 }
 
 // NewServer returns a new *Server configured to serve Soft Serve. The SSH
@@ -194,6 +202,8 @@ func (s *Server) ReloadCertificates() error {
 // keep running with only some of its servers up, and the failed server's
 // error would surface only once all the others had stopped. It also means
 // that once any of the servers accepts connections, all of them do.
+//
+// Start returns nil without serving if Shutdown or Close has been called.
 func (s *Server) Start() error {
 	type service struct {
 		name   string
@@ -216,26 +226,50 @@ func (s *Server) Start() error {
 	}
 
 	listeners := make([]net.Listener, 0, len(services))
+	closeAll := func() {
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+	}
 	for _, svc := range services {
+		// An empty address would make net.Listen pick a random port on
+		// every interface, where the servers used to fall back to their
+		// library's default port. Neither is what an operator would expect
+		// from a missing setting.
+		if svc.addr == "" {
+			closeAll()
+			return fmt.Errorf("start %s: listen address is empty", svc.name)
+		}
 		l, err := (&net.ListenConfig{}).Listen(s.ctx, "tcp", svc.addr)
 		if err != nil {
-			for _, l := range listeners {
-				_ = l.Close()
-			}
+			closeAll()
 			return fmt.Errorf("start %s: %w", svc.name, err)
 		}
 		listeners = append(listeners, l)
 	}
 
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		closeAll()
+		return nil
+	}
+	s.listeners = listeners
+	s.mu.Unlock()
+
 	errg, _ := errgroup.WithContext(s.ctx)
 	for i, svc := range services {
 		l := listeners[i]
 		errg.Go(func() error {
-			s.logger.Print("Starting "+svc.name, "addr", svc.addr)
-			if err := svc.serve(l); !errors.Is(err, svc.closed) {
-				return err
+			s.logger.Print("Starting "+svc.name, "addr", l.Addr().String())
+			err := svc.serve(l)
+			if errors.Is(err, svc.closed) || errors.Is(err, net.ErrClosed) && s.isClosed() {
+				// The SSH server reports the closed listener rather than
+				// ErrServerClosed when it was shut down before it started
+				// serving, and closeListeners closed the listener.
+				return nil
 			}
-			return nil
+			return err
 		})
 	}
 
@@ -251,6 +285,7 @@ func (s *Server) Start() error {
 // budget, backend.ShutdownDeliveryTimeout, or until abort is done, whichever
 // comes first.
 func (s *Server) Shutdown(ctx context.Context, abort context.Context) error {
+	s.markClosed()
 	errg, ctx := errgroup.WithContext(ctx)
 	errg.Go(func() error {
 		return s.GitDaemon.Shutdown(ctx)
@@ -273,6 +308,7 @@ func (s *Server) Shutdown(ctx context.Context, abort context.Context) error {
 	})
 	// defer s.DB.Close() // nolint: errcheck
 	err := errg.Wait()
+	s.closeListeners()
 
 	// Always wait for the deliveries, even when a server failed to stop:
 	// the queue is closed here so no new delivery starts, and the ones
@@ -286,6 +322,8 @@ func (s *Server) Shutdown(ctx context.Context, abort context.Context) error {
 
 // Close closes the SSH server.
 func (s *Server) Close() error {
+	s.markClosed()
+	defer s.closeListeners()
 	var errg errgroup.Group
 	errg.Go(s.GitDaemon.Close)
 	errg.Go(s.HTTPServer.Close)
@@ -297,4 +335,33 @@ func (s *Server) Close() error {
 	})
 	// defer s.DB.Close() // nolint: errcheck
 	return errg.Wait()
+}
+
+// markClosed makes a Start that has not yet stored its listeners close them
+// and return instead of serving.
+func (s *Server) markClosed() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+}
+
+func (s *Server) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
+// closeListeners closes the listeners Start bound. A server that was shut
+// down before it started serving on its listener does not know about it, so
+// would otherwise leave it open, and the SSH server would even go on to serve
+// on it. It runs after the servers' own Shutdown or Close, which close the
+// listeners they serve on and would report an error for one already closed.
+func (s *Server) closeListeners() {
+	s.mu.Lock()
+	listeners := s.listeners
+	s.listeners = nil
+	s.mu.Unlock()
+	for _, l := range listeners {
+		_ = l.Close()
+	}
 }
