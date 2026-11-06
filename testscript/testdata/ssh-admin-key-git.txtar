@@ -4,6 +4,8 @@
 # even when the account it belongs to does not have the admin flag. Other
 # keys keep their account's access.
 
+# enable ssh lfs transfer
+env SOFT_SERVE_LFS_SSH_ENABLED=true
 # start soft serve
 exec soft serve &
 # wait for SSH server to start
@@ -33,6 +35,19 @@ git -C apriv commit -m 'admin'
 git -C apriv push origin HEAD
 git -C apriv archive --remote=ssh://localhost:$SSH_PORT/upriv HEAD -o out.tar
 
+# git-lfs-transfer stays on SSH and keeps the admin key's access
+soft git-lfs-transfer upriv download
+stdout '000eversion=1\n000clocking\n0000'
+soft git-lfs-transfer upriv upload
+stdout '000eversion=1\n000clocking\n0000'
+
+# git-lfs-authenticate issues a token the HTTP LFS endpoint checks against
+# the account alone, so it uses the account's access, not the admin key's
+! soft git-lfs-authenticate upriv download
+stderr 'invalid repo'
+! soft git-lfs-authenticate upriv upload
+stderr 'invalid repo'
+
 # the admin key can still push-to-create
 mkdir anew
 git -C anew init
@@ -46,11 +61,30 @@ stdout 'Repository: anew'
 
 # a non-admin key is unaffected
 ! agit clone ssh://localhost:$SSH_PORT/upriv xpriv
+stderr 'invalid repo'
 ! exists xpriv/README.md
 
 # the owner sees the admin key's push
 ugit -C upriv pull origin master
 exists upriv/ADMIN.md
+
+# an admin key listed only in the config, with no account at all, is still
+# admin over git, and its pushes to an existing repo still send webhooks
+new-webhook WH_UPRIV
+soft repo webhook create upriv $WH_UPRIV -e push
+soft repo delete anew
+soft user delete admin
+! soft user info admin
+git -C apriv pull origin master
+mkfile ./apriv/NOACCT.md '# no account'
+git -C apriv add -A
+git -C apriv commit -m 'no account'
+git -C apriv push origin HEAD
+soft repo webhook deliver list upriv 1
+stdout '✅.*push'
+! stdout '❌'
+webhook-received
+stdout 'push /hooks/WH_UPRIV'
 
 # stop the server
 [windows] stopserver

@@ -320,6 +320,17 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 			return git.ErrInvalidRequest
 		}
 
+		if service == git.LFSAuthenticateService {
+			// git-lfs-authenticate issues a token for the account, and the
+			// HTTP LFS endpoint checks that token against the account's own
+			// access; it knows nothing about admin keys. Authorize with the
+			// account's access here too, so a key whose admin rights come
+			// only from initial_admin_keys is refused now instead of getting
+			// a token the HTTP endpoint will reject. git-lfs-transfer stays
+			// on SSH and keeps the admin key's access.
+			repo, accessLevel = be.Readable(ctx, name, user)
+		}
+
 		if err := gitAccess(user, repo, accessLevel, need); err != nil {
 			return err
 		}
