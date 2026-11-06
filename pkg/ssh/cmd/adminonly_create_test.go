@@ -7,10 +7,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"io"
 	"testing"
 
 	"charm.land/ssh"
 	"github.com/charmbracelet/soft-serve/pkg/config"
+	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"github.com/matryer/is"
@@ -96,4 +98,53 @@ func TestAdminKeyCreatesRepositoriesWhenFlagOn(t *testing.T) {
 	_, err = be.Repository(ctx, "made-again")
 	is.NoErr(err)
 	is.True(!errors.Is(runRepo(t, keyCtx, "import", "imported", "https://example.invalid/x.git"), proto.ErrUnauthorized))
+}
+
+// `pubkey add` takes any public key without proof of holding its private
+// half, so a non-admin may not attach a key listed in initial_admin_keys to
+// their own account. The refusal says the key is listed, so a new admin
+// knows to ask an admin. A key another account owns is still a duplicate.
+// A server admin may attach a listed key, and ordinary keys are unaffected.
+func TestPubkeyAddRefusesAdminKeyForNonAdmin(t *testing.T) {
+	is := is.New(t)
+	newKey := func() gossh.PublicKey {
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		is.NoErr(err)
+		signer, err := gossh.NewSignerFromKey(priv)
+		is.NoErr(err)
+		return signer.PublicKey()
+	}
+	adminPub := newKey()
+	ctx, be := newAuthTestContext(t)
+	// Added after the first migration, so no account owns it yet.
+	cfg := config.FromContext(ctx)
+	cfg.InitialAdminKeys = append(cfg.InitialAdminKeys, sshutils.MarshalAuthorizedKey(adminPub))
+
+	session := func(name string, admin bool) context.Context {
+		pk := newKey()
+		u, err := be.CreateUser(ctx, name, proto.UserOptions{Admin: admin, PublicKeys: []gossh.PublicKey{pk}})
+		is.NoErr(err)
+		return context.WithValue(proto.WithUserContext(ctx, u), ssh.ContextKeyPublicKey, pk)
+	}
+	runPubkey := func(ctx context.Context, args ...string) error {
+		c := PubkeyCommand()
+		c.SilenceUsage = true
+		c.SetOut(io.Discard)
+		c.SetErr(io.Discard)
+		c.SetArgs(args)
+		return c.ExecuteContext(ctx)
+	}
+
+	workerCtx := session("worker", false)
+	is.True(errors.Is(runPubkey(workerCtx, "add", sshutils.MarshalAuthorizedKey(adminPub)), errListedAdminKey))
+	taken := newKey()
+	_, err := be.CreateUser(ctx, "other", proto.UserOptions{PublicKeys: []gossh.PublicKey{taken}})
+	is.NoErr(err)
+	is.True(errors.Is(runPubkey(workerCtx, "add", sshutils.MarshalAuthorizedKey(taken)), db.ErrDuplicateKey))
+	keys, err := be.ListPublicKeys(ctx, "worker")
+	is.NoErr(err)
+	is.Equal(len(keys), 1)
+	is.NoErr(runPubkey(workerCtx, "add", sshutils.MarshalAuthorizedKey(newKey())))
+
+	is.NoErr(runPubkey(session("boss", true), "add", sshutils.MarshalAuthorizedKey(adminPub)))
 }

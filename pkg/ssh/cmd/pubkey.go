@@ -1,12 +1,18 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/charmbracelet/soft-serve/pkg/backend"
+	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"github.com/spf13/cobra"
 )
+
+// errListedAdminKey is returned when a non-admin tries to attach a key that
+// is listed in initial_admin_keys.
+var errListedAdminKey = errors.New("this key is listed in initial_admin_keys; only an admin can attach it to an account (user add-pubkey)")
 
 // PubkeyCommand returns a command that manages user public keys.
 func PubkeyCommand() *cobra.Command {
@@ -32,6 +38,18 @@ func PubkeyCommand() *cobra.Command {
 			apk, _, err := sshutils.ParseAuthorizedKey(strings.Join(args, " "))
 			if err != nil {
 				return err
+			}
+
+			// Adding a key proves nothing about holding its private half,
+			// so a non-admin may not attach a key listed in
+			// initial_admin_keys. (Sessions with a listed key owned by a
+			// non-admin are refused anyway; see
+			// backend.ErrAdminKeyNonAdminOwner.) The error says why, so a new admin
+			// knows to ask an admin rather than retry. That tells the
+			// caller the key is listed, which is harmless: it is a public
+			// key, and listing grants nothing without the private half.
+			if !isServerAdmin(ctx) && IsPublicKeyAdmin(config.FromContext(ctx), apk) {
+				return errListedAdminKey
 			}
 
 			return be.AddPublicKey(ctx, user.Username(), apk)

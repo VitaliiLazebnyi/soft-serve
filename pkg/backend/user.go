@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,9 +25,28 @@ func (d *Backend) AccessLevel(ctx context.Context, repo string, username string)
 	return d.AccessLevelForUser(ctx, repo, user)
 }
 
+// adminKeyList returns the parsed initial_admin_keys. config.AdminKeys
+// parses every entry (trying each as a file first) on every call, and this
+// runs for every SSH session and access check, so the result is cached and
+// rebuilt only when the configured list changes. Config.Validate has
+// already replaced file paths with the keys they held.
+func (d *Backend) adminKeyList() []ssh.PublicKey {
+	d.adminKeysMu.Lock()
+	defer d.adminKeysMu.Unlock()
+	if !d.adminKeysOK || !slices.Equal(d.adminKeysSrc, d.cfg.InitialAdminKeys) {
+		d.adminKeysSrc = slices.Clone(d.cfg.InitialAdminKeys)
+		d.adminKeys = d.cfg.AdminKeys()
+		d.adminKeysOK = true
+	}
+	return d.adminKeys
+}
+
 // isAdminKey reports whether pk is one of the configured admin keys.
 func (d *Backend) isAdminKey(pk ssh.PublicKey) bool {
-	for _, k := range d.cfg.AdminKeys() {
+	if pk == nil {
+		return false
+	}
+	for _, k := range d.adminKeyList() {
 		if sshutils.KeysEqual(pk, k) {
 			return true
 		}
@@ -251,6 +271,27 @@ func (d *Backend) UserByID(ctx context.Context, id int64) (proto.User, error) {
 	}, nil
 }
 
+// ErrAdminKeyNonAdminOwner is returned by UserByPublicKey for a key that is
+// listed in initial_admin_keys but attached to a non-admin account. The SSH
+// server refuses sessions with such a key and shows this error. It matches
+// proto.ErrUserNotFound with errors.Is, since the key resolves to no
+// account.
+type ErrAdminKeyNonAdminOwner struct {
+	// Username is the non-admin account the key is attached to.
+	Username string
+}
+
+// Error implements error.
+func (e *ErrAdminKeyNonAdminOwner) Error() string {
+	return fmt.Sprintf("this key is listed in initial_admin_keys but is attached to non-admin account %q. "+
+		"If that account is yours, ask an admin to run `user set-admin %s true`; "+
+		"otherwise ask an admin to remove the key from it with `user remove-pubkey %s KEY`",
+		e.Username, e.Username, e.Username)
+}
+
+// Unwrap makes the error match proto.ErrUserNotFound.
+func (e *ErrAdminKeyNonAdminOwner) Unwrap() error { return proto.ErrUserNotFound }
+
 // UserByPublicKey finds a user by public key.
 //
 // It implements backend.Backend.
@@ -273,6 +314,23 @@ func (d *Backend) UserByPublicKey(ctx context.Context, pk ssh.PublicKey) (proto.
 		}
 		d.logger.Error("error finding user", "pk", sshutils.MarshalAuthorizedKey(pk), "error", err)
 		return nil, err
+	}
+
+	// A key listed in initial_admin_keys but owned by a non-admin account
+	// resolves to no account and the SSH server refuses sessions with it
+	// (see ErrAdminKeyNonAdminOwner). `pubkey add` takes a public key
+	// without proof of holding its private half, so the owner may have
+	// claimed someone else's key before it was listed; acting as the owner
+	// would hand them what the key holder does. Acting as nobody instead
+	// strands a legitimate owner without their account, so the session is
+	// refused with an error saying how to fix it.
+	if !m.Admin && d.isAdminKey(pk) {
+		ak := sshutils.MarshalAuthorizedKey(pk)
+		if _, seen := d.warnedOwnedAdminKeys.LoadOrStore(ak, struct{}{}); !seen {
+			d.logger.Warn("admin key is owned by a non-admin account; refusing sessions with it until an admin runs `user set-admin` on that account or removes the key from it",
+				"username", m.Username, "pk", ak)
+		}
+		return nil, &ErrAdminKeyNonAdminOwner{Username: m.Username}
 	}
 
 	return &user{

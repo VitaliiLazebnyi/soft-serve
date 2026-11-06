@@ -92,7 +92,7 @@ func TestScript(t *testing.T) {
 	}
 
 	admin1Key, admin1 := mkkey("admin1")
-	_, admin2 := mkkey("admin2")
+	admin2Key, admin2 := mkkey("admin2")
 	user1Key, user1 := mkkey("user1")
 	attackerKey, attacker := mkkey("attacker")
 	attackerSigner := &maliciousSigner{
@@ -106,10 +106,12 @@ func TestScript(t *testing.T) {
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
 			"soft":                   cmdSoft("admin", admin1.Signer()),
 			"usoft":                  cmdSoft("user1", user1.Signer()),
+			"a2soft":                 cmdSoft("admin2", admin2.Signer()),
 			"attacksoft":             cmdSoft("attacker", attackerSigner, attacker.Signer()),
 			"ksoft":                  cmdKeylessSoft,
 			"git":                    cmdGit(admin1Key),
 			"ugit":                   cmdGit(user1Key),
+			"a2git":                  cmdGit(admin2Key),
 			"agit":                   cmdGit(attackerKey),
 			"curl":                   cmdCurl,
 			"mkfile":                 cmdMkfile,

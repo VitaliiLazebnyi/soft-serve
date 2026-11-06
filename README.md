@@ -590,6 +590,27 @@ ssh -p 23231 localhost set-username yolo
 ssh -p 23231 localhost info
 ```
 
+`pubkey add` does not ask for proof that you hold the key's private half, so
+keys listed in `initial_admin_keys` get extra care:
+
+- Only an admin can attach a listed key to an account (`user add-pubkey
+  USERNAME KEY`). A non-admin running `pubkey add` with one gets an error
+  saying the key is listed in `initial_admin_keys`. If you are a new admin
+  whose key was just listed, ask an existing admin to attach it, or log in
+  with that key: it already has admin rights from the config.
+- If a listed key belongs to a non-admin account (for example, someone
+  added it before it was listed), the server refuses SSH sessions with that
+  key and logs a warning. The error names the account. If the account is
+  the key holder's own, make it an admin with `user set-admin USERNAME
+  true`; otherwise remove the key from it with `user remove-pubkey USERNAME
+  KEY` (and attach it to the right account with `user add-pubkey`). HTTP
+  access is not affected: it is admin only for accounts with the admin
+  flag.
+
+To promote an existing user, run `user set-admin USERNAME true`. Listing
+their key in `initial_admin_keys` alone locks them out over SSH until you
+do.
+
 ## Repositories
 
 You can manage repositories using the `repo` command.
