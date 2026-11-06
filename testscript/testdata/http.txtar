@@ -6,10 +6,17 @@
 # convert crlf to lf on windows
 [windows] dos2unix http1.txt http2.txt http3.txt goget.txt gitclone.txt
 
+# git and git-lfs dial the remote and the LFS action URLs (built from the
+# public URL) themselves, so both name the address the server listens on
+env SOFT_SERVE_HTTP_PUBLIC_URL=http://127.0.0.1:$HTTP_PORT
+
 # start soft serve
 exec soft serve &
 # wait for SSH server to start
 ensureserverrunning SSH_PORT
+# something else holds the HTTP port on ::1; clients must not depend on
+# which address "localhost" resolves to first
+occupyipv6 HTTP_PORT
 
 # create user
 soft user create user1 --key "$USER1_AUTHORIZED_KEY"
@@ -39,7 +46,7 @@ mkfile ./repo2/bar.png 'bar'
 # redirected, drops them, and fails the push. Tests do not read system or
 # global git config, so the empty helper (which resets the helper list) is
 # only a guard that keeps the token from being stored outside the test.
-git -C repo2 remote add origin http://localhost:$HTTP_PORT/repo2
+git -C repo2 remote add origin http://127.0.0.1:$HTTP_PORT/repo2
 git -C repo2 config credential.helper ''
 git -C repo2 config --add credential.helper '!f() { echo username=soft; echo password='$TOKEN'; }; f'
 git -C repo2 lfs install --local
@@ -190,9 +197,9 @@ cmp stdout private.txt
 # deny access ask for credentials
 # this means the server responded with a 401 and prompted for credentials
 # but we disable git terminal prompting to we get a fatal instead of a 401 "Unauthorized"
-! git clone http://localhost:$HTTP_PORT/repo2 repo2_clone
+! git clone http://127.0.0.1:$HTTP_PORT/repo2 repo2_clone
 cmpenv stderr gitclone.txt
-! git clone http://someuser:somepassword@localhost:$HTTP_PORT/repo2 repo2_clone
+! git clone http://someuser:somepassword@127.0.0.1:$HTTP_PORT/repo2 repo2_clone
 stderr '.*403.*'
 
 # go-get not found (private repo)
@@ -250,13 +257,13 @@ stdout '401.*'
 <html lang="en">
 <head>
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
-    <meta http-equiv="refresh" content="0; url=https://godoc.org/localhost:$HTTP_PORT/repo2">
-    <meta name="go-import" content="localhost:$HTTP_PORT/repo2 git http://localhost:$HTTP_PORT/repo2.git">
+    <meta http-equiv="refresh" content="0; url=https://godoc.org/127.0.0.1:$HTTP_PORT/repo2">
+    <meta name="go-import" content="127.0.0.1:$HTTP_PORT/repo2 git http://127.0.0.1:$HTTP_PORT/repo2.git">
 </head>
 <body>
-Redirecting to docs at <a href="https://godoc.org/localhost:$HTTP_PORT/repo2">godoc.org/localhost:$HTTP_PORT/repo2</a>...
+Redirecting to docs at <a href="https://godoc.org/127.0.0.1:$HTTP_PORT/repo2">godoc.org/127.0.0.1:$HTTP_PORT/repo2</a>...
 </body>
 </html>
 -- gitclone.txt --
 Cloning into 'repo2_clone'...
-fatal: could not read Username for 'http://localhost:$HTTP_PORT': terminal prompts disabled
+fatal: could not read Username for 'http://127.0.0.1:$HTTP_PORT': terminal prompts disabled

@@ -124,6 +124,7 @@ func TestScript(t *testing.T) {
 			"ensureserverrunning":    cmdEnsureServerRunning,
 			"ensureservernotrunning": cmdEnsureServerNotRunning,
 			"stopserver":             cmdStopserver,
+			"occupyipv6":             cmdOccupyIPv6,
 			"ui":                     cmdUI(admin1.Signer()),
 			"uui":                    cmdUI(user1.Signer()),
 		},
@@ -697,6 +698,32 @@ func cmdEnsureServerNotRunning(ts *testscript.TestScript, neg bool, args []strin
 		ts.Fatalf("server is running on port %s while it should not be running", port)
 		conn.Close()
 	}
+}
+
+// cmdOccupyIPv6 listens on the IPv6 loopback at the port in the given
+// environment variable and drops every connection it accepts, until the
+// script ends. It stands in for another process that holds the port on ::1
+// while the test server listens on 127.0.0.1, so a client that dials
+// "localhost" and tries ::1 first fails. Without IPv6 it does nothing.
+func cmdOccupyIPv6(ts *testscript.TestScript, neg bool, args []string) {
+	if neg || len(args) != 1 {
+		ts.Fatalf("usage: occupyipv6 PORT_ENV")
+	}
+	l, err := net.Listen("tcp", net.JoinHostPort("::1", ts.Getenv(args[0]))) //nolint:noctx
+	if err != nil {
+		ts.Logf("not occupying ::1: %v", err)
+		return
+	}
+	ts.Defer(func() { l.Close() })
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
 }
 
 func cmdStopserver(ts *testscript.TestScript, neg bool, args []string) {
