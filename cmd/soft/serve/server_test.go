@@ -3,6 +3,8 @@ package serve
 import (
 	"bytes"
 	"context"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -285,4 +287,50 @@ func TestAbortOnSignal(t *testing.T) {
 		t.Fatal("SIGTERM did not abort the wait")
 	}
 	is.True(strings.Contains(logs.String(), "not waiting for webhook deliveries"))
+}
+
+// Start returns at once when one server's port is taken, and leaves none of
+// the others listening, instead of running on with only some servers up.
+func TestStartFailsWhenAListenerCannotBind(t *testing.T) {
+	is := is.New(t)
+	ctx, cfg, be, dbx := setupTestBackendWithDB(t)
+	ctx = backend.WithContext(ctx, be)
+	ctx = db.WithContext(ctx, dbx)
+	ctx = log.WithContext(ctx, log.New(io.Discard))
+
+	taken, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
+	is.NoErr(err)
+	defer taken.Close() //nolint: errcheck
+
+	// The SSH server binds before the HTTP server, whose port is taken.
+	free, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
+	is.NoErr(err)
+	sshAddr := free.Addr().String()
+	is.NoErr(free.Close())
+
+	cfg.SSH.ListenAddr = sshAddr
+	cfg.Git.ListenAddr = "127.0.0.1:0"
+	cfg.HTTP.ListenAddr = taken.Addr().String()
+	cfg.Stats.ListenAddr = "127.0.0.1:0"
+
+	s, err := NewServer(ctx)
+	is.NoErr(err)
+
+	errc := make(chan error, 1)
+	go func() { errc <- s.Start() }()
+	select {
+	case err := <-errc:
+		if err == nil || !strings.Contains(err.Error(), "HTTP server") {
+			t.Fatalf("Start returned %v, want the HTTP server's listen error", err)
+		}
+	case <-time.After(10 * time.Second):
+		_ = s.Close()
+		t.Fatal("Start did not return although the HTTP server could not listen")
+	}
+
+	conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", sshAddr)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("SSH server still listening on %s after Start failed", sshAddr)
+	}
 }

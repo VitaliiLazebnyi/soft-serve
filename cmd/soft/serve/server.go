@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 
 	"charm.land/log/v2"
@@ -184,48 +185,54 @@ func (s *Server) ReloadCertificates() error {
 	return s.CertLoader.Reload()
 }
 
-// Start starts the SSH server.
+// Start binds the listener of every enabled server and then serves them all
+// until they stop.
+//
+// All listeners are bound before any server starts serving. If one cannot be
+// bound, for example because its port is in use, Start closes the ones
+// already bound and returns that error at once. Otherwise the process would
+// keep running with only some of its servers up, and the failed server's
+// error would surface only once all the others had stopped. It also means
+// that once any of the servers accepts connections, all of them do.
 func (s *Server) Start() error {
-	errg, _ := errgroup.WithContext(s.ctx)
-
-	// optionally start the SSH server
+	type service struct {
+		name   string
+		addr   string
+		serve  func(net.Listener) error
+		closed error // the error serve returns after a shutdown
+	}
+	var services []service
 	if s.Config.SSH.Enabled {
-		errg.Go(func() error {
-			s.logger.Print("Starting SSH server", "addr", s.Config.SSH.ListenAddr)
-			if err := s.SSHServer.ListenAndServe(); !errors.Is(err, ssh.ErrServerClosed) {
-				return err
-			}
-			return nil
-		})
+		services = append(services, service{"SSH server", s.Config.SSH.ListenAddr, s.SSHServer.Serve, ssh.ErrServerClosed})
 	}
-
-	// optionally start the git daemon
 	if s.Config.Git.Enabled {
-		errg.Go(func() error {
-			s.logger.Print("Starting Git daemon", "addr", s.Config.Git.ListenAddr)
-			if err := s.GitDaemon.ListenAndServe(); !errors.Is(err, daemon.ErrServerClosed) {
-				return err
-			}
-			return nil
-		})
+		services = append(services, service{"Git daemon", s.Config.Git.ListenAddr, s.GitDaemon.Serve, daemon.ErrServerClosed})
 	}
-
-	// optionally start the HTTP server
 	if s.Config.HTTP.Enabled {
-		errg.Go(func() error {
-			s.logger.Print("Starting HTTP server", "addr", s.Config.HTTP.ListenAddr)
-			if err := s.HTTPServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-				return err
-			}
-			return nil
-		})
+		services = append(services, service{"HTTP server", s.Config.HTTP.ListenAddr, s.HTTPServer.Serve, http.ErrServerClosed})
+	}
+	if s.Config.Stats.Enabled {
+		services = append(services, service{"Stats server", s.Config.Stats.ListenAddr, s.StatsServer.Serve, http.ErrServerClosed})
 	}
 
-	// optionally start the Stats server
-	if s.Config.Stats.Enabled {
+	listeners := make([]net.Listener, 0, len(services))
+	for _, svc := range services {
+		l, err := (&net.ListenConfig{}).Listen(s.ctx, "tcp", svc.addr)
+		if err != nil {
+			for _, l := range listeners {
+				_ = l.Close()
+			}
+			return fmt.Errorf("start %s: %w", svc.name, err)
+		}
+		listeners = append(listeners, l)
+	}
+
+	errg, _ := errgroup.WithContext(s.ctx)
+	for i, svc := range services {
+		l := listeners[i]
 		errg.Go(func() error {
-			s.logger.Print("Starting Stats server", "addr", s.Config.Stats.ListenAddr)
-			if err := s.StatsServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			s.logger.Print("Starting "+svc.name, "addr", svc.addr)
+			if err := svc.serve(l); !errors.Is(err, svc.closed) {
 				return err
 			}
 			return nil
