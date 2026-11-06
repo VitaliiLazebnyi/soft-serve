@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -116,8 +117,16 @@ func parseAllowedHost(raw string) (allowedHost, error) {
 // net.Resolver.LookupIPAddr.
 type lookupFunc func(ctx context.Context, host string) ([]net.IPAddr, error)
 
+// lookupTimeout bounds every hostname lookup made through resolve, whatever
+// the caller's context, so a slow resolver cannot stall an import, a mirror
+// sync, or a webhook save indefinitely.
+const lookupTimeout = 10 * time.Second
+
 // resolve looks host up with f, or with net.DefaultResolver when f is nil.
+// The lookup is bounded by ctx and by lookupTimeout.
 func (f lookupFunc) resolve(ctx context.Context, host string) ([]net.IPAddr, error) {
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
 	if f == nil {
 		return net.DefaultResolver.LookupIPAddr(ctx, host)
 	}
