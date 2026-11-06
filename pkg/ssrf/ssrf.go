@@ -97,9 +97,8 @@ func secureDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	skipped := 0
+	total := len(ips)
 	if len(ips) > maxDialAddrs {
-		skipped = len(ips) - maxDialAddrs
 		ips = ips[:maxDialAddrs]
 	}
 
@@ -123,16 +122,33 @@ func secureDial(ctx context.Context, network, addr string) (net.Conn, error) {
 
 	// Only the first failure is kept: the message is stored with every
 	// webhook delivery, so it must not grow with the number of addresses.
-	switch {
-	case failed == 0:
+	// Untried addresses are those past the cap and those the loop never
+	// reached because the budget (or the caller's deadline) ran out.
+	if failed == 0 {
 		return nil, fmt.Errorf("connect to %s: %w", host, ctx.Err())
-	case failed == 1 && skipped == 0:
-		return nil, firstErr
-	case skipped == 0:
-		return nil, fmt.Errorf("connect to %s: %d addresses failed; first: %w", host, failed, firstErr)
-	default:
-		return nil, fmt.Errorf("connect to %s: %d addresses failed, %d more not tried; first: %w", host, failed, skipped, firstErr)
 	}
+	untried := total - failed
+	if untried == 0 {
+		if failed == 1 {
+			return nil, firstErr
+		}
+		return nil, fmt.Errorf("connect to %s: %d addresses failed; first: %w", host, failed, firstErr)
+	}
+	if failed < len(ips) {
+		// The loop stopped early: say why.
+		return nil, fmt.Errorf("connect to %s: %s failed, %d more not tried: %w; first: %w",
+			host, plural(failed, "address", "addresses"), untried, ctx.Err(), firstErr)
+	}
+	return nil, fmt.Errorf("connect to %s: %s failed, %d more not tried; first: %w",
+		host, plural(failed, "address", "addresses"), untried, firstErr)
+}
+
+// plural formats n with the singular or plural noun.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 // resolveDialTargets returns the addresses secureDial may dial for host, in

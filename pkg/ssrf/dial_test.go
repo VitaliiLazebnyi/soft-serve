@@ -276,6 +276,44 @@ func TestSecureDialDeadlines(t *testing.T) {
 	})
 }
 
+// TestSecureDialBudgetRunsOut checks the error when the time runs out
+// before every address in the cap is dialed: the addresses never reached
+// count as untried, and the deadline is named as the reason.
+func TestSecureDialBudgetRunsOut(t *testing.T) {
+	fakeResolver(t, map[string][]string{
+		"slow.example": {"140.82.112.1", "140.82.112.2", "140.82.112.3", "140.82.112.4", "140.82.112.5"},
+	})
+	var dialed []string
+	orig := dialContext
+	dialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		<-ctx.Done() // hang until the attempt's deadline
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: ctx.Err()}
+	}
+	t.Cleanup(func() { dialContext = orig })
+
+	// Shorter than minDialAttempt, so the first attempt takes it all.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err := secureDial(ctx, "tcp", "slow.example:443")
+	if err == nil {
+		t.Fatal("secureDial() succeeded with every address hanging")
+	}
+	if len(dialed) != 1 {
+		t.Fatalf("dialed %v, want only the first address", dialed)
+	}
+	if want := "1 address failed, 4 more not tried: context deadline exceeded; first:"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not mention %q", err, want)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error %v does not wrap context.DeadlineExceeded", err)
+	}
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		t.Errorf("error %v does not wrap the dial error", err)
+	}
+}
+
 // TestSecureClientFailover drives secureDial through NewSecureClient, the
 // way webhooks use it: the first address refuses, the second serves.
 func TestSecureClientFailover(t *testing.T) {
