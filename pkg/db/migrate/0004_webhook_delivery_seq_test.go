@@ -5,27 +5,33 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/soft-serve/pkg/config"
+	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/internal/test"
 	"github.com/google/uuid"
 )
 
 // The sequence migration applies to a database that already holds
-// deliveries, numbers them by created_at and then insertion order, and later
-// inserts continue the sequence.
+// deliveries, numbers them by created_at and then insertion order (SQLite) or
+// id (Postgres), and later inserts continue the sequence without reusing
+// numbers. Rolling it back keeps the rows, and migrating up again renumbers
+// them the same way. The test runs on Postgres when SOFT_SERVE_DB_DRIVER is
+// "postgres".
 func TestWebhookDeliverySeqBackfill(t *testing.T) {
 	ctx := config.WithContext(context.TODO(), config.DefaultConfig())
-	dbx, err := test.OpenSqlite(ctx, t)
+	dbx, err := test.Open(ctx, t)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Migrate up to, but not including, the sequence migration.
+	// Migrate up to, but not including, the sequence migration. Later
+	// migrations stay out of the test so that Rollback undoes this one.
 	all := migrations
 	t.Cleanup(func() { migrations = all })
 	migrations = all[:webhookDeliverySeqVersion-1]
 	if err := Migrate(ctx, dbx); err != nil {
 		t.Fatalf("Migrate() before seq => %v", err)
 	}
+	migrations = all[:webhookDeliverySeqVersion]
 
 	mustExec := func(q string, args ...any) {
 		t.Helper()
@@ -33,50 +39,114 @@ func TestWebhookDeliverySeqBackfill(t *testing.T) {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
-	mustExec(`INSERT INTO users (id, username, admin, updated_at) VALUES (100, 'u', 0, CURRENT_TIMESTAMP)`)
+	mustExec(`INSERT INTO users (id, username, admin, updated_at) VALUES (100, 'u', false, CURRENT_TIMESTAMP)`)
 	mustExec(`INSERT INTO repos (id, name, project_name, description, private, mirror, hidden, user_id, updated_at)
-		VALUES (1, 'r', 'r', '', 0, 0, 0, 100, CURRENT_TIMESTAMP)`)
+		VALUES (1, 'r', 'r', '', false, false, false, 100, CURRENT_TIMESTAMP)`)
 	mustExec(`INSERT INTO webhooks (id, repo_id, url, secret, content_type, active, updated_at)
-		VALUES (1, 1, 'https://example.com', '', 0, 1, CURRENT_TIMESTAMP)`)
+		VALUES (1, 1, 'https://example.com', '', 0, true, CURRENT_TIMESTAMP)`)
+
+	insert := func(id uuid.UUID, createdAt string) {
+		t.Helper()
+		if createdAt == "" {
+			mustExec(`INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_headers, request_body, response_status, response_headers, response_body)
+				VALUES (?, 1, 1, 'https://example.com', 'POST', '', '{}', 200, '', '')`, id)
+			return
+		}
+		mustExec(`INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_headers, request_body, response_status, response_headers, response_body, created_at)
+			VALUES (?, 1, 1, 'https://example.com', 'POST', '', '{}', 200, '', '', ?)`, id, createdAt)
+	}
 
 	// Rows in insertion order. The first two share a second, and the third
-	// is older than both.
+	// is older than both. The first id sorts after the second, so SQLite
+	// (insertion order) and Postgres (id order) break the tie differently.
 	rows := []struct {
 		id        uuid.UUID
 		createdAt string
 	}{
-		{uuid.New(), "2024-01-01 00:00:05"},
-		{uuid.New(), "2024-01-01 00:00:05"},
+		{uuid.MustParse("ffffffff-ffff-4fff-bfff-ffffffffffff"), "2024-01-01 00:00:05"},
+		{uuid.MustParse("00000000-0000-4000-8000-000000000001"), "2024-01-01 00:00:05"},
 		{uuid.New(), "2024-01-01 00:00:01"},
 	}
 	for _, r := range rows {
-		mustExec(`INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_headers, request_body, response_status, response_headers, response_body, created_at)
-			VALUES (?, 1, 1, 'https://example.com', 'POST', '', '{}', 200, '', '', ?)`, r.id, r.createdAt)
+		insert(r.id, r.createdAt)
+	}
+	backfilled := []uuid.UUID{rows[2].id, rows[0].id, rows[1].id}
+	if dbx.DriverName() == "postgres" {
+		backfilled = []uuid.UUID{rows[2].id, rows[1].id, rows[0].id}
 	}
 
-	migrations = all
-	if err := Migrate(ctx, dbx); err != nil {
-		t.Fatalf("Migrate() seq => %v", err)
-	}
-
-	newID := uuid.New()
-	mustExec(`INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_headers, request_body, response_status, response_headers, response_body)
-		VALUES (?, 1, 1, 'https://example.com', 'POST', '', '{}', 200, '', '')`, newID)
-
-	var got []struct {
+	type delivery struct {
 		ID  uuid.UUID `db:"id"`
 		Seq int64     `db:"seq"`
 	}
-	if err := dbx.SelectContext(ctx, &got, `SELECT id, seq FROM webhook_deliveries ORDER BY seq`); err != nil {
-		t.Fatal(err)
-	}
-	want := []uuid.UUID{rows[2].id, rows[0].id, rows[1].id, newID}
-	if len(got) != len(want) {
-		t.Fatalf("got %d rows, want %d", len(got), len(want))
-	}
-	for i, g := range got {
-		if g.ID != want[i] || g.Seq != int64(i+1) {
-			t.Errorf("row %d = (%s, %d), want (%s, %d)", i, g.ID, g.Seq, want[i], i+1)
+	check := func(want []delivery) {
+		t.Helper()
+		var got []delivery
+		if err := dbx.SelectContext(ctx, &got, `SELECT id, seq FROM webhook_deliveries ORDER BY seq`); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("got %d rows %v, want %d %v", len(got), got, len(want), want)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("row %d = %v, want %v", i, got[i], want[i])
+			}
 		}
 	}
+	numbered := func(ids ...uuid.UUID) []delivery {
+		out := make([]delivery, len(ids))
+		for i, id := range ids {
+			out[i] = delivery{id, int64(i + 1)}
+		}
+		return out
+	}
+
+	for _, round := range []string{"first", "after rollback"} {
+		if err := Migrate(ctx, dbx); err != nil {
+			t.Fatalf("%s: Migrate() seq => %v", round, err)
+		}
+		check(numbered(backfilled...))
+
+		// A new row continues the sequence.
+		next := uuid.New()
+		insert(next, "")
+		want := append(numbered(backfilled...), delivery{next, 4})
+		check(want)
+
+		// Deleting the newest row does not free its number.
+		mustExec(`DELETE FROM webhook_deliveries WHERE id = ?`, next)
+		after := uuid.New()
+		insert(after, "")
+		check(append(numbered(backfilled...), delivery{after, 5}))
+
+		if err := Rollback(ctx, dbx); err != nil {
+			t.Fatalf("%s: Rollback() => %v", round, err)
+		}
+		if hasColumn(ctx, t, dbx, "webhook_deliveries", "seq") {
+			t.Fatalf("%s: seq column still there after rollback", round)
+		}
+		var n int
+		if err := dbx.GetContext(ctx, &n, `SELECT COUNT(*) FROM webhook_deliveries`); err != nil {
+			t.Fatal(err)
+		}
+		if n != 4 {
+			t.Fatalf("%s: %d rows after rollback, want 4", round, n)
+		}
+		// Back to the original rows for the next round.
+		mustExec(`DELETE FROM webhook_deliveries WHERE id = ?`, after)
+	}
+}
+
+func hasColumn(ctx context.Context, t *testing.T, dbx *db.DB, table, column string) bool {
+	t.Helper()
+	var n int
+	q := `SELECT COUNT(*) FROM information_schema.columns WHERE table_name = ? AND column_name = ?`
+	if dbx.DriverName() != "postgres" {
+		q = `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`
+	}
+	if err := dbx.GetContext(ctx, &n, dbx.Rebind(q), table, column); err != nil {
+		t.Fatal(err)
+	}
+	return n > 0
 }
