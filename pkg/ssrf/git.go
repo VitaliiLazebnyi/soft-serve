@@ -209,6 +209,11 @@ func validateRemoteHost(host string, lookup lookupFunc) (netip.Addr, error) {
 		}
 	}
 
+	// Every answer was checked above, so pinning any one of them is safe.
+	// Only the first is pinned: libcurl accepts a list in CURLOPT_RESOLVE
+	// only from 7.59, and an older one drops an entry it cannot parse, which
+	// would leave git to resolve the name itself. Losing failover between
+	// records is the better trade than risking an unpinned fetch.
 	addr, ok := netip.AddrFromSlice(ips[0].IP)
 	if !ok {
 		return netip.Addr{}, fmt.Errorf("%w: unusable address for hostname", ErrInvalidURL)

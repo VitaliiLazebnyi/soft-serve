@@ -22,7 +22,11 @@ func mustAllowedHosts(t *testing.T, entries ...string) AllowedHosts {
 // handed to the code under test explicitly rather than swapped into package
 // state, so tests using it are safe to run in parallel.
 func fakeLookup(table map[string][]string) lookupFunc {
-	return func(_ context.Context, host string) ([]net.IPAddr, error) {
+	return func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		// Like the real resolver, fail once the context is done.
+		if err := ctx.Err(); err != nil {
+			return nil, &net.DNSError{Err: err.Error(), Name: host}
+		}
 		ips, ok := table[host]
 		if !ok {
 			return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
@@ -33,6 +37,23 @@ func fakeLookup(table map[string][]string) lookupFunc {
 		}
 		return out, nil
 	}
+}
+
+// fakeResolver points the secure dialer's resolver at a fixed table for the
+// rest of the test. It swaps package state, so tests using it must not run in
+// parallel.
+func fakeResolver(t *testing.T, table map[string][]string) {
+	t.Helper()
+	setDialLookup(t, fakeLookup(table))
+}
+
+// setDialLookup replaces the secure dialer's resolver for the rest of the
+// test. It swaps package state, so tests using it must not run in parallel.
+func setDialLookup(t *testing.T, f lookupFunc) {
+	t.Helper()
+	orig := dialLookup
+	dialLookup = f
+	t.Cleanup(func() { dialLookup = orig })
 }
 
 func TestAllowedHostsMatch(t *testing.T) {
