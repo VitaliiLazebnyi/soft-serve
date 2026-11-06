@@ -465,7 +465,8 @@ func TestUpdateHookInvalidPublicKey(t *testing.T) {
 	is.Equal(len(e.deliveredEvents(t, id)), 0)
 }
 
-// An unknown public key stops the hook before any event is sent.
+// A public key with no user row, such as an initial_admin_keys entry with no
+// account, still sends the event: the SSH layer authorized the push.
 func TestUpdateHookUnknownPublicKey(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
@@ -477,7 +478,7 @@ func TestUpdateHookUnknownPublicKey(t *testing.T) {
 		OldSha: zeroSha, NewSha: someSha, RefName: "refs/heads/feature",
 	})
 
-	is.Equal(len(e.deliveredEvents(t, id)), 0)
+	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventBranchTagCreate})
 }
 
 // Collaborator changes validate the username before anything is written.

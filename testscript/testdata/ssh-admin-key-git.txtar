@@ -1,0 +1,120 @@
+# vi: set ft=conf
+
+# A key in initial_admin_keys that no account holds is a server admin over
+# SSH git transport too, not only for soft commands. Other keys keep their
+# own access, and LFS locks, which need an account, are refused cleanly for
+# callers without one.
+
+# enable ssh lfs transfer
+env SOFT_SERVE_LFS_SSH_ENABLED=true
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# user1 owns a private repo and a public repo, each with one commit
+soft user create user1 -k "$USER1_AUTHORIZED_KEY"
+usoft repo create upriv -p
+ugit clone ssh://localhost:$SSH_PORT/upriv upriv
+mkfile ./upriv/README.md '# upriv'
+ugit -C upriv add -A
+ugit -C upriv commit -m 'first'
+ugit -C upriv push origin HEAD
+usoft repo create upub
+ugit clone ssh://localhost:$SSH_PORT/upub upub
+mkfile ./upub/README.md '# upub'
+ugit -C upub add -A
+ugit -C upub commit -m 'first'
+ugit -C upub push origin HEAD
+
+# an unregistered key can clone the public repo, but locks belong to an
+# account, so its lock commands are refused, not crashed
+agit clone ssh://localhost:$SSH_PORT/upub apub
+exists apub/README.md
+! agit -C apub lfs locks
+stderr 'forbidden'
+
+# a non-admin key can't read the private repo
+soft user create attacker -k "$ATTACKER_AUTHORIZED_KEY"
+! agit clone ssh://localhost:$SSH_PORT/upriv xpriv
+stderr 'invalid repo'
+! exists xpriv/README.md
+
+# the admin1 key stays listed in the config but no longer has an account,
+# as when the server has admins but none named admin
+soft user create boss --admin
+soft user delete admin
+! soft user info admin
+
+# the admin key can fetch and push a private repo it has no account for
+git clone ssh://localhost:$SSH_PORT/upriv apriv
+exists apriv/README.md
+mkfile ./apriv/ADMIN.md '# admin'
+git -C apriv add -A
+git -C apriv commit -m 'admin'
+git -C apriv push origin HEAD
+git -C apriv archive --remote=ssh://localhost:$SSH_PORT/upriv HEAD -o out.tar
+
+# git-lfs-transfer stays on SSH and keeps the admin key's access
+soft git-lfs-transfer upriv download
+stdout '000eversion=1\n000clocking\n0000'
+soft git-lfs-transfer upriv upload
+stdout '000eversion=1\n000clocking\n0000'
+
+# locks belong to an account, so a key with none is refused, not crashed
+! git -C apriv lfs lock README.md
+stderr 'forbidden'
+! git -C apriv lfs locks
+stderr 'forbidden'
+
+# git-lfs-authenticate issues a token for an account, which this key lacks
+! soft git-lfs-authenticate upriv download
+stderr 'not authorized'
+! soft git-lfs-authenticate upriv upload
+stderr 'not authorized'
+
+# the admin key can still push-to-create
+mkdir anew
+git -C anew init
+mkfile ./anew/README.md '# anew'
+git -C anew add -A
+git -C anew commit -m 'first'
+git -C anew remote add origin ssh://localhost:$SSH_PORT/anew
+git -C anew push origin HEAD
+soft repo info anew
+stdout 'Repository: anew'
+
+# the owner sees the admin key's push
+ugit -C upriv pull origin master
+exists upriv/ADMIN.md
+
+# its pushes to an existing repo send webhooks, with an empty sender
+new-webhook WH_UPRIV
+soft repo webhook create upriv $WH_UPRIV -e push
+git -C apriv pull origin master
+mkfile ./apriv/NOACCT.md '# no account'
+git -C apriv add -A
+git -C apriv commit -m 'no account'
+git -C apriv push origin HEAD
+soft repo webhook deliver list upriv 1
+stdout '✅.*push'
+! stdout '❌'
+webhook-received
+stdout 'push /hooks/WH_UPRIV'
+
+# a listed key attached to a non-admin account is refused outright, git
+# transport included, until that account is made an admin
+soft user create holder
+soft user add-pubkey holder "$ADMIN1_AUTHORIZED_KEY"
+! git clone ssh://localhost:$SSH_PORT/upriv hpriv
+stderr 'attached to non-admin account'
+! exists hpriv/README.md
+
+# other keys are unaffected (this also leaves stderr empty for the windows
+# check below)
+usoft repo info upriv
+stdout 'Repository: upriv'
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .

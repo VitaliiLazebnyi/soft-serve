@@ -305,7 +305,9 @@ jobs:
 stats:
   # The address on which the stats server will listen.
   listen_addr: ":23233"
-# Additional admin keys.
+# Additional admin keys. A listed key that no account holds is still a
+# server admin over SSH, git transport included, but it can't take LFS locks
+# or get an HTTP LFS token (git-lfs-authenticate): both need an account.
 #initial_admin_keys:
 #  - "ssh-rsa AAAAB3NzaC1yc2..."
 
