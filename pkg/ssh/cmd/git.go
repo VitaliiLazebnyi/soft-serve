@@ -329,6 +329,9 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 			// a token the HTTP endpoint will reject. git-lfs-transfer stays
 			// on SSH and keeps the admin key's access.
 			repo, accessLevel = be.Readable(ctx, name, user)
+			// Keep the context in step with the repo checked here, so the
+			// handler never sees the one readableRepo looked up.
+			ctx = proto.WithRepositoryContext(ctx, repo)
 		}
 
 		if err := gitAccess(user, repo, accessLevel, need); err != nil {
