@@ -97,6 +97,7 @@ func TestScript(t *testing.T) {
 		Cmds: map[string]func(ts *testscript.TestScript, neg bool, args []string){
 			"soft":                   cmdSoft("admin", admin1.Signer()),
 			"usoft":                  cmdSoft("user1", user1.Signer()),
+			"a2soft":                 cmdSoft("admin2", admin2.Signer()),
 			"attacksoft":             cmdSoft("attacker", attackerSigner, attacker.Signer()),
 			"ksoft":                  cmdKeylessSoft,
 			"git":                    cmdGit(admin1Key),

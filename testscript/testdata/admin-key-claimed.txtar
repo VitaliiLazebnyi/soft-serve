@@ -1,0 +1,73 @@
+# vi: set ft=conf
+
+# FIXME: don't skip windows
+[windows] skip 'curl makes github actions hang'
+
+# A key in initial_admin_keys that is owned by a non-admin account does not
+# make sessions with that key act as that account. `pubkey add` takes any
+# public key without proof of holding its private half, so user1 can claim
+# admin2's public key before an operator lists it. When admin2 later logs in
+# with that key, the session must not belong to user1, or user1 would own
+# (and have admin access to) every repository admin2 creates.
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# user1 claims admin2's public key, which is not an admin key yet
+soft user create user1 --key "$USER1_AUTHORIZED_KEY"
+usoft pubkey add "$ADMIN2_AUTHORIZED_KEY"
+usoft token create 'read'
+stdout 'ss_*'
+cp stdout utokenfile
+envfile UTOKEN=utokenfile
+
+# before it is listed, the key simply belongs to user1
+a2soft info
+stdout 'Username: user1'
+
+# the operator now lists admin2's key as an admin key
+stopserver
+ensureservernotrunning SSH_PORT
+env SOFT_SERVE_INITIAL_ADMIN_KEYS=$ADMIN2_AUTHORIZED_KEY
+exec soft serve &
+ensureserverrunning SSH_PORT
+
+# admin2's sessions are not user1's: no account, admin by key only
+! a2soft info
+stderr 'user not found'
+! a2soft token create 'stolen'
+! a2soft pubkey list
+
+# admin2 creates a private repository with the admin key
+a2soft repo create secret -p
+a2soft repo private secret
+stdout 'true'
+
+# user1 got nothing from it, over SSH or HTTP
+! usoft repo private secret
+! usoft repo private secret false
+! usoft repo collab add secret user1
+curl http://$UTOKEN@localhost:$HTTP_PORT/secret.git/info/refs?service=git-upload-pack
+! stdout '.*git-upload-pack.*'
+
+# the server admin sees it, and user1 is not a collaborator
+soft repo private secret
+stdout 'true'
+soft repo collab list secret
+! stdout 'user1'
+
+# the legitimate case: once the key is moved to an admin account, sessions
+# with it act as that account
+soft user remove-pubkey user1 "$ADMIN2_AUTHORIZED_KEY"
+soft user create admin2 --admin --key "$ADMIN2_AUTHORIZED_KEY"
+a2soft info
+stdout 'Username: admin2'
+stdout 'Admin: true'
+a2soft repo create mine -p
+! usoft repo private mine
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .

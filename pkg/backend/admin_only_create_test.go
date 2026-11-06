@@ -321,3 +321,52 @@ func TestHTTPAdminOnlyByAdminFlag(t *testing.T) {
 		is.NoErr(err)
 	}
 }
+
+// A key listed in initial_admin_keys that a non-admin account owns does not
+// resolve to that account: the owner may have claimed it with `pubkey add`
+// before it was listed, and the key holder's session would otherwise act as
+// them (and own what it creates). The key keeps admin access with no
+// account. A listed key owned by an admin account resolves as before, and
+// unlisting the key restores the ordinary lookup.
+func TestListedAdminKeyOwnedByNonAdminHasNoAccount(t *testing.T) {
+	is := is.New(t)
+	be, cfg := newTestBackend(t)
+	ctx := backendTestContext(be, cfg)
+
+	claimed := newTestPublicKey(t)
+	_, err := be.CreateUser(ctx, "mallory", proto.UserOptions{PublicKeys: []ssh.PublicKey{claimed}})
+	is.NoErr(err)
+	bossKey := newTestPublicKey(t)
+	_, err = be.CreateUser(ctx, "boss", proto.UserOptions{Admin: true, PublicKeys: []ssh.PublicKey{bossKey}})
+	is.NoErr(err)
+
+	u, err := be.UserByPublicKey(ctx, claimed)
+	is.NoErr(err)
+	is.Equal(u.Username(), "mallory")
+
+	orig := cfg.InitialAdminKeys
+	cfg.InitialAdminKeys = append(append([]string{}, orig...),
+		sshutils.MarshalAuthorizedKey(claimed), sshutils.MarshalAuthorizedKey(bossKey))
+
+	_, err = be.UserByPublicKey(ctx, claimed)
+	is.True(errors.Is(err, proto.ErrUserNotFound))
+	is.Equal(be.BaseAccessLevelByPublicKey(ctx, claimed), access.AdminAccess)
+
+	// A private repository made with the key goes to the default admin,
+	// and mallory gets nothing on it.
+	r, err := be.CreateRepository(ctx, "secret", nil, proto.RepositoryOptions{Private: true})
+	is.NoErr(err)
+	mallory, err := be.User(ctx, "mallory")
+	is.NoErr(err)
+	is.True(r.UserID() != mallory.ID())
+	is.Equal(be.AccessLevelForUser(ctx, "secret", mallory), access.NoAccess)
+
+	u, err = be.UserByPublicKey(ctx, bossKey)
+	is.NoErr(err)
+	is.Equal(u.Username(), "boss")
+
+	cfg.InitialAdminKeys = orig
+	u, err = be.UserByPublicKey(ctx, claimed)
+	is.NoErr(err)
+	is.Equal(u.Username(), "mallory")
+}

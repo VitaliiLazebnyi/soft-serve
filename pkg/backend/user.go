@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,9 +25,28 @@ func (d *Backend) AccessLevel(ctx context.Context, repo string, username string)
 	return d.AccessLevelForUser(ctx, repo, user)
 }
 
+// adminKeyList returns the parsed initial_admin_keys. config.AdminKeys
+// parses every entry (trying each as a file first) on every call, and this
+// runs for every SSH session and access check, so the result is cached and
+// rebuilt only when the configured list changes. Config.Validate has
+// already replaced file paths with the keys they held.
+func (d *Backend) adminKeyList() []ssh.PublicKey {
+	d.adminKeysMu.Lock()
+	defer d.adminKeysMu.Unlock()
+	if !d.adminKeysOK || !slices.Equal(d.adminKeysSrc, d.cfg.InitialAdminKeys) {
+		d.adminKeysSrc = slices.Clone(d.cfg.InitialAdminKeys)
+		d.adminKeys = d.cfg.AdminKeys()
+		d.adminKeysOK = true
+	}
+	return d.adminKeys
+}
+
 // isAdminKey reports whether pk is one of the configured admin keys.
 func (d *Backend) isAdminKey(pk ssh.PublicKey) bool {
-	for _, k := range d.cfg.AdminKeys() {
+	if pk == nil {
+		return false
+	}
+	for _, k := range d.adminKeyList() {
 		if sshutils.KeysEqual(pk, k) {
 			return true
 		}
@@ -273,6 +293,19 @@ func (d *Backend) UserByPublicKey(ctx context.Context, pk ssh.PublicKey) (proto.
 		}
 		d.logger.Error("error finding user", "pk", sshutils.MarshalAuthorizedKey(pk), "error", err)
 		return nil, err
+	}
+
+	// A key listed in initial_admin_keys but owned by a non-admin account
+	// does not log in as that account. `pubkey add` takes a public key
+	// without proof of holding its private half, so the owner may have
+	// claimed someone else's key before it was listed. Acting as the
+	// owner would hand them every repository the key holder creates.
+	// The key keeps its admin rights from the config, with no account,
+	// like a listed key that is in no account at all.
+	if !m.Admin && d.isAdminKey(pk) {
+		d.logger.Warn("admin key is owned by a non-admin account; not using that account for the session",
+			"username", m.Username, "pk", sshutils.MarshalAuthorizedKey(pk))
+		return nil, proto.ErrUserNotFound
 	}
 
 	return &user{

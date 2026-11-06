@@ -58,7 +58,7 @@ stdout '401.*'
 # while listed, a non-admin cannot attach the key to their account
 usoft pubkey remove "$ADMIN2_AUTHORIZED_KEY"
 ! usoft pubkey add "$ADMIN2_AUTHORIZED_KEY"
-stderr 'duplicate key'
+stderr 'listed in initial_admin_keys'
 
 # the account with the admin flag creates by push over HTTP
 curl http://$ATOKEN@localhost:$HTTP_PORT/admin-made.git/info/refs?service=git-receive-pack
