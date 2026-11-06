@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -112,13 +113,16 @@ var (
 				lch <- s.Start()
 			}()
 
+			// serverErr is the error the server stopped with. It is returned
+			// only after the shutdown, which runs either way.
+			var serverErr error
 			for {
 				select {
 				case err := <-lch:
 					if err != nil {
-						return fmt.Errorf("server error: %w", err)
+						serverErr = fmt.Errorf("server error: %w", err)
 					}
-					// Server exited cleanly; shut down
+					// Server exited; shut down
 					goto shutdown
 				case sig := <-done:
 					if sig == syscall.SIGHUP {
@@ -143,7 +147,10 @@ var (
 			defer stopWaiting()
 			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			if err := s.Shutdown(ctx, abort); err != nil {
+			if err := errors.Join(serverErr, s.Shutdown(ctx, abort)); err != nil {
+				// Cobra does not run PersistentPostRunE when RunE fails, so
+				// close the database here.
+				_ = cmd.CloseDBContext(c, nil)
 				return err
 			}
 
