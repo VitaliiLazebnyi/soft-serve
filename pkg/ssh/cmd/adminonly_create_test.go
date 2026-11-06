@@ -102,9 +102,9 @@ func TestAdminKeyCreatesRepositoriesWhenFlagOn(t *testing.T) {
 
 // `pubkey add` takes any public key without proof of holding its private
 // half, so a non-admin may not attach a key listed in initial_admin_keys to
-// their own account. The refusal is the same error as for a key another
-// account owns, so it does not reveal which keys are admin keys. A server
-// admin may attach it, and ordinary keys are unaffected.
+// their own account. The refusal says the key is listed, so a new admin
+// knows to ask an admin. A key another account owns is still a duplicate.
+// A server admin may attach a listed key, and ordinary keys are unaffected.
 func TestPubkeyAddRefusesAdminKeyForNonAdmin(t *testing.T) {
 	is := is.New(t)
 	newKey := func() gossh.PublicKey {
@@ -136,7 +136,7 @@ func TestPubkeyAddRefusesAdminKeyForNonAdmin(t *testing.T) {
 	}
 
 	workerCtx := session("worker", false)
-	is.True(errors.Is(runPubkey(workerCtx, "add", sshutils.MarshalAuthorizedKey(adminPub)), db.ErrDuplicateKey))
+	is.True(errors.Is(runPubkey(workerCtx, "add", sshutils.MarshalAuthorizedKey(adminPub)), errListedAdminKey))
 	taken := newKey()
 	_, err := be.CreateUser(ctx, "other", proto.UserOptions{PublicKeys: []gossh.PublicKey{taken}})
 	is.NoErr(err)

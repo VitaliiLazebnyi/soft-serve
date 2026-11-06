@@ -557,6 +557,21 @@ ssh -p 23231 localhost set-username yolo
 ssh -p 23231 localhost info
 ```
 
+`pubkey add` does not ask for proof that you hold the key's private half, so
+keys listed in `initial_admin_keys` get extra care:
+
+- Only an admin can attach a listed key to an account (`user add-pubkey
+  USERNAME KEY`). A non-admin running `pubkey add` with one gets an error
+  saying the key is listed in `initial_admin_keys`. If you are a new admin
+  whose key was just listed, ask an existing admin to attach it, or log in
+  with that key: it already has admin rights from the config.
+- If a listed key belongs to a non-admin account (for example, someone
+  added it before it was listed), sessions with that key do not act as that
+  account. They are admin by key with no account, the server logs a warning,
+  and repositories created that way are owned by the first admin account.
+  To fix it, move the key with `user remove-pubkey` and `user add-pubkey`,
+  or make the account an admin.
+
 ## Repositories
 
 You can manage repositories using the `repo` command.
