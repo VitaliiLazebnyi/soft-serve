@@ -374,6 +374,10 @@ func (d *Backend) UserByAccessToken(ctx context.Context, token string) (proto.Us
 		if errors.Is(err, db.ErrRecordNotFound) {
 			return nil, proto.ErrUserNotFound
 		}
+		// An expired token is a failed login, not a server error.
+		if errors.Is(err, proto.ErrTokenExpired) {
+			return nil, err
+		}
 		d.logger.Error("failed to find user by access token", "err", err)
 		return nil, err
 	}
