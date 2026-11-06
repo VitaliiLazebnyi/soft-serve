@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -20,7 +21,10 @@ import (
 	"testing/iotest"
 	"time"
 
+	"charm.land/log/v2"
+	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
+	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/google/uuid"
 	"github.com/matryer/is"
 )
@@ -611,6 +615,35 @@ func TestRecordedDeliveriesPruneIgnoresIDOrder(t *testing.T) {
 	is.Equal(len(ds), 2)
 	is.Equal(ds[0].ID, ids[1])
 	is.Equal(ds[1].ID, ids[2])
+}
+
+// failingPruneStore is a store whose prune always fails.
+type failingPruneStore struct{ store.Store }
+
+func (failingPruneStore) PruneWebhookDeliveries(context.Context, db.Handler, int64, int) error {
+	return errors.New("prune failed")
+}
+
+// A failed prune rolls back the transaction it shares with the insert, but
+// must not lose the delivery: it is recorded again without pruning, and the
+// failure is logged through the context's logger.
+func TestRecordDeliveryKeepsDeliveryWhenPruneFails(t *testing.T) {
+	is := is.New(t)
+	e := newTestEnv(t)
+	w := e.newWebhook(t, "https://93.184.216.34/a", "", ContentTypeJSON, EventPush)
+	var logs bytes.Buffer
+	ctx := store.WithContext(e.ctx, failingPruneStore{e.ds})
+	ctx = log.WithContext(ctx, log.New(&logs))
+
+	req, err := newRequest(w, EventPush, samplePayloadFor(e))
+	is.NoErr(err)
+	is.NoErr(recordDelivery(ctx, w, EventPush, req, nil, 200, "", ""))
+
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.Equal(ds[0].ID, req.id)
+	is.True(strings.Contains(logs.String(), "pruning webhook deliveries"))
+	is.True(strings.Contains(logs.String(), "prune failed"))
 }
 
 // Deliver re-reads each webhook before sending, so an event that waited while

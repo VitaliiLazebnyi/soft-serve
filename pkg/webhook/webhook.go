@@ -210,12 +210,14 @@ func recordDelivery(ctx context.Context, w models.Webhook, event Event, req requ
 
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	if err := datastore.CreateWebhookDelivery(rctx, dbx, req.id, w.ID, int(event), w.URL, http.MethodPost, reqErr, reqHeaders, req.body, resStatus, resHeaders, resBody); err != nil {
-		return db.WrapError(err)
+	create := func(h db.Handler) error {
+		return datastore.CreateWebhookDelivery(rctx, h, req.id, w.ID, int(event), w.URL, http.MethodPost, reqErr, reqHeaders, req.body, resStatus, resHeaders, resBody)
 	}
 
-	// The delivery is recorded; a failed prune only leaves the extra rows
-	// for the next delivery's prune, so it is logged rather than returned.
+	// The delivery is recorded and the older ones pruned in one transaction,
+	// so SQLite takes its write lock and syncs once. Recording comes first:
+	// a SQLite transaction that writes first waits for other writers rather
+	// than failing with SQLITE_BUSY.
 	//
 	// On Postgres seq is taken from its sequence when a row is inserted, not
 	// when it commits. Deliveries of one webhook are recorded by separate
@@ -225,10 +227,22 @@ func recordDelivery(ctx context.Context, w models.Webhook, event Event, req requ
 	// maxDeliveries deliveries of the same webhook recorded while its insert
 	// is in flight; the cost is one delivery missing from the history, which
 	// pruning by seq accepts rather than ordering commits.
-	if err := datastore.PruneWebhookDeliveries(rctx, dbx, w.ID, maxDeliveries); err != nil {
-		log.Warn("pruning webhook deliveries", "webhook", w.ID, "err", err)
+	var pruneErr error
+	err := dbx.TransactionContext(rctx, func(tx *db.Tx) error {
+		if err := create(tx); err != nil {
+			return err
+		}
+		pruneErr = datastore.PruneWebhookDeliveries(rctx, tx, w.ID, maxDeliveries)
+		return pruneErr
+	})
+	if err != nil && pruneErr != nil {
+		// A failed prune only leaves extra rows for the next delivery's
+		// prune, so it must not lose the delivery: the transaction was
+		// rolled back, and the delivery is recorded again without pruning.
+		log.FromContext(ctx).Warn("pruning webhook deliveries", "webhook", w.ID, "err", pruneErr)
+		err = create(dbx)
 	}
-	return nil
+	return db.WrapError(err)
 }
 
 // maxDeliveries is how many deliveries are kept per webhook. Every recorded
