@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -281,10 +282,15 @@ func TestIsLocalhost(t *testing.T) {
 func TestValidateURLErrorsHideResolver(t *testing.T) {
 	t.Parallel()
 
+	var lookups atomic.Int32
 	lookup := func(_ context.Context, host string) ([]net.IPAddr, error) {
+		lookups.Add(1)
 		return nil, &net.DNSError{Err: "no such host", Name: host, Server: "10.0.0.53:53", IsNotFound: true}
 	}
 	err := validateURL("https://does-not-exist.invalid/hook", lookup)
+	if n := lookups.Load(); n != 1 {
+		t.Fatalf("fake resolver called %d times, want 1", n)
+	}
 	if !errors.Is(err, ErrInvalidURL) {
 		t.Fatalf("ValidateURL() error = %v, want ErrInvalidURL", err)
 	}
@@ -309,6 +315,7 @@ func TestValidateURLResolvesHostnames(t *testing.T) {
 		{"private", []string{"10.0.0.1"}, ErrPrivateIP},
 		{"public and private", []string{"140.82.112.3", "169.254.169.254"}, ErrPrivateIP},
 		{"does not resolve", nil, ErrInvalidURL},
+		{"empty answer", []string{}, ErrInvalidURL},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -317,7 +324,15 @@ func TestValidateURLResolvesHostnames(t *testing.T) {
 			if tt.ips != nil {
 				table["hooks.example"] = tt.ips
 			}
-			err := validateURL("https://hooks.example/hook", fakeLookup(table))
+			var lookups atomic.Int32
+			fake := fakeLookup(table)
+			err := validateURL("https://hooks.example/hook", func(ctx context.Context, host string) ([]net.IPAddr, error) {
+				lookups.Add(1)
+				return fake(ctx, host)
+			})
+			if n := lookups.Load(); n != 1 {
+				t.Fatalf("fake resolver called %d times, want 1", n)
+			}
 			if tt.wantErr == nil && err != nil {
 				t.Fatalf("validateURL() = %v, want nil", err)
 			}

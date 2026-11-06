@@ -192,6 +192,9 @@ func validateURL(rawURL string, lookup lookupFunc) error {
 		// See validateRemoteHost: the resolver error names the resolver.
 		return fmt.Errorf("%w: cannot resolve hostname", ErrInvalidURL)
 	}
+	if len(ips) == 0 {
+		return fmt.Errorf("%w: no addresses for hostname", ErrInvalidURL)
+	}
 
 	if slices.ContainsFunc(ips, func(addr net.IPAddr) bool {
 		return isPrivateOrInternal(addr.IP)
