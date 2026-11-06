@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/charmbracelet/soft-serve/pkg/store/database"
+	"github.com/charmbracelet/soft-serve/pkg/test"
 	"github.com/matryer/is"
 	_ "modernc.org/sqlite" // sqlite driver
 )
@@ -289,48 +291,147 @@ func TestAbortOnSignal(t *testing.T) {
 	is.True(strings.Contains(logs.String(), "not waiting for webhook deliveries"))
 }
 
-// Start returns at once when one server's port is taken, and leaves none of
-// the others listening, instead of running on with only some servers up.
-func TestStartFailsWhenAListenerCannotBind(t *testing.T) {
+// newStartTestServer returns a server whose four listeners are on the given
+// loopback addresses. It is closed when the test ends.
+func newStartTestServer(t *testing.T, sshAddr, gitAddr, httpAddr, statsAddr string) *Server {
+	t.Helper()
 	is := is.New(t)
 	ctx, cfg, be, dbx := setupTestBackendWithDB(t)
 	ctx = backend.WithContext(ctx, be)
 	ctx = db.WithContext(ctx, dbx)
 	ctx = log.WithContext(ctx, log.New(io.Discard))
 
-	taken, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
-	is.NoErr(err)
-	defer taken.Close() //nolint: errcheck
-
-	// The SSH server binds before the HTTP server, whose port is taken.
-	free, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
-	is.NoErr(err)
-	sshAddr := free.Addr().String()
-	is.NoErr(free.Close())
-
 	cfg.SSH.ListenAddr = sshAddr
-	cfg.Git.ListenAddr = "127.0.0.1:0"
-	cfg.HTTP.ListenAddr = taken.Addr().String()
-	cfg.Stats.ListenAddr = "127.0.0.1:0"
+	cfg.Git.ListenAddr = gitAddr
+	cfg.HTTP.ListenAddr = httpAddr
+	cfg.Stats.ListenAddr = statsAddr
 
 	s, err := NewServer(ctx)
 	is.NoErr(err)
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
 
+func loopbackAddr() string {
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(test.RandomPort()))
+}
+
+// startAsync runs s.Start and returns a channel that receives its result.
+func startAsync(s *Server) <-chan error {
 	errc := make(chan error, 1)
 	go func() { errc <- s.Start() }()
+	return errc
+}
+
+func waitStart(t *testing.T, errc <-chan error, why string) error {
+	t.Helper()
 	select {
 	case err := <-errc:
-		if err == nil || !strings.Contains(err.Error(), "HTTP server") {
-			t.Fatalf("Start returned %v, want the HTTP server's listen error", err)
-		}
+		return err
 	case <-time.After(10 * time.Second):
-		_ = s.Close()
-		t.Fatal("Start did not return although the HTTP server could not listen")
+		t.Fatalf("Start did not return %s", why)
+		return nil
+	}
+}
+
+// requireBindable fails the test unless addr can be bound, that is, unless
+// nothing listens on it any more.
+func requireBindable(t *testing.T, addr string) {
+	t.Helper()
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", addr)
+	if err != nil {
+		t.Fatalf("%s is still in use: %v", addr, err)
+	}
+	_ = l.Close()
+}
+
+// Start returns at once when one server's port is taken, and leaves none of
+// the others listening, instead of running on with only some servers up.
+func TestStartFailsWhenAListenerCannotBind(t *testing.T) {
+	taken, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close() //nolint: errcheck
+
+	// The SSH and Git servers bind before the HTTP server, whose port is
+	// taken.
+	sshAddr, gitAddr := loopbackAddr(), loopbackAddr()
+	s := newStartTestServer(t, sshAddr, gitAddr, taken.Addr().String(), loopbackAddr())
+
+	err = waitStart(t, startAsync(s), "although the HTTP server could not listen")
+	if err == nil || !strings.Contains(err.Error(), "HTTP server") {
+		t.Fatalf("Start returned %v, want the HTTP server's listen error", err)
+	}
+	requireBindable(t, sshAddr)
+	requireBindable(t, gitAddr)
+}
+
+// Start serves on every enabled listener, and Shutdown makes it return and
+// releases all of them.
+func TestStartServesAllListenersUntilShutdown(t *testing.T) {
+	addrs := []string{loopbackAddr(), loopbackAddr(), loopbackAddr(), loopbackAddr()}
+	s := newStartTestServer(t, addrs[0], addrs[1], addrs[2], addrs[3])
+	errc := startAsync(s)
+
+	for _, addr := range addrs {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(context.Background(), "tcp", addr)
+			if err == nil {
+				_ = conn.Close()
+				break
+			}
+			select {
+			case err := <-errc:
+				t.Fatalf("Start returned %v before %s accepted connections", err, addr)
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("nothing accepts connections on %s: %v", addr, err)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 
-	conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", sshAddr)
-	if err == nil {
-		_ = conn.Close()
-		t.Fatalf("SSH server still listening on %s after Start failed", sshAddr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.Shutdown(ctx, ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
+	if err := waitStart(t, errc, "after Shutdown"); err != nil {
+		t.Fatalf("Start returned %v after Shutdown, want nil", err)
+	}
+	for _, addr := range addrs {
+		requireBindable(t, addr)
+	}
+}
+
+// A Close that comes before the servers start serving, here even before
+// Start, still stops them. Otherwise the SSH server went on to serve after
+// Close and Start never returned, and the Git daemon's listener stayed open.
+func TestStartAfterCloseDoesNotServe(t *testing.T) {
+	addrs := []string{loopbackAddr(), loopbackAddr(), loopbackAddr(), loopbackAddr()}
+	s := newStartTestServer(t, addrs[0], addrs[1], addrs[2], addrs[3])
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := waitStart(t, startAsync(s), "after Close"); err != nil {
+		t.Fatalf("Start returned %v after Close, want nil", err)
+	}
+	for _, addr := range addrs {
+		requireBindable(t, addr)
+	}
+}
+
+// An enabled server with no listen address is an error rather than a random
+// port on every interface.
+func TestStartRejectsEmptyListenAddr(t *testing.T) {
+	sshAddr := loopbackAddr()
+	s := newStartTestServer(t, sshAddr, "", loopbackAddr(), loopbackAddr())
+	err := waitStart(t, startAsync(s), "with an empty Git listen address")
+	if err == nil || !strings.Contains(err.Error(), "Git daemon: listen address is empty") {
+		t.Fatalf("Start returned %v, want an empty listen address error", err)
+	}
+	requireBindable(t, sshAddr)
 }
