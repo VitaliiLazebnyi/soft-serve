@@ -89,16 +89,23 @@ func openPostgres(ctx context.Context, tb testing.TB, dsn string) (*db.DB, error
 }
 
 // withDatabase returns dsn with its database set to name. dsn is either a
-// URL (postgres://... or postgresql://...) or a key=value connection string
-// such as "host=localhost user=postgres sslmode=disable". In the key=value
-// form a later dbname overrides an earlier one, so it is appended.
+// URL (postgres://... or postgresql://..., in any letter case) or a key=value
+// connection string such as "host=localhost user=postgres sslmode=disable".
+// In a URL, a dbname query parameter would override the path, so it is
+// removed. In the key=value form a later dbname overrides an earlier one, so
+// it is appended.
 func withDatabase(dsn, name string) (string, error) {
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		u, err := url.Parse(dsn)
+	lower := strings.ToLower(dsn)
+	if strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
+		u, err := url.Parse(dsn) // also lowercases the scheme, which lib/pq requires
 		if err != nil {
 			return "", err
 		}
 		u.Path = "/" + name
+		u.RawPath = ""
+		q := u.Query()
+		q.Del("dbname")
+		u.RawQuery = q.Encode()
 		return u.String(), nil
 	}
 	return strings.TrimSpace(dsn) + " dbname=" + name, nil

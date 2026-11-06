@@ -10,6 +10,10 @@ func TestWithDatabase(t *testing.T) {
 	for _, dsn := range []string{
 		"postgres://postgres@localhost:5432/postgres?sslmode=disable",
 		"postgresql://postgres:secret@localhost/other",
+		"POSTGRES://postgres@localhost/postgres",
+		"PostgreSQL://postgres@localhost/postgres?sslmode=disable",
+		"postgres://postgres@localhost/postgres?dbname=zzz&sslmode=disable",
+		"postgres://postgres@localhost?dbname=zzz",
 		"host=localhost user=postgres dbname=postgres sslmode=disable",
 		"host=localhost user=postgres sslmode=disable ",
 	} {
