@@ -36,6 +36,9 @@ git -C repo-inactive commit -am 'second'
 git -C repo-inactive push origin HEAD
 webhook-received
 cmp stdout received-active.txt
+soft repo webhook deliver list repo-inactive 1
+stdout -count=1 'push'
+stdout -count=1 'branch_tag_create'
 
 # redelivery is refused and sends nothing
 ! soft repo webhook deliver redeliver repo-inactive 1 $DELIVERY_ID
