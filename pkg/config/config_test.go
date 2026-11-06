@@ -394,3 +394,25 @@ func TestValidateParsesAllowedHosts(t *testing.T) {
 		t.Error("Validate() accepted an invalid network")
 	}
 }
+
+// An authorized_keys file can hold several keys, one per line. Every key is
+// an admin key, and a line that is not a key is counted as ignored.
+func TestAdminKeyFileWithSeveralKeys(t *testing.T) {
+	is := is.New(t)
+	k1 := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINMwLvyV3ouVrTysUYGoJdl5Vgn5BACKov+n9PlzfPwH"
+	k2 := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxIobhwtfdwN7m1TFt9wx3PsfvcAkISGPxmbmbauST8"
+	file := filepath.Join(t.TempDir(), "authorized_keys")
+	is.NoErr(os.WriteFile(file, []byte("# ops\n"+k1+" a@b\r\n\nssh-ed25519 AAAAtypo\n"+k2+" c@d\n"), 0o600))
+	cfg := &Config{
+		DataPath:         t.TempDir(),
+		InitialAdminKeys: []string{file},
+	}
+	is.Equal(len(cfg.AdminKeys()), 2)
+	is.Equal(cfg.IgnoredAdminKeys(), 1)
+	is.Equal(cfg.UnreadableAdminKeyFiles(), []string(nil))
+
+	is.NoErr(cfg.Validate())
+	is.Equal(cfg.InitialAdminKeys, []string{k1, k2})
+	is.Equal(cfg.IgnoredAdminKeys(), 1)
+	is.Equal(cfg.UnreadableAdminKeyFiles(), []string(nil))
+}
