@@ -354,8 +354,9 @@ func (c *Config) ParseFile() error {
 
 // parseEnv parses the environment variables as a configuration file.
 func parseEnv(cfg *Config) error {
-	// Merge initial admin keys from both config file and environment variables.
-	initialAdminKeys := append([]string{}, cfg.InitialAdminKeys...)
+	// Initial admin keys from the config file and the environment are
+	// merged, not overridden. Keep the file keys to add them back below.
+	fileAdminKeys := slices.Clone(cfg.InitialAdminKeys)
 
 	// Override with environment variables
 	if err := env.ParseWithOptions(cfg, env.Options{
@@ -364,12 +365,28 @@ func parseEnv(cfg *Config) error {
 		return fmt.Errorf("parse environment variables: %w", err)
 	}
 
-	// Merge initial admin keys from environment variables.
-	if initialAdminKeysEnv := os.Getenv("SOFT_SERVE_INITIAL_ADMIN_KEYS"); initialAdminKeysEnv != "" {
-		cfg.InitialAdminKeys = append(cfg.InitialAdminKeys, initialAdminKeys...)
-	}
+	// The env parser leaves the list alone when the variable is unset and
+	// replaces it otherwise. Either way, the env keys come first, followed
+	// by each file key not already listed.
+	cfg.InitialAdminKeys = mergeAdminKeys(cfg.InitialAdminKeys, fileAdminKeys)
 
 	return cfg.Validate()
+}
+
+// mergeAdminKeys returns the entries of a followed by those of b, each
+// listed once. Entries are compared after trimming surrounding space.
+func mergeAdminKeys(a, b []string) []string {
+	merged := make([]string, 0, len(a)+len(b))
+	seen := make(map[string]struct{}, len(a)+len(b))
+	for _, k := range slices.Concat(a, b) {
+		key := strings.TrimSpace(k)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, k)
+	}
+	return merged
 }
 
 // ParseEnv parses the config from the environment variables.
@@ -613,9 +630,10 @@ func parseAuthKeys(aks []string) authKeys {
 					continue
 				}
 				found = true
-				if _, ok := exist[line]; !ok {
+				id := string(pk.Marshal())
+				if _, ok := exist[id]; !ok {
 					r.pks = append(r.pks, pk)
-					exist[line] = struct{}{}
+					exist[id] = struct{}{}
 				}
 			}
 			if !found {
@@ -631,9 +649,12 @@ func parseAuthKeys(aks []string) authKeys {
 		pk, _, err := sshutils.ParseAuthorizedKey(key)
 		switch {
 		case err == nil:
-			if _, ok := exist[key]; !ok {
+			// Compare the key itself, not its text: a key file, a comment
+			// or extra spacing must not list the same key twice.
+			id := string(pk.Marshal())
+			if _, ok := exist[id]; !ok {
 				r.pks = append(r.pks, pk)
-				exist[key] = struct{}{}
+				exist[id] = struct{}{}
 			}
 		case looksLikePath(key):
 			r.unreadable = append(r.unreadable, strings.TrimSpace(entry))
