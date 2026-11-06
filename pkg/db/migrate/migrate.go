@@ -63,7 +63,11 @@ func (Migrations) schema(driverName string) string {
 func Migrate(ctx context.Context, dbx *db.DB) error {
 	logger := log.FromContext(ctx).WithPrefix("migrate")
 	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
-		if !hasTable(tx, "migrations") {
+		ok, err := tableExists(tx, "migrations")
+		if err != nil {
+			return fmt.Errorf("look up migrations table: %w", err)
+		}
+		if !ok {
 			if _, err := tx.ExecContext(ctx, Migrations{}.schema(tx.DriverName())); err != nil {
 				return err
 			}
@@ -153,13 +157,8 @@ func Rollback(ctx context.Context, dbx *db.DB) error {
 	})
 }
 
-func hasTable(tx *db.Tx, tableName string) bool {
-	ok, _ := tableExists(tx, tableName)
-	return ok
-}
-
-// tableExists is like hasTable, but returns any error from the lookup other
-// than the table not being found.
+// tableExists reports whether the table exists, returning any error from the
+// lookup other than the table not being found.
 func tableExists(tx *db.Tx, tableName string) (bool, error) {
 	var query string
 	switch tx.DriverName() {
