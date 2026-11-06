@@ -194,6 +194,20 @@ func TestParseMultipleOrigins(t *testing.T) {
 	})
 }
 
+func TestValidateDoesNotDuplicatePublicURLOrigin(t *testing.T) {
+	is := is.New(t)
+	cfg := DefaultConfig()
+	cfg.DataPath = t.TempDir()
+	is.NoErr(cfg.WriteConfig())
+	// cmd/soft parses the config file and then the environment, and each
+	// step runs Validate.
+	is.NoErr(cfg.Parse())
+	is.NoErr(cfg.ParseEnv())
+	is.NoErr(cfg.Validate())
+	is.Equal(cfg.HTTP.CORS.AllowedOrigins, []string{"http://localhost:23232"})
+	is.True(slices.Contains(cfg.Environ(), "SOFT_SERVE_HTTP_CORS_ALLOWED_ORIGINS=http://localhost:23232"))
+}
+
 func TestParseMultipleMethods(t *testing.T) {
 	is := is.New(t)
 	is.NoErr(os.Setenv("SOFT_SERVE_HTTP_CORS_ALLOWED_METHODS", "GET,POST,PUT"))

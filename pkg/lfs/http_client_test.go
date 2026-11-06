@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -170,15 +171,19 @@ func debugContext(t *testing.T) (context.Context, *bytes.Buffer) {
 	return log.WithContext(context.Background(), logger), &buf
 }
 
-// plainClient is an httpClient that may reach loopback test servers, which
-// the client from newHTTPClient refuses.
+// plainClient is an httpClient set up by newTransferClient like the shared
+// secureHTTPClient, so errors pass through the stall-wrapped dialer, but
+// whose transport may reach loopback test servers, which the client from
+// newHTTPClient refuses.
 func plainClient(t *testing.T, endpoint string) *httpClient {
 	t.Helper()
 	ep, err := NewEndpoint(endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &http.Client{}
+	tr := &http.Transport{DialContext: (&net.Dialer{}).DialContext}
+	t.Cleanup(tr.CloseIdleConnections)
+	c := newTransferClient(&http.Client{Transport: tr})
 	return &httpClient{
 		client:    c,
 		endpoint:  ep,
@@ -332,15 +337,70 @@ func TestNewHTTPClientSharesTransport(t *testing.T) {
 	}
 }
 
+// newHTTPClient must not set up the shared client again: wrapping the shared
+// transport's dialer once more for every LFS client would stack stall
+// wrappers and race with transfers already using it.
+func TestNewHTTPClientDoesNotRewrapTransport(t *testing.T) {
+	tr, ok := secureHTTPClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("shared transport is %T, want *http.Transport", secureHTTPClient.Transport)
+	}
+	old := tr.DialContext
+	t.Cleanup(func() { tr.DialContext = old })
+	tr.DialContext = func(context.Context, string, string) (net.Conn, error) {
+		c, s := net.Pipe()
+		t.Cleanup(func() { s.Close() }) //nolint:errcheck,gosec
+		return c, nil
+	}
+
+	newHTTPClient(&url.URL{Scheme: "https", Host: "a.example.com"})
+	newHTTPClient(&url.URL{Scheme: "https", Host: "b.example.com"})
+
+	conn, err := tr.DialContext(context.Background(), "tcp", "a.example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close() //nolint:errcheck
+	if _, ok := conn.(*stallTimeoutConn); ok {
+		t.Fatal("newHTTPClient wrapped the shared transport's dialer again")
+	}
+}
+
+// The shared client must be set up by newTransferClient: without it, a
+// client with no whole-request timeout would have no stall limit either.
+func TestSecureHTTPClientHasStallTimeout(t *testing.T) {
+	tr, ok := secureHTTPClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("shared transport is %T, want *http.Transport", secureHTTPClient.Transport)
+	}
+	ssrfClient := ssrf.NewSecureClient()
+	plain, ok := ssrfClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("SSRF transport is %T, want *http.Transport", ssrfClient.Transport)
+	}
+	// A func value is not comparable, but its code pointer tells the
+	// SSRF dialer apart from the stall wrapper around it.
+	if reflect.ValueOf(tr.DialContext).Pointer() == reflect.ValueOf(plain.DialContext).Pointer() {
+		t.Fatal("shared transport dials with the bare SSRF dialer; want it wrapped with the stall timeout")
+	}
+}
+
 // setTransferTimeouts must refuse a transport it cannot add the stall limit
 // to, rather than leave transfers with no bound at all.
 func TestSetTransferTimeoutsPanicsOnUnknownTransport(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("setTransferTimeouts accepted a transport it cannot wrap")
-		}
-	}()
-	setTransferTimeouts(&http.Client{Transport: http.NewFileTransport(http.Dir("."))})
+	for name, rt := range map[string]http.RoundTripper{
+		"not an *http.Transport": http.NewFileTransport(http.Dir(".")),
+		"no DialContext":         &http.Transport{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("setTransferTimeouts accepted a transport it cannot wrap")
+				}
+			}()
+			setTransferTimeouts(&http.Client{Transport: rt})
+		})
+	}
 }
 
 // The shared client must still be the SSRF-protected one: it refuses to

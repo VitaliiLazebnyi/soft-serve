@@ -586,7 +586,9 @@ func (c *Config) Validate() error {
 
 	c.InitialAdminKeys = pks
 
-	c.HTTP.CORS.AllowedOrigins = append([]string{c.HTTP.PublicURL}, c.HTTP.CORS.AllowedOrigins...)
+	if !slices.Contains(c.HTTP.CORS.AllowedOrigins, c.HTTP.PublicURL) {
+		c.HTTP.CORS.AllowedOrigins = append([]string{c.HTTP.PublicURL}, c.HTTP.CORS.AllowedOrigins...)
+	}
 
 	return nil
 }
