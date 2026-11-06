@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/config"
@@ -21,6 +23,9 @@ type DB struct {
 
 // Open opens a database connection.
 func Open(ctx context.Context, driverName string, dsn string) (*DB, error) {
+	if driverName == "sqlite" {
+		dsn = sqliteImmediateTx(dsn)
+	}
 	db, err := sqlx.ConnectContext(ctx, driverName, dsn)
 	if err != nil {
 		return nil, err
@@ -36,6 +41,27 @@ func Open(ctx context.Context, driverName string, dsn string) (*DB, error) {
 	}
 
 	return d, nil
+}
+
+// sqliteImmediateTx makes write transactions on SQLite start with BEGIN
+// IMMEDIATE unless the DSN already sets _txlock. A deferred transaction that
+// reads before it writes cannot upgrade to a write lock while another
+// connection holds one: SQLite returns SQLITE_BUSY at once instead of waiting
+// for busy_timeout. Taking the write lock at BEGIN makes it wait instead.
+// Read-only transactions are still started as deferred by the driver.
+func sqliteImmediateTx(dsn string) string {
+	i := strings.IndexByte(dsn, '?')
+	if i == 0 {
+		// The driver treats the whole string as a file name.
+		return dsn
+	}
+	if i > 0 {
+		if q, err := url.ParseQuery(dsn[i+1:]); err != nil || q.Has("_txlock") {
+			return dsn
+		}
+		return dsn + "&_txlock=immediate"
+	}
+	return dsn + "?_txlock=immediate"
 }
 
 // Close implements db.DB.
