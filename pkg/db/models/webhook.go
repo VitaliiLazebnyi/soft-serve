@@ -41,7 +41,8 @@ type WebhookDelivery struct {
 	ResponseHeaders string         `db:"response_headers"`
 	ResponseBody    string         `db:"response_body"`
 	CreatedAt       time.Time      `db:"created_at"`
-	// Seq increases with every delivery recorded. It orders deliveries,
+	// Seq increases with every delivery recorded and is never reused, even
+	// after deliveries are deleted. It can have gaps. It orders deliveries,
 	// including ones created within the same second.
 	Seq int64 `db:"seq"`
 }

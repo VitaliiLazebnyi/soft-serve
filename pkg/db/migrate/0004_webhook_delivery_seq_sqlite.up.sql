@@ -1,24 +1,40 @@
--- SQLite cannot add an AUTOINCREMENT column to an existing table, so seq is a
--- plain column filled by a trigger. SQLite serializes writers, so MAX(seq) + 1
--- cannot race.
-ALTER TABLE webhook_deliveries ADD COLUMN seq INTEGER;
+-- SQLite cannot add an AUTOINCREMENT column to an existing table, so the
+-- table is rebuilt with seq as its INTEGER PRIMARY KEY AUTOINCREMENT. seq is
+-- then the rowid: inserts that leave it out get the next value with no extra
+-- write, and AUTOINCREMENT keeps a high-water mark in sqlite_sequence, so a
+-- number is never reused, even after the newest delivery is deleted. This
+-- matches the Postgres sequence. id keeps its uniqueness as a UNIQUE
+-- constraint; like the old TEXT PRIMARY KEY it does not add NOT NULL.
+--
+-- Existing rows are numbered by created_at, then by insertion order (rowid).
+-- The copy rewrites the whole table once, bodies included, in the migration
+-- transaction. Deliveries are never pruned, so this can take a while on a
+-- server that has recorded many of them.
+CREATE TABLE webhook_deliveries_new (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT UNIQUE,
+  webhook_id INTEGER NOT NULL,
+  event INTEGER NOT NULL,
+  request_url TEXT NOT NULL,
+  request_method TEXT NOT NULL,
+  request_error TEXT,
+  request_headers TEXT NOT NULL,
+  request_body TEXT NOT NULL,
+  response_status INTEGER NOT NULL,
+  response_headers TEXT NOT NULL,
+  response_body TEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT webhook_id_fk
+  FOREIGN KEY(webhook_id) REFERENCES webhooks(id)
+  ON DELETE CASCADE
+  ON UPDATE CASCADE
+);
 
-UPDATE webhook_deliveries
-SET seq = o.rn
-FROM (
-  SELECT rowid AS rid, ROW_NUMBER() OVER (ORDER BY created_at, rowid) AS rn
-  FROM webhook_deliveries
-) AS o
-WHERE webhook_deliveries.rowid = o.rid;
+INSERT INTO webhook_deliveries_new (seq, id, webhook_id, event, request_url, request_method, request_error, request_headers, request_body, response_status, response_headers, response_body, created_at)
+SELECT ROW_NUMBER() OVER (ORDER BY created_at, rowid), id, webhook_id, event, request_url, request_method, request_error, request_headers, request_body, response_status, response_headers, response_body, created_at
+FROM webhook_deliveries;
 
-CREATE UNIQUE INDEX IF NOT EXISTS webhook_deliveries_seq_idx ON webhook_deliveries (seq);
+DROP TABLE webhook_deliveries;
+ALTER TABLE webhook_deliveries_new RENAME TO webhook_deliveries;
+
 CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id_seq_idx ON webhook_deliveries (webhook_id, seq);
-
-CREATE TRIGGER IF NOT EXISTS webhook_deliveries_set_seq
-AFTER INSERT ON webhook_deliveries
-FOR EACH ROW WHEN NEW.seq IS NULL
-BEGIN
-  UPDATE webhook_deliveries
-  SET seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM webhook_deliveries)
-  WHERE rowid = NEW.rowid;
-END;
