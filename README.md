@@ -272,7 +272,10 @@ jobs:
 stats:
   # The address on which the stats server will listen.
   listen_addr: ":23233"
-# Additional admin keys.
+# Additional admin keys. A listed key is a server admin over SSH, git
+# transport included, whatever account it belongs to; `soft user set-admin
+# <user> false` does not revoke that, only removing the key here does.
+# git-lfs-authenticate (HTTP LFS) still uses the account's own access.
 #initial_admin_keys:
 #  - "ssh-rsa AAAAB3NzaC1yc2..."
 
