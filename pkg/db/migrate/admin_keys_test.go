@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/internal/test"
 	"github.com/charmbracelet/soft-serve/pkg/sshutils"
+	"github.com/charmbracelet/soft-serve/pkg/store/database"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -378,5 +381,215 @@ func TestAdminKeyNotAttachedToNonAdminNamedAdmin(t *testing.T) {
 	}
 	if n := count(t, dbx, "SELECT COUNT(*) FROM users WHERE admin = true"); n != 0 {
 		t.Errorf("admins = %d, want 0 (no promotion)", n)
+	}
+}
+
+func TestAdminKeyNotRemovedWhileAnEntryCannotBeRead(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+
+	// The key is configured as a file, like a mounted secret.
+	ak := newAuthorizedKey(t)
+	path := filepath.Join(t.TempDir(), "admin.pub")
+	if err := os.WriteFile(path, []byte(ak+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.InitialAdminKeys = []string{path}
+	boot(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "admin" {
+		t.Fatalf("key owner = %+v, %v; want admin", o, ok)
+	}
+
+	// The file is not there on the next start.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	boot(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "admin" {
+		t.Errorf("key owner with the file missing = %+v, %v; want it kept on admin", o, ok)
+	}
+
+	// The same when Validate already dropped the entry, as on a real start.
+	vcfg := config.DefaultConfig()
+	vcfg.DataPath = t.TempDir()
+	vcfg.InitialAdminKeys = []string{path}
+	if err := vcfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(vcfg.InitialAdminKeys) != 0 {
+		t.Fatalf("validated keys = %v, want none", vcfg.InitialAdminKeys)
+	}
+	boot(t, ctx, vcfg, dbx)
+	if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "admin" {
+		t.Errorf("key owner after Validate = %+v, %v; want it kept on admin", o, ok)
+	}
+
+	// Once every entry parses again, the key that left the config goes.
+	cfg.InitialAdminKeys = nil
+	boot(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, ak); ok {
+		t.Errorf("key owner = %+v; want it removed", o)
+	}
+}
+
+func TestAdminKeyAddedByHandIsKept(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+	st := database.New(ctx, dbx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+	mustExec(t, dbx, `INSERT INTO users (username, admin, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, "erin", false)
+
+	readd, moved, other := newAuthorizedKey(t), newAuthorizedKey(t), newAuthorizedKey(t)
+	cfg.InitialAdminKeys = []string{readd, moved, other}
+	boot(t, ctx, cfg, dbx)
+
+	pk := func(ak string) ssh.PublicKey {
+		t.Helper()
+		k, _, err := sshutils.ParseAuthorizedKey(ak)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	tx := func(fn func(tx *db.Tx) error) {
+		t.Helper()
+		if err := dbx.TransactionContext(ctx, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx(func(tx *db.Tx) error {
+		// readd is removed and added back to admin with the user commands
+		// to keep it without the config.
+		if err := st.RemovePublicKeyByUsername(ctx, tx, "admin", pk(readd)); err != nil {
+			return err
+		}
+		if err := st.AddPublicKeyByUsername(ctx, tx, "admin", pk(readd)); err != nil {
+			return err
+		}
+		// moved goes to erin.
+		if err := st.RemovePublicKeyByUsername(ctx, tx, "admin", pk(moved)); err != nil {
+			return err
+		}
+		if err := st.AddPublicKeyByUsername(ctx, tx, "erin", pk(moved)); err != nil {
+			return err
+		}
+		// Removing other from a user that does not own it changes nothing.
+		return st.RemovePublicKeyByUsername(ctx, tx, "erin", pk(other))
+	})
+
+	cfg.InitialAdminKeys = nil
+	boot(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, readd); !ok || o.Username != "admin" {
+		t.Errorf("re-added key owner = %+v, %v; want it kept on admin", o, ok)
+	}
+	if o, ok := ownerOf(t, dbx, moved); !ok || o.Username != "erin" {
+		t.Errorf("moved key owner = %+v, %v; want it kept on erin", o, ok)
+	}
+	if o, ok := ownerOf(t, dbx, other); ok {
+		t.Errorf("synced key owner = %+v; want it removed", o)
+	}
+}
+
+func TestAdminKeysInsertedInSortedOrder(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+
+	keys := make([]string, 6)
+	for i := range keys {
+		keys[i] = newAuthorizedKey(t)
+	}
+	sorted := slices.Sorted(slices.Values(keys))
+	cfg.InitialAdminKeys = slices.Clone(sorted)
+	slices.Reverse(cfg.InitialAdminKeys)
+	boot(t, ctx, cfg, dbx)
+
+	var got []string
+	if err := dbx.Select(&got, `SELECT public_key FROM public_keys ORDER BY id`); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, sorted) {
+		t.Errorf("insert order = %v, want sorted %v", got, sorted)
+	}
+}
+
+func TestInsertIgnoreOnlyIgnoresNamedColumn(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+	boot(t, ctx, config.DefaultConfig(), dbx)
+	mustExec(t, dbx, `INSERT INTO settings (id, "key", value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)`, 1000, "a", "1")
+
+	insert := func(id int, key string) (int64, error) {
+		var n int64
+		err := dbx.TransactionContext(ctx, func(tx *db.Tx) error {
+			q := insertIgnore(tx, `INTO settings (id, "key", value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)`, `"key"`)
+			res, err := tx.ExecContext(ctx, q, id, key, "2")
+			if err != nil {
+				return err
+			}
+			n, err = res.RowsAffected()
+			return err
+		})
+		return n, err
+	}
+
+	// A conflict on the named column is ignored.
+	if n, err := insert(1001, "a"); err != nil || n != 0 {
+		t.Errorf("same key: rows = %d, err = %v; want 0, nil", n, err)
+	}
+	// Any other conflict is an error.
+	if _, err := insert(1000, "b"); err == nil {
+		t.Error("primary key clash: err = nil, want an error")
+	}
+}
+
+func TestAdminKeyConcurrentBootsDifferentOrder(t *testing.T) {
+	if os.Getenv("SOFT_SERVE_DB_DRIVER") != "postgres" {
+		t.Skip("concurrent boots need a server database; set SOFT_SERVE_DB_DRIVER=postgres")
+	}
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+	boot(t, ctx, config.DefaultConfig(), dbx)
+
+	keys := make([]string, 6)
+	for i := range keys {
+		keys[i] = newAuthorizedKey(t)
+	}
+	reversed := slices.Clone(keys)
+	slices.Reverse(reversed)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := range 8 {
+		cfg := config.DefaultConfig()
+		cfg.InitialAdminKeys = keys
+		if i%2 == 1 {
+			cfg.InitialAdminKeys = reversed
+		}
+		cctx := config.WithContext(ctx, cfg)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- Migrate(cctx, dbx)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("Migrate() => %v", err)
+		}
+	}
+	for _, ak := range keys {
+		if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "admin" {
+			t.Errorf("key owner = %+v, %v; want admin", o, ok)
+		}
 	}
 }

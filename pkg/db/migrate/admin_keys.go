@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -19,10 +20,8 @@ import (
 const defaultAdminUsername = "admin"
 
 // syncedKeyPrefix prefixes the settings rows that record which keys
-// syncAdminKeys attached, so it can remove exactly those keys when they leave
-// the config. The rest of the row key is the authorized key and the value is
-// the id of the user the key was attached to.
-const syncedKeyPrefix = "initial_admin_key:"
+// syncAdminKeys attached. See db.SyncedAdminKeyPrefix.
+const syncedKeyPrefix = db.SyncedAdminKeyPrefix
 
 // syncAdminKeys makes sure every key in initial_admin_keys is in the
 // database. The first migration seeds the keys once; without this, a key
@@ -41,7 +40,15 @@ const syncedKeyPrefix = "initial_admin_key:"
 //   - a key this function attached is removed again once it leaves the
 //     config, the same way a config-only key stopped being an admin key when
 //     it was removed before keys were synced. Keys the first migration seeded
-//     and keys added with the user commands are never removed.
+//     and keys added or removed with the user commands since are never
+//     removed. Nothing is removed while an initial_admin_keys entry cannot be
+//     read or parsed, since that entry may be a key that is still wanted.
+//
+// Keys are inserted and removed in sorted order, so boots that run at the
+// same time on a shared database take row locks in the same order and do not
+// deadlock. All instances sharing a database must use the same
+// initial_admin_keys: a run with a different list attaches and removes keys to
+// match its own list.
 func syncAdminKeys(ctx context.Context, tx *db.Tx) error {
 	cfg := config.FromContext(ctx)
 	if cfg == nil {
@@ -51,6 +58,9 @@ func syncAdminKeys(ctx context.Context, tx *db.Tx) error {
 	logger := log.FromContext(ctx).WithPrefix("migrate")
 
 	keys := cfg.AdminKeys()
+	slices.SortFunc(keys, func(a, b gossh.PublicKey) int {
+		return strings.Compare(sshutils.MarshalAuthorizedKey(a), sshutils.MarshalAuthorizedKey(b))
+	})
 	configured := make(map[string]struct{}, len(keys))
 
 	// The admin a configured key already belongs to, so that all configured
@@ -109,6 +119,12 @@ func syncAdminKeys(ctx context.Context, tx *db.Tx) error {
 		}
 	}
 
+	if invalid := cfg.InvalidAdminKeys(); len(invalid) > 0 {
+		logger.Warn("some initial_admin_keys entries could not be read or parsed; not removing synced admin keys until they can",
+			"entries", invalid)
+		return nil
+	}
+
 	return removeUnconfiguredKeys(ctx, tx, logger, configured)
 }
 
@@ -165,14 +181,13 @@ func adminUserID(ctx context.Context, tx *db.Tx) (id int64, ok bool, err error) 
 }
 
 // insertPublicKey attaches ak to userID. added is false when the key was
-// already there, for example because a concurrent boot inserted it.
+// already there, for example because a concurrent boot inserted it. Any other
+// conflict, such as a primary key clash, is returned: on postgres it has
+// aborted the transaction.
 func insertPublicKey(ctx context.Context, tx *db.Tx, userID int64, ak string) (added bool, err error) {
 	query := insertIgnore(tx, `INTO public_keys (user_id, public_key, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, "public_key")
 	res, err := tx.ExecContext(ctx, query, userID, ak)
 	if err != nil {
-		if errors.Is(db.WrapError(err), db.ErrDuplicateKey) {
-			return false, nil
-		}
 		return false, err
 	}
 	n, err := res.RowsAffected()
@@ -196,19 +211,27 @@ func recordSyncedKey(ctx context.Context, tx *db.Tx, ak string, userID int64) er
 	return nil
 }
 
+// syncedKeyRow is a settings row recording a key syncAdminKeys attached.
+type syncedKeyRow struct {
+	Key   string `db:"key"`
+	Value string `db:"value"`
+}
+
 // removeUnconfiguredKeys removes the keys syncAdminKeys attached that are no
 // longer in the config. A key is removed only from the user it was attached
 // to; if it has since moved to another account, it is left there.
 func removeUnconfiguredKeys(ctx context.Context, tx *db.Tx, logger *log.Logger, configured map[string]struct{}) error {
-	var rows []struct {
-		Key   string `db:"key"`
-		Value string `db:"value"`
-	}
+	var rows []syncedKeyRow
 	// "_" is a LIKE wildcard; the prefix is checked again below.
 	if err := tx.SelectContext(ctx, &rows, tx.Rebind(`SELECT "key", value FROM settings WHERE "key" LIKE ?`),
 		syncedKeyPrefix+"%"); err != nil {
 		return fmt.Errorf("list synced initial admin keys: %w", err)
 	}
+	// Remove in a fixed order, independent of the database's collation, so
+	// concurrent boots lock rows in the same order.
+	slices.SortFunc(rows, func(a, b syncedKeyRow) int {
+		return strings.Compare(a.Key, b.Key)
+	})
 
 	for _, r := range rows {
 		ak, ok := strings.CutPrefix(r.Key, syncedKeyPrefix)
@@ -243,13 +266,11 @@ func removeUnconfiguredKeys(ctx context.Context, tx *db.Tx, logger *log.Logger, 
 
 // insertIgnore builds an INSERT that does nothing on a unique conflict on
 // column, for the transaction's driver. rest starts at "INTO". Naming the
-// column keeps postgres from swallowing an unrelated conflict, such as a
-// primary key clash.
+// column keeps an unrelated conflict, such as a primary key clash, an error
+// on both sqlite (3.24 and later) and postgres, unlike INSERT OR IGNORE.
 func insertIgnore(tx *db.Tx, rest, column string) string {
 	switch tx.DriverName() {
-	case "sqlite3", "sqlite":
-		return tx.Rebind("INSERT OR IGNORE " + rest)
-	case "postgres":
+	case "sqlite3", "sqlite", "postgres":
 		return tx.Rebind("INSERT " + rest + " ON CONFLICT (" + column + ") DO NOTHING")
 	default:
 		return tx.Rebind("INSERT " + rest)

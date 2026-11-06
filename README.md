@@ -112,9 +112,17 @@ not promoted; a warning is logged.
 
 To rotate a key, replace it in `initial_admin_keys` and restart. A key that
 was attached on a later start is removed from the admin user when it leaves
-the config. Keys seeded on the very first start, and keys added with the
-`user` commands, stay in the database when you remove them from the config:
-remove those with `user remove-pubkey`.
+the config. Keys seeded on the very first start, and keys added or removed
+with the `user` commands since, stay in the database when you remove them from
+the config: remove those with `user remove-pubkey`. To keep an attached key
+after dropping it from the config, run `user remove-pubkey` and then
+`user add-pubkey` for it first.
+
+Nothing is removed while an `initial_admin_keys` entry cannot be read or
+parsed (for example a key file whose secret is not mounted yet); a warning
+names the entry's position in its list. Every instance that shares a database,
+and `soft admin migrate`, must use the same `initial_admin_keys`: a run with a
+different list attaches and removes keys to match its own list.
 
 If you'd like a repository to exist the moment the server finishes booting,
 with no human logging in to run `repo create`, set `SOFT_SERVE_DEFAULT_REPO`
