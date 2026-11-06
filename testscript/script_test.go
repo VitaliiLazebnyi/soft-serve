@@ -663,7 +663,24 @@ func cmdStopserver(ts *testscript.TestScript, neg bool, args []string) {
 	resp, err := loopbackClient.Head(fmt.Sprintf("%s/__stop", ts.Getenv("SOFT_SERVE_HTTP_PUBLIC_URL"))) //nolint:noctx
 	check(ts, err, neg)
 	resp.Body.Close()
-	time.Sleep(time.Second * 2) // Allow some time for the server to stop
+
+	// Wait until every listener is closed, so a server started next can bind
+	// the same ports. A fixed sleep was not always long enough under load.
+	deadline := time.Now().Add(30 * time.Second)
+	for _, env := range []string{"SSH_PORT", "GIT_PORT", "HTTP_PORT", "STATS_PORT"} {
+		addr := net.JoinHostPort(loopback, ts.Getenv(env))
+		for {
+			conn, _ := net.DialTimeout("tcp", addr, time.Second) //nolint:noctx
+			if conn == nil {
+				break
+			}
+			conn.Close()
+			if time.Now().After(deadline) {
+				ts.Fatalf("server on %s did not stop within 30 seconds", addr)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }
 
 func setupPostgres(t testscript.T, cfg *config.Config) (func(), error) {
