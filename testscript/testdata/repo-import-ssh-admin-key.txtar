@@ -12,6 +12,8 @@
 # first boot seeds the admin account with admin1's key only
 exec soft serve &
 ensureserverrunning SSH_PORT
+# stopserver goes through the HTTP server, which may start after ssh
+ensureserverrunning HTTP_PORT
 stopserver
 ensureservernotrunning SSH_PORT
 
