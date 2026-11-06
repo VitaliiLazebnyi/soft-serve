@@ -424,7 +424,7 @@ func TestPruneWebhookDeliveriesKeepsNewest(t *testing.T) {
 	for i := range ids {
 		ids[i] = uuid.MustParse(fmt.Sprintf("%08d-0000-1000-8000-000000000000", 99-i))
 		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, ids[i], hook, 1, "u", "POST", nil, "", "{}", 200, "", ""))
-		_, err := dbx.ExecContext(ctx, `UPDATE webhook_deliveries SET created_at = ? WHERE id = ?;`,
+		_, err := dbx.ExecContext(ctx, dbx.Rebind(`UPDATE webhook_deliveries SET created_at = ? WHERE id = ?;`),
 			fmt.Sprintf("2024-01-01 00:00:%02d", 59-i), ids[i])
 		is.NoErr(err)
 		if i < 3 {
@@ -465,10 +465,14 @@ func TestPruneWebhookDeliveriesKeepsNewest(t *testing.T) {
 
 // The prune runs on every recorded delivery, so it must not scan the
 // deliveries table. On SQLite both its lookups use the (webhook_id, seq)
-// index.
+// index. Postgres picks its plan from table statistics, which a small test
+// table does not represent, so its plan is not asserted.
 func TestPruneWebhookDeliveriesUsesIndex(t *testing.T) {
 	is := is.New(t)
 	ctx, dbx := newWebhookTestDB(t)
+	if !isSqlite(dbx) {
+		t.Skip("checks an SQLite query plan")
+	}
 	var plan []struct {
 		ID      int    `db:"id"`
 		Parent  int    `db:"parent"`
