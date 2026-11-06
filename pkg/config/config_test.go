@@ -394,3 +394,42 @@ func TestValidateParsesAllowedHosts(t *testing.T) {
 		t.Error("Validate() accepted an invalid network")
 	}
 }
+
+func TestMergeAdminKeys(t *testing.T) {
+	const k1 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINMwLvyV3ouVrTysUYGoJdl5Vgn5BACKov+n9PlzfPwH"
+	const k2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxIobhwtfdwN7m1TFt9wx3PsfvcAkISGPxmbmbauST8 a@b"
+	for name, tc := range map[string]struct {
+		env, file, want []string
+	}{
+		"env replaced the list": {[]string{k1}, []string{k2}, []string{k1, k2}},
+		"env unset":             {[]string{k2}, []string{k2}, []string{k2}},
+		"env repeats file keys": {[]string{k1, k2, " " + k2}, []string{k2}, []string{k1, k2}},
+		"no keys":               {nil, nil, []string{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := mergeAdminKeys(tc.env, tc.file)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("mergeAdminKeys(%q, %q) = %q, want %q", tc.env, tc.file, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseEnvAdminKeysTwice checks that applying the environment again, as
+// cmd/soft does after Parse, keeps the merged file and env keys.
+func TestParseEnvAdminKeysTwice(t *testing.T) {
+	is := is.New(t)
+	t.Setenv("SOFT_SERVE_INITIAL_ADMIN_KEYS", "testdata/k1.pub")
+	cfg := &Config{
+		DataPath:         t.TempDir(),
+		InitialAdminKeys: []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxIobhwtfdwN7m1TFt9wx3PsfvcAkISGPxmbmbauST8 a@b"},
+	}
+	want := []string{
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINMwLvyV3ouVrTysUYGoJdl5Vgn5BACKov+n9PlzfPwH",
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxIobhwtfdwN7m1TFt9wx3PsfvcAkISGPxmbmbauST8",
+	}
+	is.NoErr(cfg.ParseEnv())
+	is.Equal(cfg.InitialAdminKeys, want)
+	is.NoErr(cfg.ParseEnv())
+	is.Equal(cfg.InitialAdminKeys, want)
+}
