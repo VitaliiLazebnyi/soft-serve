@@ -301,6 +301,30 @@ func TestValidateURLErrorsHideResolver(t *testing.T) {
 	}
 }
 
+// TestValidateURLErrorsHideSystemResolver is the test above against the
+// system resolver, through the exported ValidateURL. The .invalid TLD never
+// resolves (RFC 6761), but the lookup still needs a working resolver
+// configuration, so it is skipped in -short runs.
+func TestValidateURLErrorsHideSystemResolver(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires DNS")
+	}
+	t.Parallel()
+
+	err := ValidateURL("https://does-not-exist.invalid/hook")
+	if !errors.Is(err, ErrInvalidURL) {
+		t.Fatalf("ValidateURL() error = %v, want ErrInvalidURL", err)
+	}
+	if !strings.Contains(err.Error(), "cannot resolve hostname") {
+		t.Errorf("ValidateURL() error = %q, want it to mention %q", err, "cannot resolve hostname")
+	}
+	for _, leak := range []string{"lookup", " on ", ":53", "no such host"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("ValidateURL() error %q leaks resolver detail %q", err, leak)
+		}
+	}
+}
+
 // TestValidateURLResolvesHostnames covers the DNS path of ValidateURL with a
 // fake resolver, so it runs offline.
 func TestValidateURLResolvesHostnames(t *testing.T) {
@@ -310,12 +334,15 @@ func TestValidateURLResolvesHostnames(t *testing.T) {
 		name    string
 		ips     []string
 		wantErr error
+		// wantMsg, when set, must appear in the error; it tells apart the
+		// lookup-failure and empty-answer branches, which share ErrInvalidURL.
+		wantMsg string
 	}{
-		{"public", []string{"140.82.112.3"}, nil},
-		{"private", []string{"10.0.0.1"}, ErrPrivateIP},
-		{"public and private", []string{"140.82.112.3", "169.254.169.254"}, ErrPrivateIP},
-		{"does not resolve", nil, ErrInvalidURL},
-		{"empty answer", []string{}, ErrInvalidURL},
+		{"public", []string{"140.82.112.3"}, nil, ""},
+		{"private", []string{"10.0.0.1"}, ErrPrivateIP, ""},
+		{"public and private", []string{"140.82.112.3", "169.254.169.254"}, ErrPrivateIP, ""},
+		{"does not resolve", nil, ErrInvalidURL, "cannot resolve hostname"},
+		{"empty answer", []string{}, ErrInvalidURL, "no addresses for hostname"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -338,6 +365,9 @@ func TestValidateURLResolvesHostnames(t *testing.T) {
 			}
 			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
 				t.Fatalf("validateURL() = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantMsg != "" && !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Fatalf("validateURL() error = %q, want it to mention %q", err, tt.wantMsg)
 			}
 		})
 	}
