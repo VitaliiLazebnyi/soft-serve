@@ -119,6 +119,31 @@ func (d *Backend) checkCanCreate(ctx context.Context, user proto.User) error {
 	return proto.ErrUnauthorized
 }
 
+// repoLimited reports whether max_repos_per_user applies to user creating
+// a repository: a limit is set and the caller is not a server admin (see
+// isServerAdmin). Decide it on the caller's own context, which carries the
+// session's public key.
+func (d *Backend) repoLimited(ctx context.Context, user proto.User) bool {
+	return d.cfg.MaxReposPerUser > 0 && !d.isServerAdmin(ctx, user)
+}
+
+// countRepos returns how many repositories user has created. Repositories
+// created without an account (a nil user) count together as one user's.
+func (d *Backend) countRepos(ctx context.Context, h db.Handler, user proto.User) (int64, error) {
+	if user == nil || user.ID() == 0 {
+		return d.store.CountAnonymousRepos(ctx, h)
+	}
+	return d.store.CountUserRepos(ctx, h, user.ID())
+}
+
+// errRepoLimit is the error for user being at max_repos_per_user.
+func (d *Backend) errRepoLimit(user proto.User) error {
+	if user == nil || user.ID() == 0 {
+		return fmt.Errorf("%w: anonymous users may create %d repositories in all; delete one or ask an admin", proto.ErrRepoLimitReached, d.cfg.MaxReposPerUser)
+	}
+	return fmt.Errorf("%w: each user may create %d repositories; delete one or ask an admin", proto.ErrRepoLimitReached, d.cfg.MaxReposPerUser)
+}
+
 // CreateRepository creates a new repository.
 //
 // It implements backend.Backend.
@@ -126,18 +151,20 @@ func (d *Backend) CreateRepository(ctx context.Context, name string, user proto.
 	if err := d.checkCanCreate(ctx, user); err != nil {
 		return nil, err
 	}
-	return d.createRepository(ctx, name, user, opts)
+	return d.createRepository(ctx, name, user, opts, d.repoLimited(ctx, user))
 }
 
 // CreateSystemRepository creates a repository on the server's own behalf,
-// attributed to user. It is not subject to AdminOnlyCreate, so it is only for
-// internal bootstrap (such as default_repo on boot) and must never be reached
-// from a user request.
+// attributed to user. It is not subject to AdminOnlyCreate or
+// MaxReposPerUser, so it is only for internal bootstrap (such as default_repo
+// on boot) and must never be reached from a user request.
 func (d *Backend) CreateSystemRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
-	return d.createRepository(ctx, name, user, opts)
+	return d.createRepository(ctx, name, user, opts, false)
 }
 
-func (d *Backend) createRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
+// createRepository creates an empty repository. limited says whether
+// max_repos_per_user applies (see repoLimited).
+func (d *Backend) createRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions, limited bool) (proto.Repository, error) {
 	name = utils.SanitizeRepo(name)
 	if err := utils.ValidateRepo(name); err != nil {
 		return nil, err
@@ -154,7 +181,7 @@ func (d *Backend) createRepository(ctx context.Context, name string, user proto.
 		return nil, err
 	}
 
-	return d.registerRepository(ctx, name, user, opts)
+	return d.registerRepository(ctx, name, user, opts, limited)
 }
 
 // claimRepoPath creates the repository directory, failing if anything already
@@ -175,16 +202,19 @@ func claimRepoPath(rp string) error {
 
 // registerRepository records a bare repository that already exists at the
 // name's path and finishes setting it up. The directory is removed on failure.
-func (d *Backend) registerRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
+// When limited, max_repos_per_user is checked in the same transaction that
+// records the repository.
+func (d *Backend) registerRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions, limited bool) (proto.Repository, error) {
 	rp := d.repoPath(name)
 
 	var userID int64
 	if user != nil {
 		userID = user.ID()
 	}
+	anonymous := userID == 0
 
 	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
-		if userID == 0 {
+		if anonymous {
 			// Anonymous callers (e.g. an anon-access/allow-keyless
 			// override) have no user of their own, but repos.user_id is
 			// NOT NULL. Fall back to the default admin as owner, the same
@@ -208,8 +238,28 @@ func (d *Backend) registerRepository(ctx context.Context, name string, user prot
 			opts.Private,
 			opts.Hidden,
 			opts.Mirror,
+			anonymous,
 		); err != nil {
 			return err
+		}
+
+		// The limit is checked after the insert, in the same transaction,
+		// which rolls the insert back if the creator is over it. As with the
+		// webhook cap (see CreateWebhook), inserting first makes concurrent
+		// SQLite writers wait for each other, and on Postgres the owner's
+		// row is locked before counting, so creates racing at the limit
+		// take turns.
+		if limited {
+			if err := d.store.LockUserRepos(ctx, tx, userID); err != nil {
+				return err
+			}
+			n, err := d.countRepos(ctx, tx, user)
+			if err != nil {
+				return err
+			}
+			if n > int64(d.cfg.MaxReposPerUser) {
+				return d.errRepoLimit(user)
+			}
 		}
 
 		if err := os.WriteFile(filepath.Join(rp, "description"), []byte(opts.Description), fs.ModePerm); err != nil {
@@ -275,6 +325,19 @@ func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.
 		return nil, err
 	}
 
+	// Refuse at the limit before cloning anything. registerRepository
+	// checks again when it records the repository.
+	limited := d.repoLimited(ctx, user)
+	if limited {
+		n, err := d.countRepos(ctx, d.db, user)
+		if err != nil {
+			return nil, err
+		}
+		if n >= int64(d.cfg.MaxReposPerUser) {
+			return nil, d.errRepoLimit(user)
+		}
+	}
+
 	if reason := d.ImportsDisabledReason(); reason != "" {
 		d.logger.Warn("refusing import", "name", name, "reason", reason)
 		return nil, proto.ErrImportsDisabled
@@ -305,6 +368,7 @@ func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.
 		logRemote: redactRemote(remote),
 		env:       RemoteGitEnv(d.cfg, v),
 		opts:      opts,
+		limited:   limited,
 	}
 
 	// LFS objects are fetched only when asked for (--lfs or --lfs-endpoint);
@@ -344,6 +408,10 @@ func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.
 	importCtx := proto.WithUserContext(d.ctx, user)
 	r, err := d.importRepository(importCtx, user, imp)
 	if err != nil {
+		// A concurrent create can take the last slot while the clone runs.
+		if errors.Is(err, proto.ErrRepoLimitReached) {
+			return nil, err
+		}
 		// The real error is logged where it happened. The caller gets a
 		// fixed message so a failed import cannot be used to probe hosts
 		// and ports.
@@ -363,6 +431,8 @@ type importSpec struct {
 	lfsEndpoint string
 	lfs         lfs.Endpoint
 	opts        proto.RepositoryOptions
+	// limited says whether max_repos_per_user applies (see repoLimited).
+	limited bool
 }
 
 // importRepository clones the remote into the claimed directory, registers
@@ -388,7 +458,7 @@ func (d *Backend) importRepository(ctx context.Context, user proto.User, imp imp
 		return nil, err
 	}
 
-	r, err := d.registerRepository(ctx, imp.name, user, imp.opts)
+	r, err := d.registerRepository(ctx, imp.name, user, imp.opts, imp.limited)
 	if err != nil {
 		d.logger.Error("failed to create repository", "err", err, "name", imp.name)
 		return nil, err

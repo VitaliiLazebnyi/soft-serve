@@ -17,6 +17,9 @@ var (
 	// which it does when the installed git is too old to enforce the remote
 	// validation. The reason stays in the server log.
 	ErrImportsDisabled = errors.New("imports are disabled on this server")
+	// ErrRepoLimitReached is returned when creating a repository would take
+	// its creator past max_repos_per_user.
+	ErrRepoLimitReached = errors.New("repository limit reached")
 	// ErrFileNotFound is returned when the file is not found.
 	ErrFileNotFound = errors.New("file not found")
 	// ErrRepoNotFound is returned when a repository is not found.

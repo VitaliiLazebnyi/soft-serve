@@ -485,3 +485,31 @@ func TestAdminKeyFileRepeatsKey(t *testing.T) {
 	is.Equal(cfg.IgnoredAdminKeys(), 0)
 	is.Equal(len(cfg.UnreadableAdminKeyFiles()), 0)
 }
+
+func TestMaxReposPerUser(t *testing.T) {
+	is := is.New(t)
+	// Ignore any value exported in the environment running the tests.
+	t.Setenv("SOFT_SERVE_MAX_REPOS_PER_USER", "")
+	is.NoErr(os.Unsetenv("SOFT_SERVE_MAX_REPOS_PER_USER"))
+	cfg := DefaultConfig()
+	is.NoErr(cfg.ParseEnv())
+	is.Equal(cfg.MaxReposPerUser, 0) // no limit by default
+
+	t.Setenv("SOFT_SERVE_MAX_REPOS_PER_USER", "3")
+	cfg = DefaultConfig()
+	is.NoErr(cfg.ParseEnv())
+	is.Equal(cfg.MaxReposPerUser, 3)
+	// Hooks re-read the config from the environment.
+	is.True(slices.Contains(cfg.Environ(), "SOFT_SERVE_MAX_REPOS_PER_USER=3"))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	is.NoErr(os.WriteFile(path, []byte("max_repos_per_user: 5\n"), 0o600))
+	cfg = DefaultConfig()
+	is.NoErr(parseFile(cfg, path))
+	is.Equal(cfg.MaxReposPerUser, 5)
+
+	t.Setenv("SOFT_SERVE_MAX_REPOS_PER_USER", "-1")
+	cfg = DefaultConfig()
+	is.True(cfg.ParseEnv() != nil)
+}

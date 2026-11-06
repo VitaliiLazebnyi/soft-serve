@@ -328,6 +328,12 @@ stats:
 # says. Access to existing repositories is not affected. Defaults to false.
 #admin_only_create: false
 
+# Maximum number of repositories each user may create (repo create, repo
+# import and push-to-create). Server admins are exempt, and repositories
+# created without an account all count together as one user. A user at the
+# limit is refused; existing repositories are kept. 0 means no limit.
+#max_repos_per_user: 0
+
 # Repository name to create on boot if it does not already exist.
 # Leave empty to disable.
 #default_repo: ""
@@ -346,6 +352,7 @@ name all in uppercase. Here are some examples:
 - `SOFT_SERVE_ANON_ACCESS`: Overrides the `anon-access` setting (see [Authentication](#authentication))
 - `SOFT_SERVE_ALLOW_KEYLESS`: Overrides the `allow-keyless` setting (see [Authentication](#authentication))
 - `SOFT_SERVE_ADMIN_ONLY_CREATE`: Only server admins may create repositories. Owners and collaborators can no longer rename repositories, and anonymous access to names that do not exist yet is capped at read-only. Defaults to `false`. Access to existing repositories is not affected.
+- `SOFT_SERVE_MAX_REPOS_PER_USER`: Maximum number of repositories each user may create. Server admins are exempt, and repositories created without an account count together as one user. Defaults to `0` (no limit).
 - `SOFT_SERVE_DEFAULT_REPO`: Repository name to create on boot if missing
 
 #### Database Configuration

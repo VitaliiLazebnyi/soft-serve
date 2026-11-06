@@ -154,7 +154,7 @@ func TestRegisterRepositoryAdoptsClaimedPath(t *testing.T) {
 	_, err = git.Init(rp, true)
 	is.NoErr(err)
 
-	r, err := be.registerRepository(ctx, "imported", owner, proto.RepositoryOptions{Private: true})
+	r, err := be.registerRepository(ctx, "imported", owner, proto.RepositoryOptions{Private: true}, false)
 	is.NoErr(err)
 	is.Equal(r.UserID(), owner.ID())
 	is.True(r.IsPrivate())

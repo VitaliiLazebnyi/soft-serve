@@ -185,6 +185,12 @@ jobs:
 # says. Access to existing repositories is not affected. Defaults to false.
 #admin_only_create: false
 
+# Maximum number of repositories each user may create (repo create, repo
+# import and push-to-create). Server admins are exempt, and repositories
+# created without an account all count together as one user. A user at the
+# limit is refused; existing repositories are kept. 0 means no limit.
+#max_repos_per_user: 0
+
 # Name of a repository to create automatically on boot if it doesn't already
 # exist. Empty disables this behavior.
 #default_repo: ""

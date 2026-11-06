@@ -1,0 +1,66 @@
+# vi: set ft=conf
+
+# FIXME: don't skip windows
+[windows] skip 'curl makes github actions hang'
+
+# max_repos_per_user caps the repositories a non-admin may create, by repo
+# create, push-to-create over SSH and push-to-create over HTTP. Admins are
+# exempt, and anonymous creates count together as one user.
+
+env SOFT_SERVE_MAX_REPOS_PER_USER=1
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+soft user create user1 --key "$USER1_AUTHORIZED_KEY"
+usoft token create 'push'
+stdout 'ss_*'
+cp stdout utokenfile
+envfile UTOKEN=utokenfile
+
+# the first repository is allowed
+usoft repo create one
+
+# the second one is refused, by every create path
+! usoft repo create two
+stderr 'repository limit reached'
+mkdir work
+mkfile ./work/README.md '# Hello'
+ugit -C work init
+ugit -C work add README.md
+ugit -C work commit -m 'first'
+! ugit -C work push ssh://localhost:$SSH_PORT/sshpush HEAD:refs/heads/main
+stderr 'repository limit reached'
+curl http://$UTOKEN@localhost:$HTTP_PORT/httppush.git/info/refs?service=git-receive-pack
+stdout 'repository limit reached'
+
+# admins are exempt
+soft repo create admin1
+soft repo create admin2
+
+# anonymous creates count together as one user
+soft settings anon-access read-write
+curl http://localhost:$HTTP_PORT/anon1.git/info/refs?service=git-receive-pack
+stdout '.*git-receive-pack.*'
+curl http://localhost:$HTTP_PORT/anon2.git/info/refs?service=git-receive-pack
+stdout 'repository limit reached'
+
+soft repo list
+stdout 'one'
+stdout 'admin1'
+stdout 'admin2'
+stdout 'anon1'
+! stdout 'two'
+! stdout 'sshpush'
+! stdout 'httppush'
+! stdout 'anon2'
+
+# deleting a repository frees a slot
+usoft repo delete one
+usoft repo create two
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .
