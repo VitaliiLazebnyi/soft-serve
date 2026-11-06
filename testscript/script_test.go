@@ -618,18 +618,18 @@ func cmdEnsureServerRunning(ts *testscript.TestScript, neg bool, args []string) 
 	addr := net.JoinHostPort(loopback, port)
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		conn, _ := net.DialTimeout( //nolint:noctx
+		conn, err := net.DialTimeout( //nolint:noctx
 			"tcp",
 			addr,
 			time.Second,
 		)
-		if conn != nil {
+		if err == nil {
 			ts.Logf("Server is running on port: %s", port)
 			conn.Close()
 			break
 		}
 		if time.Now().After(deadline) {
-			ts.Fatalf("server on port %s did not start within 30 seconds", port)
+			ts.Fatalf("server on port %s did not start within 30 seconds: %v", port, err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
