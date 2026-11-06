@@ -164,6 +164,91 @@ func TestSecureDialCapsAddresses(t *testing.T) {
 	}
 }
 
+// TestSecureDialInterleavesFamilies covers a name whose IPv6 records come
+// first and outnumber the cap, with IPv6 unreachable: the IPv4 address must
+// still get a slot, rather than every attempt going to the broken family.
+func TestSecureDialInterleavesFamilies(t *testing.T) {
+	fakeResolver(t, map[string][]string{
+		"v6first.example": {
+			"2606:4700::1", "2606:4700::2", "2606:4700::3", "2606:4700::4", "2606:4700::5",
+			"140.82.112.3", "140.82.112.4",
+		},
+	})
+
+	t.Run("IPv4 reached", func(t *testing.T) {
+		f := newFakeDialer(t, "140.82.112.3:443")
+		conn, err := secureDial(context.Background(), "tcp", "v6first.example:443")
+		if err != nil {
+			t.Fatalf("secureDial() error = %v, want the IPv4 address reached", err)
+		}
+		conn.Close()
+		if want := "[2606:4700::1]:443 140.82.112.3:443"; strings.Join(f.dialed, " ") != want {
+			t.Errorf("dialed %v, want %s", f.dialed, want)
+		}
+	})
+
+	t.Run("cap shared", func(t *testing.T) {
+		f := newFakeDialer(t)
+		_, _ = secureDial(context.Background(), "tcp", "v6first.example:443")
+		want := "[2606:4700::1]:443 140.82.112.3:443 [2606:4700::2]:443 140.82.112.4:443"
+		if strings.Join(f.dialed, " ") != want {
+			t.Errorf("dialed %v, want %s", f.dialed, want)
+		}
+	})
+}
+
+func TestInterleaveFamilies(t *testing.T) {
+	addrs := func(ss ...string) []net.IPAddr {
+		var out []net.IPAddr
+		for _, s := range ss {
+			out = append(out, net.IPAddr{IP: net.ParseIP(s)})
+		}
+		return out
+	}
+	str := func(ips []net.IPAddr) string {
+		var ss []string
+		for _, ip := range ips {
+			ss = append(ss, ip.IP.String())
+		}
+		return strings.Join(ss, " ")
+	}
+	for _, tc := range []struct{ in, want []net.IPAddr }{
+		{nil, nil},
+		{addrs("1.1.1.1"), addrs("1.1.1.1")},
+		{addrs("1.1.1.1", "1.1.1.2", "2606::1"), addrs("1.1.1.1", "2606::1", "1.1.1.2")},
+		{addrs("2606::1", "2606::2", "2606::3", "1.1.1.1"), addrs("2606::1", "1.1.1.1", "2606::2", "2606::3")},
+		{addrs("1.1.1.1", "2606::1", "1.1.1.2", "2606::2"), addrs("1.1.1.1", "2606::1", "1.1.1.2", "2606::2")},
+		{addrs("2606::1", "2606::2"), addrs("2606::1", "2606::2")},
+	} {
+		if got := interleaveFamilies(tc.in); str(got) != str(tc.want) {
+			t.Errorf("interleaveFamilies(%s) = %s, want %s", str(tc.in), str(got), str(tc.want))
+		}
+	}
+}
+
+// TestAttemptDeadline checks the per-attempt share, and that a budget which
+// has run out yields no attempt rather than one with an expired deadline.
+func TestAttemptDeadline(t *testing.T) {
+	now := time.Now()
+	ctx, cancel := context.WithDeadline(context.Background(), now.Add(8*time.Second))
+	defer cancel()
+
+	if d, ok := attemptDeadline(ctx, now, 4); !ok || !d.Equal(now.Add(2*time.Second)) {
+		t.Errorf("4 remaining: got %v, %v; want an equal 2s share", d.Sub(now), ok)
+	}
+	if d, ok := attemptDeadline(ctx, now, 8); !ok || !d.Equal(now.Add(minDialAttempt)) {
+		t.Errorf("8 remaining: got %v, %v; want the %v minimum", d.Sub(now), ok, minDialAttempt)
+	}
+	if d, ok := attemptDeadline(ctx, now.Add(7*time.Second), 4); !ok || !d.Equal(now.Add(8*time.Second)) {
+		t.Errorf("1s left: got %v, %v; want capped at the dial deadline", d.Sub(now), ok)
+	}
+	for _, at := range []time.Time{now.Add(8 * time.Second), now.Add(9 * time.Second)} {
+		if d, ok := attemptDeadline(ctx, at, 1); ok {
+			t.Errorf("no time left at %v: got deadline %v, want no attempt", at.Sub(now), d.Sub(now))
+		}
+	}
+}
+
 // TestSecureDialAddressFamily checks that a tcp4 or tcp6 dial only tries
 // that family, while every answer is still validated.
 func TestSecureDialAddressFamily(t *testing.T) {

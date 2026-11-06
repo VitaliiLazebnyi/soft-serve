@@ -70,8 +70,10 @@ func NewSecureClient() *http.Client {
 }
 
 // secureDial resolves addr's host once, validates every address it resolves
-// to, and dials up to maxDialAddrs of them in resolver order until one
-// connects, all within dialTimeout.
+// to, and dials up to maxDialAddrs of them until one connects, all within
+// dialTimeout. The addresses are tried in resolver order with the IPv4 and
+// IPv6 ones interleaved (see interleaveFamilies), so a broken route for one
+// family cannot use up every attempt.
 //
 // A host is refused outright if any of its addresses is private or internal,
 // even when others are public. A name that answers with a mix is a DNS
@@ -98,6 +100,7 @@ func secureDial(ctx context.Context, network, addr string) (net.Conn, error) {
 		return nil, err
 	}
 	total := len(ips)
+	ips = interleaveFamilies(ips)
 	if len(ips) > maxDialAddrs {
 		ips = ips[:maxDialAddrs]
 	}
@@ -108,7 +111,13 @@ func secureDial(ctx context.Context, network, addr string) (net.Conn, error) {
 		if dialStopped(ctx) != nil {
 			break
 		}
-		attemptCtx, cancel := context.WithDeadline(ctx, attemptDeadline(ctx, len(ips)-i))
+		deadline, ok := attemptDeadline(ctx, time.Now(), len(ips)-i)
+		if !ok {
+			// The budget ran out since dialStopped looked: leave this
+			// address untried rather than fail it on an expired deadline.
+			break
+		}
+		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
 		conn, err := dialContext(attemptCtx, network, net.JoinHostPort(ip.String(), port))
 		cancel()
 		if err == nil {
@@ -216,16 +225,50 @@ func resolveDialTargets(ctx context.Context, network, host string) ([]net.IPAddr
 }
 
 // attemptDeadline gives the next of the remaining attempts an equal share of
-// the time left on ctx, at least minDialAttempt, but never past ctx's own
-// deadline.
-func attemptDeadline(ctx context.Context, remaining int) time.Time {
-	now := time.Now()
+// the time left on ctx at now, at least minDialAttempt, but never past ctx's
+// own deadline. It reports false when no time is left, so the caller stops
+// instead of starting an attempt that is already out of time.
+func attemptDeadline(ctx context.Context, now time.Time, remaining int) (time.Time, bool) {
 	deadline, _ := ctx.Deadline() // secureDial always sets one
-	share := max(deadline.Sub(now)/time.Duration(remaining), minDialAttempt)
-	if d := now.Add(share); d.Before(deadline) {
-		return d
+	left := deadline.Sub(now)
+	if left <= 0 {
+		return time.Time{}, false
 	}
-	return deadline
+	share := max(left/time.Duration(remaining), minDialAttempt)
+	if d := now.Add(share); d.Before(deadline) {
+		return d, true
+	}
+	return deadline, true
+}
+
+// interleaveFamilies reorders ips so IPv4 and IPv6 addresses alternate,
+// starting with the family of the first answer and keeping resolver order
+// within each family, as RFC 8305 section 4 suggests. With the maxDialAddrs
+// cap, this keeps a name with many records of one family from filling every
+// slot with addresses that share one broken route.
+func interleaveFamilies(ips []net.IPAddr) []net.IPAddr {
+	if len(ips) < 2 {
+		return ips
+	}
+	firstIs4 := ips[0].IP.To4() != nil
+	var first, second []net.IPAddr
+	for _, ip := range ips {
+		if (ip.IP.To4() != nil) == firstIs4 {
+			first = append(first, ip)
+		} else {
+			second = append(second, ip)
+		}
+	}
+	out := make([]net.IPAddr, 0, len(ips))
+	for i := 0; i < len(first) || i < len(second); i++ {
+		if i < len(first) {
+			out = append(out, first[i])
+		}
+		if i < len(second) {
+			out = append(out, second[i])
+		}
+	}
+	return out
 }
 
 // blockedPrefixes lists every network an outbound request must not reach.
