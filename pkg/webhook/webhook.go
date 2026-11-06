@@ -216,6 +216,15 @@ func recordDelivery(ctx context.Context, w models.Webhook, event Event, req requ
 
 	// The delivery is recorded; a failed prune only leaves the extra rows
 	// for the next delivery's prune, so it is logged rather than returned.
+	//
+	// On Postgres seq is taken from its sequence when a row is inserted, not
+	// when it commits. Deliveries of one webhook are recorded by separate
+	// processes (the server and each git hook), so a delivery whose
+	// transaction commits late can already be older, by seq, than the
+	// newest maxDeliveries rows and be pruned by the next record. That needs
+	// maxDeliveries deliveries of the same webhook recorded while its insert
+	// is in flight; the cost is one delivery missing from the history, which
+	// pruning by seq accepts rather than ordering commits.
 	if err := datastore.PruneWebhookDeliveries(rctx, dbx, w.ID, maxDeliveries); err != nil {
 		log.Warn("pruning webhook deliveries", "webhook", w.ID, "err", err)
 	}
@@ -225,8 +234,9 @@ func recordDelivery(ctx context.Context, w models.Webhook, event Event, req requ
 // maxDeliveries is how many deliveries are kept per webhook. Every recorded
 // delivery deletes the older ones, so events, including ones recorded without
 // sending when the queue is full, cannot grow the deliveries table without
-// limit. Migration 5 trimmed existing tables to the same number. It is a
-// variable so tests can lower it.
+// limit. Migration 5 (pkg/db/migrate/0005_webhook_delivery_retention_*.up.sql)
+// trimmed existing tables once to the then value, 100; it is a snapshot and
+// does not follow later changes here. It is a variable so tests can lower it.
 var maxDeliveries = 100
 
 // MaxWebhooksPerRepo is how many webhooks a repository can have. Each event
