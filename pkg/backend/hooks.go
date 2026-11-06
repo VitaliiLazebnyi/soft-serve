@@ -50,7 +50,10 @@ func (d *Backend) Update(ctx context.Context, _ io.Writer, _ io.Writer, repo str
 		case errors.Is(err, proto.ErrUserNotFound):
 			// The SSH layer already authorized this push. A key without a
 			// user row, such as an initial_admin_keys entry with no account,
-			// still sends its events, with an empty sender.
+			// still sends its events, with an empty sender. This covers any
+			// unregistered key, so with anon-access read-write an anonymous
+			// SSH push sends them too. Keyless SSH and anonymous HTTP pushes
+			// set neither variable and still send nothing.
 			user = nil
 		case err != nil:
 			d.logger.Error("error finding user from public key", "key", pubkey, "err", err)
