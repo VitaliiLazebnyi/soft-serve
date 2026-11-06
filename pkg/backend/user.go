@@ -271,6 +271,27 @@ func (d *Backend) UserByID(ctx context.Context, id int64) (proto.User, error) {
 	}, nil
 }
 
+// ErrAdminKeyNonAdminOwner is returned by UserByPublicKey for a key that is
+// listed in initial_admin_keys but attached to a non-admin account. The SSH
+// server refuses sessions with such a key and shows this error. It matches
+// proto.ErrUserNotFound with errors.Is, since the key resolves to no
+// account.
+type ErrAdminKeyNonAdminOwner struct {
+	// Username is the non-admin account the key is attached to.
+	Username string
+}
+
+// Error implements error.
+func (e *ErrAdminKeyNonAdminOwner) Error() string {
+	return fmt.Sprintf("this key is listed in initial_admin_keys but is attached to non-admin account %q. "+
+		"If that account is yours, ask an admin to run `user set-admin %s true`; "+
+		"otherwise ask an admin to remove the key from it with `user remove-pubkey %s KEY`",
+		e.Username, e.Username, e.Username)
+}
+
+// Unwrap makes the error match proto.ErrUserNotFound.
+func (e *ErrAdminKeyNonAdminOwner) Unwrap() error { return proto.ErrUserNotFound }
+
 // UserByPublicKey finds a user by public key.
 //
 // It implements backend.Backend.
@@ -296,16 +317,20 @@ func (d *Backend) UserByPublicKey(ctx context.Context, pk ssh.PublicKey) (proto.
 	}
 
 	// A key listed in initial_admin_keys but owned by a non-admin account
-	// does not log in as that account. `pubkey add` takes a public key
+	// resolves to no account and the SSH server refuses sessions with it
+	// (see ErrAdminKeyNonAdminOwner). `pubkey add` takes a public key
 	// without proof of holding its private half, so the owner may have
-	// claimed someone else's key before it was listed. Acting as the
-	// owner would hand them every repository the key holder creates.
-	// The key keeps its admin rights from the config, with no account,
-	// like a listed key that is in no account at all.
+	// claimed someone else's key before it was listed; acting as the owner
+	// would hand them what the key holder does. Acting as nobody instead
+	// strands a legitimate owner without their account, so the session is
+	// refused with an error saying how to fix it.
 	if !m.Admin && d.isAdminKey(pk) {
-		d.logger.Warn("admin key is owned by a non-admin account; not using that account for the session",
-			"username", m.Username, "pk", sshutils.MarshalAuthorizedKey(pk))
-		return nil, proto.ErrUserNotFound
+		ak := sshutils.MarshalAuthorizedKey(pk)
+		if _, seen := d.warnedOwnedAdminKeys.LoadOrStore(ak, struct{}{}); !seen {
+			d.logger.Warn("admin key is owned by a non-admin account; refusing sessions with it until an admin runs `user set-admin` on that account or removes the key from it",
+				"username", m.Username, "pk", ak)
+		}
+		return nil, &ErrAdminKeyNonAdminOwner{Username: m.Username}
 	}
 
 	return &user{

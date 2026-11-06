@@ -1,11 +1,13 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -324,13 +326,15 @@ func TestHTTPAdminOnlyByAdminFlag(t *testing.T) {
 
 // A key listed in initial_admin_keys that a non-admin account owns does not
 // resolve to that account: the owner may have claimed it with `pubkey add`
-// before it was listed, and the key holder's session would otherwise act as
-// them (and own what it creates). The key keeps admin access with no
-// account. A listed key owned by an admin account resolves as before, and
-// unlisting the key restores the ordinary lookup.
+// before it was listed. The lookup returns ErrAdminKeyNonAdminOwner naming
+// the account (the SSH server refuses the session with it), and the warning
+// is logged once per key. A listed key owned by an admin account resolves
+// as before, and so does the owner once promoted or once the key is
+// unlisted.
 func TestListedAdminKeyOwnedByNonAdminHasNoAccount(t *testing.T) {
 	is := is.New(t)
-	be, cfg := newTestBackend(t)
+	var logs bytes.Buffer
+	be, cfg := newTestBackendWithLog(t, &logs)
 	ctx := backendTestContext(be, cfg)
 
 	claimed := newTestPublicKey(t)
@@ -348,8 +352,16 @@ func TestListedAdminKeyOwnedByNonAdminHasNoAccount(t *testing.T) {
 	cfg.InitialAdminKeys = append(append([]string{}, orig...),
 		sshutils.MarshalAuthorizedKey(claimed), sshutils.MarshalAuthorizedKey(bossKey))
 
-	_, err = be.UserByPublicKey(ctx, claimed)
-	is.True(errors.Is(err, proto.ErrUserNotFound))
+	for range 3 {
+		_, err = be.UserByPublicKey(ctx, claimed)
+		is.True(errors.Is(err, proto.ErrUserNotFound))
+		var owned *ErrAdminKeyNonAdminOwner
+		is.True(errors.As(err, &owned))
+		is.Equal(owned.Username, "mallory")
+		is.True(strings.Contains(err.Error(), "user set-admin mallory true"))
+		is.True(strings.Contains(err.Error(), "user remove-pubkey mallory KEY"))
+	}
+	is.Equal(strings.Count(logs.String(), "admin key is owned by a non-admin account"), 1)
 	is.Equal(be.BaseAccessLevelByPublicKey(ctx, claimed), access.AdminAccess)
 
 	// A private repository made with the key goes to the default admin,
@@ -369,4 +381,13 @@ func TestListedAdminKeyOwnedByNonAdminHasNoAccount(t *testing.T) {
 	u, err = be.UserByPublicKey(ctx, claimed)
 	is.NoErr(err)
 	is.Equal(u.Username(), "mallory")
+
+	// Promoting the owner (the fix when the key is theirs) resolves the
+	// listed key to them again, keeping their account.
+	cfg.InitialAdminKeys = append(append([]string{}, orig...), sshutils.MarshalAuthorizedKey(claimed))
+	is.NoErr(be.SetAdmin(ctx, "mallory", true))
+	u, err = be.UserByPublicKey(ctx, claimed)
+	is.NoErr(err)
+	is.Equal(u.Username(), "mallory")
+	is.True(u.IsAdmin())
 }

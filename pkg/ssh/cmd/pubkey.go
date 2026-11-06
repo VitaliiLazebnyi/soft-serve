@@ -43,8 +43,8 @@ func PubkeyCommand() *cobra.Command {
 			// Adding a key proves nothing about holding its private half,
 			// so a non-admin may not attach a key listed in
 			// initial_admin_keys. (Sessions with a listed key owned by a
-			// non-admin do not act as that account anyway; see
-			// Backend.UserByPublicKey.) The error says why, so a new admin
+			// non-admin are refused anyway; see
+			// backend.ErrAdminKeyNonAdminOwner.) The error says why, so a new admin
 			// knows to ask an admin rather than retry. That tells the
 			// caller the key is listed, which is harmless: it is a public
 			// key, and listing grants nothing without the private half.

@@ -37,6 +37,11 @@ type Backend struct {
 	adminKeysSrc []string
 	adminKeys    []ssh.PublicKey
 	adminKeysOK  bool
+
+	// warnedOwnedAdminKeys holds the authorized-key strings of listed admin
+	// keys already logged as owned by a non-admin account, so the warning
+	// is logged once per key rather than on every lookup.
+	warnedOwnedAdminKeys sync.Map
 }
 
 // New returns a new Soft Serve backend.
