@@ -1,0 +1,63 @@
+# vi: set ft=conf
+
+# An inactive webhook is sent nothing: not the events of a push, and not a
+# manual redelivery, which reports that the webhook is not active.
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+soft repo create repo-inactive
+new-webhook WH_INACTIVE
+soft repo webhook create repo-inactive $WH_INACTIVE -e branch_tag_create -e push
+
+# while active, the first push is delivered
+git clone ssh://localhost:$SSH_PORT/repo-inactive repo-inactive
+mkfile ./repo-inactive/README.md 'foobar'
+git -C repo-inactive add -A
+git -C repo-inactive commit -m 'first'
+git -C repo-inactive push origin HEAD
+webhook-received
+[windows] dos2unix received-active.txt
+cmp stdout received-active.txt
+
+soft repo webhook deliver list repo-inactive 1
+envmatch DELIVERY_ID stdout '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\W+push'
+
+# switch the webhook off
+soft repo webhook update repo-inactive 1 --active false
+soft repo webhook list repo-inactive
+stdout '1.*93.184.216.34/hooks/WH_INACTIVE.*false'
+
+# a push sends nothing and records no delivery
+mkfile ./repo-inactive/README.md 'second'
+git -C repo-inactive commit -am 'second'
+git -C repo-inactive push origin HEAD
+webhook-received
+cmp stdout received-active.txt
+
+# redelivery is refused and sends nothing
+! soft repo webhook deliver redeliver repo-inactive 1 $DELIVERY_ID
+stderr 'webhook is not active'
+webhook-received
+cmp stdout received-active.txt
+
+# once active again, the same delivery can be redelivered
+soft repo webhook update repo-inactive 1 --active true
+soft repo webhook deliver redeliver repo-inactive 1 $DELIVERY_ID
+webhook-received
+[windows] dos2unix received-redelivered.txt
+cmp stdout received-redelivered.txt
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .
+
+-- received-active.txt --
+branch_tag_create /hooks/WH_INACTIVE
+push /hooks/WH_INACTIVE
+-- received-redelivered.txt --
+branch_tag_create /hooks/WH_INACTIVE
+push /hooks/WH_INACTIVE
+push /hooks/WH_INACTIVE
