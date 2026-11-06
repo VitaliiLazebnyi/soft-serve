@@ -20,7 +20,9 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
+	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/matryer/is"
 )
 
@@ -482,8 +484,9 @@ func TestDeliverSlowWebhookDoesNotStarveOthers(t *testing.T) {
 	is.Equal(rec.calls, 1)
 }
 
-// A send whose context is already done fails, but the attempt is still
-// recorded: the row is written with a context of its own.
+// A delivery whose context is already done sends nothing, but it is still
+// recorded: the row is written with a context of its own. (With the context
+// done, the re-read before the send fails, so it is recorded as undelivered.)
 func TestDeliverRecordsAttemptAfterContextDone(t *testing.T) {
 	is := is.New(t)
 	useHTTPClient(t)
@@ -586,6 +589,37 @@ func TestDeliverSkipsRemovedOrUnsubscribedWebhook(t *testing.T) {
 
 	is.Equal(rec.calls, 0)
 	is.Equal(len(e.deliveries(t, unsubscribed.ID)), 0)
+}
+
+// failingLookupStore is a store whose event lookup fails, as during a database
+// error, while everything else works.
+type failingLookupStore struct {
+	store.Store
+}
+
+func (failingLookupStore) GetWebhooksByRepoIDWhereEvent(context.Context, db.Handler, int64, []int) ([]models.Webhook, error) {
+	return nil, errors.New("lookup failed")
+}
+
+// A webhook that cannot be re-read before its send may have been deactivated,
+// so it is not sent to. The event is recorded as undelivered instead, so it
+// can be redelivered, with the lookup error kept on the recorded delivery.
+func TestDeliverRecordsUndeliveredWhenRereadFails(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	e := newTestEnv(t)
+	srv, rec := newReceiver(t, http.StatusOK, "")
+	w := e.newWebhook(t, srv.URL, "", ContentTypeJSON, EventPush)
+	ctx := store.WithContext(e.ctx, failingLookupStore{e.ds})
+
+	is.NoErr(Deliver(ctx, []models.Webhook{w}, samplePayloadFor(e)))
+
+	is.Equal(rec.calls, 0)
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.True(strings.Contains(ds[0].RequestError.String, "lookup failed"))
+	is.Equal(ds[0].ResponseStatus, 0)
+	is.Equal(ds[0].Event, int(EventPush))
 }
 
 // endlessServer answers with a 200 and streams a body that never ends, until

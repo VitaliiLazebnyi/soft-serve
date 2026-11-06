@@ -250,7 +250,8 @@ func Subscribers(ctx context.Context, payload EventPayload) ([]models.Webhook, e
 // Deliver sends the payload to each webhook and records every attempt. Each
 // webhook is re-read just before its send: one deleted or unsubscribed since
 // hooks was read is skipped, as is one deactivated since, and a changed URL or
-// secret is used.
+// secret is used. A webhook that cannot be re-read is not sent to: the event
+// is recorded for it as undelivered, so it can be redelivered later.
 func Deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload) error {
 	return deliver(ctx, hooks, payload, true)
 }
@@ -270,10 +271,23 @@ func deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload, 
 	var errs []error
 	for _, w := range hooks {
 		if record {
-			var ok bool
-			if w, ok = currentHook(ctx, w, payload.Event()); !ok {
+			cur, ok, err := currentHook(ctx, w, payload.Event())
+			if err != nil {
+				// Whether w may still be sent to is unknown, so it is not
+				// sent to. The event is recorded as undelivered instead, with
+				// the error, so it can be redelivered once the webhook can be
+				// read. As with a failed send, only a failure to record it is
+				// returned.
+				err = fmt.Errorf("webhook %d not sent: re-reading it failed: %w", w.ID, err)
+				if err := RecordUndelivered(ctx, []models.Webhook{w}, payload, err); err != nil {
+					errs = append(errs, err)
+				}
 				continue
 			}
+			if !ok {
+				continue
+			}
+			w = cur
 		}
 		if err := sendWebhook(ctx, w, payload.Event(), payload, record); err != nil {
 			errs = append(errs, err)
@@ -285,22 +299,22 @@ func deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload, 
 // currentHook re-reads w right before it is sent, since a delivery can wait in
 // the background queue while its webhook is changed. It returns the webhook as
 // stored now, so a rotated secret or changed URL is used, and false when the
-// webhook was deleted, deactivated, or no longer subscribes to event. If the
-// webhook cannot be read, w is returned unchanged and the send goes ahead as
-// before, with its outcome recorded as usual.
-func currentHook(ctx context.Context, w models.Webhook, event Event) (models.Webhook, bool) {
+// webhook was deleted, deactivated, or no longer subscribes to event. It
+// returns an error when the webhook cannot be read; the caller then does not
+// send, since the webhook may have been deactivated.
+func currentHook(ctx context.Context, w models.Webhook, event Event) (models.Webhook, bool, error) {
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
 	hooks, err := datastore.GetWebhooksByRepoIDWhereEvent(ctx, dbx, w.RepoID, []int{int(event)})
 	if err != nil {
-		return w, true
+		return models.Webhook{}, false, db.WrapError(err)
 	}
 	for _, h := range hooks {
 		if h.ID == w.ID {
-			return h, true
+			return h, true, nil
 		}
 	}
-	return models.Webhook{}, false
+	return models.Webhook{}, false, nil
 }
 
 // SendEvent sends a webhook event to the repository's subscribers.
