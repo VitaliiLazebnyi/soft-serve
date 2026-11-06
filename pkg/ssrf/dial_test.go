@@ -290,7 +290,11 @@ func TestSecureClientFailover(t *testing.T) {
 	f := newFakeDialer(t)
 	f.route = map[string]string{"140.82.112.4:80": srv.Listener.Addr().String()}
 
-	resp, err := NewSecureClient().Get("http://multi.example/hook")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://multi.example/hook", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := NewSecureClient().Do(req)
 	if err != nil {
 		t.Fatalf("Get() error = %v, want failover to the second address", err)
 	}
