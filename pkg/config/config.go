@@ -53,7 +53,8 @@ type SSHConfig struct {
 	// ClientAllowedHosts lists the ssh hosts users may import from or mirror.
 	// The client key is presented to every one of them. Entries are
 	// hostnames, IP addresses, or CIDR ranges with an optional port. When
-	// empty, only server admins may use ssh remotes.
+	// empty, only server admins may use ssh remotes; when not, it binds
+	// admins too.
 	ClientAllowedHosts []string `env:"CLIENT_ALLOWED_HOSTS" yaml:"client_allowed_hosts"`
 
 	// MaxTimeout is the maximum number of seconds a connection can take.

@@ -43,6 +43,9 @@ stderr 'import failed'
 ! usoft repo import --mirror user2 ssh://git@127.0.0.1:1/x.git
 stderr 'unauthorized'
 stderr 'owner is not an admin'
+stderr 'make the owner an admin'
+stderr 'also limits admins'
+stderr 'import without --mirror'
 
 soft repo list
 ! stdout 'anon'
