@@ -146,3 +146,36 @@ func TestDeliverUnrecordedCancelKeepsCanceled(t *testing.T) {
 	assertNoSecret(t, err.Error())
 	is.True(errors.Is(err, context.Canceled))
 }
+
+// A stored webhook URL that cannot be parsed fails in http.NewRequest. The
+// parse error quotes part of the URL (here the port), so both the returned and
+// the recorded error must say only "invalid URL" and carry no part of it.
+func TestDeliverUnparsableURLRedactsURL(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	e := newTestEnv(t)
+	w := e.newWebhook(t, "http://USERSECRET@example.com:PORTSECRET"+secretPath+secretQuery, "", ContentTypeJSON, EventPush)
+
+	assertRedacted := func(s string) {
+		t.Helper()
+		assertNoSecret(t, s)
+		for _, part := range []string{"PORTSECRET", "example.com"} {
+			if strings.Contains(s, part) {
+				t.Fatalf("%q contains %q", s, part)
+			}
+		}
+		is.True(strings.Contains(s, "invalid URL"))
+	}
+
+	err := DeliverUnrecorded(e.ctx, []models.Webhook{w}, samplePayloadFor(e))
+	is.True(err != nil)
+	is.True(errors.Is(err, errInvalidURL))
+	is.Equal(err.Error(), fmt.Sprintf("webhook %d: parse \"[redacted]\": invalid URL", w.ID))
+	assertRedacted(err.Error())
+
+	is.NoErr(Deliver(e.ctx, []models.Webhook{w}, samplePayloadFor(e)))
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.Equal(ds[0].ResponseStatus, 0)
+	assertRedacted(ds[0].RequestError.String)
+}

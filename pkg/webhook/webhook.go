@@ -70,6 +70,10 @@ const redactedURLPart = "[redacted]"
 // (Slack, Discord, Teams and the like) put a token in the path or query, so
 // those parts, the fragment and any user info are replaced with
 // redactedURLPart. A URL that cannot be parsed is replaced entirely.
+//
+// The host is kept on purpose, so an operator can tell which receiver failed.
+// A receiver that puts a token in the host name (a per-hook subdomain such as
+// https://<id>.m.pipedream.net) therefore still has that token in the error.
 func redactURL(rawURL string) string {
 	u, err := neturl.Parse(rawURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
