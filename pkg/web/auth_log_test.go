@@ -38,7 +38,7 @@ func TestAuthDoesNotLogCredentials(t *testing.T) {
 		badPass  = "bad-password-do-not-log"
 	)
 	basic := func(user, pass string) string {
-		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
 		r.SetBasicAuth(user, pass)
 		return r.Header.Get("Authorization")
 	}
