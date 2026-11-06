@@ -4,13 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/soft-serve/pkg/access"
-	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
@@ -29,25 +26,8 @@ func (d *Backend) AccessLevel(ctx context.Context, repo string, username string)
 
 // isAdminKey reports whether pk is one of the configured admin keys.
 func (d *Backend) isAdminKey(pk ssh.PublicKey) bool {
-	if pk == nil {
-		return false
-	}
-	for _, k := range d.adminKeys.get(d.cfg) {
+	for _, k := range d.cfg.AdminKeys() {
 		if sshutils.KeysEqual(pk, k) {
-			return true
-		}
-	}
-	return false
-}
-
-// ownsAdminKey reports whether one of the public keys stored for user in the
-// database is a configured admin key.
-func (d *Backend) ownsAdminKey(user proto.User) bool {
-	if user == nil {
-		return false
-	}
-	for _, pk := range user.PublicKeys() {
-		if d.isAdminKey(pk) {
 			return true
 		}
 	}
@@ -59,20 +39,11 @@ func (d *Backend) ownsAdminKey(user proto.User) bool {
 // Admin keys are only seeded into the database on first migration, so a key
 // added to initial_admin_keys later is checked here. It matches the SSH
 // layer's isServerAdmin.
-//
-// When ctx carries no public key (HTTP: token, password or JWT), the caller
-// is a server admin if their account owns an admin key, which is the answer
-// SSH gives that user when they connect with it. Over SSH the key the
-// session authenticated with decides, so a session on another key of the
-// same account is not promoted.
 func (d *Backend) isServerAdmin(ctx context.Context, user proto.User) bool {
 	if user != nil && user.IsAdmin() {
 		return true
 	}
-	if pk := sshutils.PublicKeyFromContext(ctx); pk != nil {
-		return d.isAdminKey(pk)
-	}
-	return d.ownsAdminKey(user)
+	return d.isAdminKey(sshutils.PublicKeyFromContext(ctx))
 }
 
 // AccessLevelByPublicKey returns the access level of a user's public key for a repository.
@@ -560,25 +531,4 @@ func (u *user) Password() string {
 	}
 
 	return ""
-}
-
-// adminKeyCache holds the parsed initial_admin_keys. Parsing on every
-// request is wasteful, so the parsed keys are kept until the configured list
-// changes.
-type adminKeyCache struct {
-	mu     sync.Mutex
-	parsed bool
-	src    []string
-	keys   []ssh.PublicKey
-}
-
-func (c *adminKeyCache) get(cfg *config.Config) []ssh.PublicKey {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.parsed || !slices.Equal(c.src, cfg.InitialAdminKeys) {
-		c.src = slices.Clone(cfg.InitialAdminKeys)
-		c.keys = cfg.AdminKeys()
-		c.parsed = true
-	}
-	return c.keys
 }

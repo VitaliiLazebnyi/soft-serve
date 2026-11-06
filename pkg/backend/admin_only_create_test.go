@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -254,17 +255,13 @@ func TestBackendAllowsAdminKeyCreatesWhenFlagOn(t *testing.T) {
 			}
 			keyCtx := context.WithValue(ctx, charmssh.ContextKeyPublicKey, pub)
 
-			// Without the key on the context (HTTP), an anonymous caller is
-			// refused; the account that owns the key is the subject of
-			// TestHTTPAdminKeyOwnerCreatesWhenFlagOn.
-			if !registered {
-				_, err := be.CreateRepository(ctx, "nokey", user, proto.RepositoryOptions{})
-				is.True(errors.Is(err, proto.ErrUnauthorized))
-			}
+			// Without the key on the context, the same user is refused.
+			_, err := be.CreateRepository(ctx, "nokey", user, proto.RepositoryOptions{})
+			is.True(errors.Is(err, proto.ErrUnauthorized))
 
 			is.Equal(be.AccessLevelForUser(keyCtx, "fresh", user), access.AdminAccess)
 
-			_, err := be.CreateRepository(keyCtx, "made", user, proto.RepositoryOptions{})
+			_, err = be.CreateRepository(keyCtx, "made", user, proto.RepositoryOptions{})
 			is.NoErr(err)
 			_, err = be.ImportRepository(keyCtx, "imported", user, "https://example.invalid/x.git", proto.RepositoryOptions{})
 			is.True(!errors.Is(err, proto.ErrUnauthorized))
@@ -280,61 +277,47 @@ func TestBackendAllowsAdminKeyCreatesWhenFlagOn(t *testing.T) {
 	}
 }
 
-// Over HTTP there is no public key on the context, so a server admin is
-// recognised by the keys stored for the authenticated account: one that owns
-// an initial_admin_keys key may create, as it may over SSH with that key. An
-// account without such a key and an anonymous caller are refused, and over
-// SSH a session on another key of the same account is not promoted.
-func TestHTTPAdminKeyOwnerCreatesWhenFlagOn(t *testing.T) {
+// Over HTTP (token, password or JWT) there is no public key on the context,
+// so the only server-admin signal is the account's admin flag. Owning a key
+// listed in initial_admin_keys must not count: `pubkey add` attaches a key
+// without proof of holding its private half, so a user could claim a key
+// before an operator lists it and become an admin over HTTP.
+func TestHTTPAdminOnlyByAdminFlag(t *testing.T) {
 	is := is.New(t)
 	be, cfg := newTestBackend(t)
 	ctx := backendTestContext(be, cfg)
 	cfg.AdminOnlyCreate = true
 
-	adminPub := newTestPublicKey(t)
-	otherPub := newTestPublicKey(t)
-	cfg.InitialAdminKeys = append(cfg.InitialAdminKeys, sshutils.MarshalAuthorizedKey(adminPub))
-
-	_, err := be.CreateUser(ctx, "alice", proto.UserOptions{PublicKeys: []ssh.PublicKey{otherPub, adminPub}})
+	claimed := newTestPublicKey(t)
+	_, err := be.CreateUser(ctx, "mallory", proto.UserOptions{PublicKeys: []ssh.PublicKey{claimed}})
 	is.NoErr(err)
-	_, err = be.CreateUser(ctx, "bob", proto.UserOptions{PublicKeys: []ssh.PublicKey{newTestPublicKey(t)}})
+	_, err = be.CreateUser(ctx, "boss", proto.UserOptions{Admin: true, PublicKeys: []ssh.PublicKey{newTestPublicKey(t)}})
 	is.NoErr(err)
 
-	// Load the users the way the HTTP layer does, by name (password, JWT)
-	// and by access token, so the keys come from the database.
-	alice, err := be.User(ctx, "alice")
-	is.NoErr(err)
-	is.True(!alice.IsAdmin())
-	bob, err := be.User(ctx, "bob")
-	is.NoErr(err)
+	// The operator lists the key after mallory attached it.
+	cfg.InitialAdminKeys = append(cfg.InitialAdminKeys, sshutils.MarshalAuthorizedKey(claimed))
 
-	is.Equal(be.AccessLevelForUser(ctx, "fresh", alice), access.AdminAccess)
-	_, err = be.CreateRepository(ctx, "alice-made", alice, proto.RepositoryOptions{})
-	is.NoErr(err)
+	// Load the users the way the HTTP layer does: by name (password, JWT)
+	// and by access token.
+	load := func(name string) []proto.User {
+		u, err := be.User(ctx, name)
+		is.NoErr(err)
+		tok, err := be.CreateAccessToken(ctx, u, "t", time.Time{})
+		is.NoErr(err)
+		byToken, err := be.UserByAccessToken(ctx, tok)
+		is.NoErr(err)
+		return []proto.User{u, byToken}
+	}
 
-	tok, err := be.CreateAccessToken(ctx, alice, "t", time.Time{})
-	is.NoErr(err)
-	byToken, err := be.UserByAccessToken(ctx, tok)
-	is.NoErr(err)
-	_, err = be.CreateRepository(ctx, "alice-token", byToken, proto.RepositoryOptions{})
-	is.NoErr(err)
-
-	is.Equal(be.AccessLevelForUser(ctx, "fresh", bob), access.ReadOnlyAccess)
-	_, err = be.CreateRepository(ctx, "bob-made", bob, proto.RepositoryOptions{})
-	is.True(errors.Is(err, proto.ErrUnauthorized))
-
-	is.Equal(be.AccessLevelForUser(ctx, "fresh", nil), access.ReadOnlyAccess)
-	_, err = be.CreateRepository(ctx, "anon-made", nil, proto.RepositoryOptions{})
-	is.True(errors.Is(err, proto.ErrUnauthorized))
-
-	// SSH: the key the session authenticated with decides.
-	otherCtx := context.WithValue(ctx, charmssh.ContextKeyPublicKey, otherPub)
-	is.Equal(be.AccessLevelForUser(otherCtx, "fresh", alice), access.ReadOnlyAccess)
-	_, err = be.CreateRepository(otherCtx, "alice-other-key", alice, proto.RepositoryOptions{})
-	is.True(errors.Is(err, proto.ErrUnauthorized))
-
-	// Removing the key from initial_admin_keys takes effect at once.
-	cfg.InitialAdminKeys = nil
-	_, err = be.CreateRepository(ctx, "alice-removed", alice, proto.RepositoryOptions{})
-	is.True(errors.Is(err, proto.ErrUnauthorized))
+	for i, u := range load("mallory") {
+		is.True(!u.IsAdmin())
+		is.Equal(be.AccessLevelForUser(ctx, "fresh", u), access.ReadOnlyAccess)
+		_, err := be.CreateRepository(ctx, fmt.Sprintf("mallory-%d", i), u, proto.RepositoryOptions{})
+		is.True(errors.Is(err, proto.ErrUnauthorized))
+	}
+	for i, u := range load("boss") {
+		is.Equal(be.AccessLevelForUser(ctx, "fresh", u), access.AdminAccess)
+		_, err := be.CreateRepository(ctx, fmt.Sprintf("boss-%d", i), u, proto.RepositoryOptions{})
+		is.NoErr(err)
+	}
 }

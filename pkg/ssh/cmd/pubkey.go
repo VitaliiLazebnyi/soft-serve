@@ -5,7 +5,7 @@ import (
 
 	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/config"
-	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"github.com/spf13/cobra"
 )
@@ -36,11 +36,15 @@ func PubkeyCommand() *cobra.Command {
 				return err
 			}
 
-			// An account that owns an admin key is a server admin over
-			// HTTP, and adding a key proves nothing about holding its
-			// private half, so only a server admin may attach one.
-			if IsPublicKeyAdmin(config.FromContext(ctx), apk) && !isServerAdmin(ctx) {
-				return proto.ErrUnauthorized
+			// Adding a key proves nothing about holding its private half,
+			// so a non-admin may not attach a key listed in
+			// initial_admin_keys: whoever owns it in the database is the
+			// account an admin-key session acts as. The refusal looks
+			// like the key being taken by another account, which is what
+			// it is once the key is reconciled into the database, so it
+			// does not tell the caller which keys are admin keys.
+			if !isServerAdmin(ctx) && IsPublicKeyAdmin(config.FromContext(ctx), apk) {
+				return db.ErrDuplicateKey
 			}
 
 			return be.AddPublicKey(ctx, user.Username(), apk)

@@ -12,6 +12,7 @@ import (
 
 	"charm.land/ssh"
 	"github.com/charmbracelet/soft-serve/pkg/config"
+	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"github.com/matryer/is"
@@ -99,10 +100,11 @@ func TestAdminKeyCreatesRepositoriesWhenFlagOn(t *testing.T) {
 	is.True(!errors.Is(runRepo(t, keyCtx, "import", "imported", "https://example.invalid/x.git"), proto.ErrUnauthorized))
 }
 
-// An account that owns an initial_admin_keys key is a server admin over HTTP,
-// and `pubkey add` takes any public key without proof of holding its private
-// half, so a non-admin may not attach an admin key to their own account. A
-// server admin may, and ordinary keys are unaffected.
+// `pubkey add` takes any public key without proof of holding its private
+// half, so a non-admin may not attach a key listed in initial_admin_keys to
+// their own account. The refusal is the same error as for a key another
+// account owns, so it does not reveal which keys are admin keys. A server
+// admin may attach it, and ordinary keys are unaffected.
 func TestPubkeyAddRefusesAdminKeyForNonAdmin(t *testing.T) {
 	is := is.New(t)
 	newKey := func() gossh.PublicKey {
@@ -134,7 +136,11 @@ func TestPubkeyAddRefusesAdminKeyForNonAdmin(t *testing.T) {
 	}
 
 	workerCtx := session("worker", false)
-	is.True(errors.Is(runPubkey(workerCtx, "add", sshutils.MarshalAuthorizedKey(adminPub)), proto.ErrUnauthorized))
+	is.True(errors.Is(runPubkey(workerCtx, "add", sshutils.MarshalAuthorizedKey(adminPub)), db.ErrDuplicateKey))
+	taken := newKey()
+	_, err := be.CreateUser(ctx, "other", proto.UserOptions{PublicKeys: []gossh.PublicKey{taken}})
+	is.NoErr(err)
+	is.True(errors.Is(runPubkey(workerCtx, "add", sshutils.MarshalAuthorizedKey(taken)), db.ErrDuplicateKey))
 	keys, err := be.ListPublicKeys(ctx, "worker")
 	is.NoErr(err)
 	is.Equal(len(keys), 1)
