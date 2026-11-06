@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
-	"syscall"
 	"testing"
 
 	"charm.land/log/v2"
@@ -82,7 +81,8 @@ func TestBatchRedactsEndpoint(t *testing.T) {
 		t.Fatal("expected the batch request to fail")
 	}
 	var uerr *url.Error
-	if !errors.As(err, &uerr) || !errors.Is(err, syscall.ECONNREFUSED) {
+	var operr *net.OpError
+	if !errors.As(err, &uerr) || !errors.As(err, &operr) {
 		t.Errorf("error lost its type: %#v", err)
 	}
 	assertNoSecrets(t, "error", err.Error(), "TOKEN", "PASSWORD")
