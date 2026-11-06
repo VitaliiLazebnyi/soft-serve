@@ -241,6 +241,7 @@ func TestWebhookStoreErrorsOnClosedDB(t *testing.T) {
 	checks := map[string]error{}
 	_, checks["GetWebhookByID"] = s.GetWebhookByID(ctx, dbx, 7, id)
 	_, checks["GetWebhooksByRepoID"] = s.GetWebhooksByRepoID(ctx, dbx, 7)
+	_, checks["LockAndCountWebhooks"] = s.LockAndCountWebhooks(ctx, dbx, 7)
 	_, checks["GetWebhooksByRepoIDWhereEvent"] = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, []int{4})
 	_, checks["CreateWebhook"] = s.CreateWebhook(ctx, dbx, 7, "u", "", 0, true)
 	checks["UpdateWebhookByID"] = s.UpdateWebhookByID(ctx, dbx, 7, id, "u", "", 0, true)
@@ -489,4 +490,23 @@ func idsOf(whs []models.Webhook) []int64 {
 		out[i] = w.ID
 	}
 	return out
+}
+
+// LockAndCountWebhooks counts only the given repository's webhooks.
+func TestLockAndCountWebhooks(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+	n, err := s.LockAndCountWebhooks(ctx, dbx, 7)
+	is.NoErr(err)
+	is.Equal(n, 0)
+	for i := range 3 {
+		_, err := s.CreateWebhook(ctx, dbx, 7, fmt.Sprintf("https://93.184.216.34/%d", i), "", 1, true)
+		is.NoErr(err)
+	}
+	_, err = s.CreateWebhook(ctx, dbx, 8, "https://93.184.216.35/x", "", 1, true)
+	is.NoErr(err)
+	n, err = s.LockAndCountWebhooks(ctx, dbx, 7)
+	is.NoErr(err)
+	is.Equal(n, 3)
 }

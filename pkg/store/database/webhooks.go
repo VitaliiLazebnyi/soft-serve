@@ -212,6 +212,24 @@ func (*webhookStore) GetWebhooksByRepoID(ctx context.Context, h db.Handler, repo
 	return whs, err
 }
 
+// LockAndCountWebhooks implements store.WebhookStore.
+//
+// Postgres runs transactions in READ COMMITTED, where two transactions can
+// each count the same webhooks and both insert one more. Locking the
+// repository row first makes the second wait until the first commits; its
+// COUNT then runs with a fresh snapshot and sees the first one's webhook.
+// SQLite has no FOR UPDATE and needs none: it allows one writer at a time.
+func (*webhookStore) LockAndCountWebhooks(ctx context.Context, h db.Handler, repoID int64) (int, error) {
+	if d, ok := h.(interface{ DriverName() string }); ok && d.DriverName() == "postgres" {
+		if _, err := h.ExecContext(ctx, `SELECT 1 FROM repos WHERE id = $1 FOR UPDATE;`, repoID); err != nil {
+			return 0, err
+		}
+	}
+	var n int
+	err := h.GetContext(ctx, &n, h.Rebind(`SELECT COUNT(*) FROM webhooks WHERE repo_id = ?;`), repoID)
+	return n, err
+}
+
 // GetWebhooksByRepoIDWhereEvent implements store.WebhookStore.
 func (*webhookStore) GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Handler, repoID int64, events []int) ([]models.Webhook, error) {
 	if len(events) == 0 {
