@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	charmlog "charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
@@ -444,9 +445,15 @@ func TestRedeliverRecordsNewDelivery(t *testing.T) {
 
 // Redelivery logs identifiers only, never the stored request body, headers
 // or the hook URL.
+//
+// The old leak went through the global logger, so that is captured too. The
+// test swaps the global default logger and must not run in parallel.
 func TestRedeliverDoesNotLogPayload(t *testing.T) {
 	is := is.New(t)
 	e := newWebhookEnv(t)
+	prev := charmlog.Default()
+	charmlog.SetDefault(charmlog.New(e.logs))
+	t.Cleanup(func() { charmlog.SetDefault(prev) })
 	id := e.createHook(t, whURL, webhook.EventPush)
 	const hookURL = "http://127.0.0.1:1/secret-path?token=hook-token"
 	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
