@@ -56,9 +56,9 @@ func (d *Backend) isAdminKey(pk ssh.PublicKey) bool {
 
 // isServerAdmin reports whether the caller is a server admin: user has the
 // admin flag, or the public key on ctx is one of the configured admin keys.
-// Admin keys are only seeded into the database on first migration, so a key
-// added to initial_admin_keys later is checked here. It matches the SSH
-// layer's isServerAdmin.
+// Admin keys are attached to an admin user on every start, but a key that a
+// non-admin account already owns stays on that account, and a key with no
+// unambiguous admin to go to is not attached, so the key is checked here too. It matches the SSH layer's isServerAdmin.
 func (d *Backend) isServerAdmin(ctx context.Context, user proto.User) bool {
 	if user != nil && user.IsAdmin() {
 		return true

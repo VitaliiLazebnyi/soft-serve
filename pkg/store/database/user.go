@@ -31,8 +31,18 @@ func (*userStore) AddPublicKeyByUsername(ctx context.Context, tx db.Handler, use
 	query := tx.Rebind(`INSERT INTO public_keys (user_id, public_key, updated_at)
 			VALUES (?, ?, CURRENT_TIMESTAMP);`)
 	ak := sshutils.MarshalAuthorizedKey(pk)
-	_, err := tx.ExecContext(ctx, query, userID, ak)
+	if _, err := tx.ExecContext(ctx, query, userID, ak); err != nil {
+		return err
+	}
 
+	return forgetSyncedAdminKey(ctx, tx, ak)
+}
+
+// forgetSyncedAdminKey deletes the record that the initial_admin_keys sync
+// attached ak, so a key added or removed by hand is no longer removed when it
+// leaves the config.
+func forgetSyncedAdminKey(ctx context.Context, tx db.Handler, ak string) error {
+	_, err := tx.ExecContext(ctx, tx.Rebind(`DELETE FROM settings WHERE "key" = ?;`), db.SyncedAdminKeyPrefix+ak)
 	return err
 }
 
@@ -55,8 +65,10 @@ func (*userStore) CreateUser(ctx context.Context, tx db.Handler, username string
 		query := tx.Rebind(`INSERT INTO public_keys (user_id, public_key, updated_at)
 			VALUES (?, ?, CURRENT_TIMESTAMP);`)
 		ak := sshutils.MarshalAuthorizedKey(pk)
-		_, err := tx.ExecContext(ctx, query, userID, ak)
-		if err != nil {
+		if _, err := tx.ExecContext(ctx, query, userID, ak); err != nil {
+			return err
+		}
+		if err := forgetSyncedAdminKey(ctx, tx, ak); err != nil {
 			return err
 		}
 	}
@@ -189,8 +201,17 @@ func (*userStore) RemovePublicKeyByUsername(ctx context.Context, tx db.Handler, 
 	query := tx.Rebind(`DELETE FROM public_keys
 			WHERE user_id = (SELECT id FROM users WHERE username = ?)
 			AND public_key = ?;`)
-	_, err := tx.ExecContext(ctx, query, username, sshutils.MarshalAuthorizedKey(pk))
-	return err
+	ak := sshutils.MarshalAuthorizedKey(pk)
+	res, err := tx.ExecContext(ctx, query, username, ak)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		// Nothing was removed, so the record (if any) still describes the
+		// key where it is.
+		return err
+	}
+	return forgetSyncedAdminKey(ctx, tx, ak)
 }
 
 // SetAdminByUsername implements store.UserStore.

@@ -2,12 +2,14 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/charmbracelet/soft-serve/pkg/access"
@@ -238,6 +240,15 @@ type Config struct {
 
 	// DataPath is the path to the directory where Soft Serve will store its data.
 	DataPath string `env:"DATA_PATH" yaml:"-"`
+
+	// unreadableAdminKeyFiles and ignoredAdminKeys record the
+	// InitialAdminKeys entries Validate dropped: key files that could not
+	// be read or parsed, and entries that are neither a key nor a file path.
+	// Validate rewrites InitialAdminKeys to the valid keys only, so these
+	// are the only record of them. They are sets because Validate runs once
+	// per config source, and more than once for the environment.
+	unreadableAdminKeyFiles map[string]struct{}
+	ignoredAdminKeys        map[string]struct{}
 }
 
 // Environ returns the config as a list of environment variables.
@@ -548,10 +559,13 @@ func (c *Config) Validate() error {
 
 	// Validate keys
 	pks := make([]string, 0)
-	for _, key := range parseAuthKeys(c.InitialAdminKeys) {
+	keys := parseAuthKeys(c.InitialAdminKeys)
+	for _, key := range keys.pks {
 		ak := sshutils.MarshalAuthorizedKey(key)
 		pks = append(pks, ak)
 	}
+	c.unreadableAdminKeyFiles = addToSet(c.unreadableAdminKeyFiles, keys.unreadable)
+	c.ignoredAdminKeys = addToSet(c.ignoredAdminKeys, keys.ignored)
 
 	c.InitialAdminKeys = pks
 
@@ -560,29 +574,97 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// parseAuthKeys parses authorized keys from either file paths or string authorized_keys.
-func parseAuthKeys(aks []string) []ssh.PublicKey {
+// authKeys is the result of parseAuthKeys.
+type authKeys struct {
+	pks []ssh.PublicKey
+	// unreadable holds the entries that name a key file that could not be
+	// read or holds no key, such as a secret that is not mounted yet. Such
+	// an entry may stand for a key that is still wanted.
+	unreadable []string
+	// ignored holds the entries that are neither a key nor a file path,
+	// such as a mistyped key. They cannot stand for a wanted key.
+	ignored []string
+}
+
+// parseAuthKeys parses authorized keys from either file paths or string
+// authorized_keys. Blank entries and entries starting with "#" are comments
+// and are skipped.
+func parseAuthKeys(aks []string) authKeys {
+	var r authKeys
 	exist := make(map[string]struct{}, 0)
-	pks := make([]ssh.PublicKey, 0)
-	for _, key := range aks {
+	r.pks = make([]ssh.PublicKey, 0)
+	for _, entry := range aks {
+		key := strings.TrimSpace(entry)
+		if key == "" || strings.HasPrefix(key, "#") {
+			continue
+		}
+		isFile := false
 		if bts, err := os.ReadFile(key); err == nil {
 			// key is a file
 			key = strings.TrimSpace(string(bts))
+			isFile = true
 		}
 
-		if pk, _, err := sshutils.ParseAuthorizedKey(key); err == nil {
+		pk, _, err := sshutils.ParseAuthorizedKey(key)
+		switch {
+		case err == nil:
 			if _, ok := exist[key]; !ok {
-				pks = append(pks, pk)
+				r.pks = append(r.pks, pk)
 				exist[key] = struct{}{}
 			}
+		case isFile || looksLikePath(key):
+			r.unreadable = append(r.unreadable, strings.TrimSpace(entry))
+		default:
+			r.ignored = append(r.ignored, key)
 		}
 	}
-	return pks
+	return r
+}
+
+// looksLikePath reports whether an entry that is not a key names a file. An
+// authorized key always has a space between its type and its data, so an
+// entry with a space is a malformed key; an entry without one is a path if
+// it has a directory separator or a file extension.
+func looksLikePath(s string) bool {
+	if strings.ContainsFunc(s, unicode.IsSpace) {
+		return false
+	}
+	return strings.ContainsAny(s, `/\`) || filepath.Ext(s) != ""
+}
+
+// addToSet adds items to set, creating it if needed.
+func addToSet(set map[string]struct{}, items []string) map[string]struct{} {
+	if len(items) == 0 {
+		return set
+	}
+	if set == nil {
+		set = make(map[string]struct{}, len(items))
+	}
+	for _, it := range items {
+		set[it] = struct{}{}
+	}
+	return set
 }
 
 // AdminKeys returns the server admin keys.
 func (c *Config) AdminKeys() []ssh.PublicKey {
-	return parseAuthKeys(c.InitialAdminKeys)
+	return parseAuthKeys(c.InitialAdminKeys).pks
+}
+
+// UnreadableAdminKeyFiles returns, sorted and without duplicates, the
+// initial_admin_keys entries that name a key file that could not be read or
+// holds no key, such as a secret that is not mounted yet. Such an entry may
+// stand for a key that is still wanted. Paths are not key material.
+func (c *Config) UnreadableAdminKeyFiles() []string {
+	set := addToSet(maps.Clone(c.unreadableAdminKeyFiles), parseAuthKeys(c.InitialAdminKeys).unreadable)
+	return slices.Sorted(maps.Keys(set))
+}
+
+// IgnoredAdminKeys returns how many distinct initial_admin_keys entries were
+// ignored because they are neither a key nor a file path, such as a mistyped
+// key. The entries are not returned, as they may hold key material.
+func (c *Config) IgnoredAdminKeys() int {
+	return len(addToSet(maps.Clone(c.ignoredAdminKeys), parseAuthKeys(c.InitialAdminKeys).ignored))
 }
 
 func init() {
