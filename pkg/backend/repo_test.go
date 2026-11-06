@@ -531,7 +531,7 @@ func TestImportUnsupportedLFSEndpointRedacted(t *testing.T) {
 	is.NoErr(err)
 
 	src := t.TempDir()
-	is.NoErr(exec.Command("git", "init", "--bare", "-q", src).Run())
+	is.NoErr(exec.CommandContext(t.Context(), "git", "init", "--bare", "-q", src).Run())
 
 	const endpoint = "ssh://TOKEN@example.com/x.git"
 	ep, err := lfs.NewEndpoint(endpoint)
