@@ -3,6 +3,7 @@ package migrate
 import (
 	"bytes"
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -194,6 +195,14 @@ func TestWebhookDeliverySeqVacuumHint(t *testing.T) {
 		}
 		if got := strings.Contains(buf.String(), "VACUUM"); got != withRows {
 			t.Errorf("with rows %v: VACUUM hint logged = %v, want %v; log:\n%s", withRows, got, withRows, buf.String())
+		}
+		// The hint names the open database file, not the relative default.
+		var file string
+		if err := dbx.GetContext(ctx, &file, `SELECT file FROM pragma_database_list WHERE name = 'main'`); err != nil {
+			t.Fatal(err)
+		}
+		if withRows && (!filepath.IsAbs(file) || !strings.Contains(buf.String(), file)) {
+			t.Errorf("VACUUM hint does not name the database file %q; log:\n%s", file, buf.String())
 		}
 	}
 }

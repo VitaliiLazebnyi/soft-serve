@@ -38,6 +38,10 @@ var webhookDeliverySeq = Migration{
 // table larger. VACUUM cannot run inside the migration transaction, so it is
 // left to the operator. Nothing is logged when there were no deliveries to
 // copy, such as on a fresh install.
+//
+// The hint names the database file SQLite has open, because the configured
+// data source is relative to the data path, and sqlite3 run from another
+// directory would create a new, empty file instead.
 func suggestSqliteVacuum(ctx context.Context, tx *db.Tx) {
 	if d := tx.DriverName(); d != "sqlite" && d != "sqlite3" {
 		return
@@ -46,7 +50,14 @@ func suggestSqliteVacuum(ctx context.Context, tx *db.Tx) {
 	if err := tx.GetContext(ctx, &hasRows, `SELECT EXISTS (SELECT 1 FROM webhook_deliveries)`); err != nil || !hasRows {
 		return
 	}
+	file := "the soft-serve.db in your data directory (SOFT_SERVE_DATA_PATH)"
+	var open string
+	if err := tx.GetContext(ctx, &open, `SELECT file FROM pragma_database_list WHERE name = 'main'`); err == nil && open != "" {
+		file = open
+	}
 	log.FromContext(ctx).WithPrefix("migrate").Info(
-		"webhook deliveries were copied into a rebuilt table; the space of the old table stays in the database file until it is vacuumed. " +
-			"To reclaim it, stop the server and run VACUUM on the database file, for example: sqlite3 soft-serve.db VACUUM")
+		"webhook deliveries were copied into a rebuilt table; the space of the old table stays in the database file until it is vacuumed. "+
+			"To reclaim it, stop the server and run: sqlite3 <file> VACUUM. "+
+			"VACUUM writes a full copy of the database, so it needs free disk space up to about the size of the file.",
+		"file", file)
 }
