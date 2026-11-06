@@ -472,7 +472,8 @@ func cmdEnvfile(ts *testscript.TestScript, neg bool, args []string) {
 
 // cmdEnvmatch sets key to the first submatch of regexp in file, or to the
 // whole match when regexp has no group. Use it to pick an ID out of a
-// command's output: envmatch ID stdout 'id: (\S+)'.
+// command's output: envmatch ID stdout 'id: (\S+)'. It fails when the value
+// it would set is empty.
 func cmdEnvmatch(ts *testscript.TestScript, neg bool, args []string) {
 	if neg || len(args) != 3 {
 		ts.Fatalf("usage: envmatch key file regexp")
@@ -483,7 +484,14 @@ func cmdEnvmatch(ts *testscript.TestScript, neg bool, args []string) {
 	if m == nil {
 		ts.Fatalf("no match for %q in %s", args[2], args[1])
 	}
-	ts.Setenv(args[0], m[len(m)-1])
+	v := m[0]
+	if len(m) > 1 {
+		v = m[1]
+	}
+	if v == "" {
+		ts.Fatalf("match for %q in %s is empty", args[2], args[1])
+	}
+	ts.Setenv(args[0], v)
 }
 
 // cmdNewWebhook sets env-name to a webhook target URL. The host is a literal
