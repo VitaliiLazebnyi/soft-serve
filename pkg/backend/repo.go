@@ -427,7 +427,7 @@ func (d *Backend) importRepository(ctx context.Context, user proto.User, imp imp
 
 	client := lfs.NewClient(imp.lfs)
 	if client == nil {
-		d.logger.Warn("failed to create lfs client: unsupported endpoint", "endpoint", imp.lfsEndpoint)
+		d.logger.Warn("failed to create lfs client: unsupported endpoint", "endpoint", redactRemote(imp.lfsEndpoint))
 		return r, nil
 	}
 
