@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/log/v2"
 	"github.com/matryer/is"
@@ -97,6 +98,57 @@ func TestAuthDoesNotLogCredentials(t *testing.T) {
 				t.Errorf("auth log contains the header credential:\n%s", out)
 			}
 			is.True(strings.Contains(out, "scheme="+tc.scheme))
+		})
+	}
+}
+
+// A failed login is the client's mistake, not a server error, so none of
+// them is logged at error level: anyone could otherwise flood the error log.
+// Like TestAuthDoesNotLogCredentials, this swaps the global default logger
+// and must not run in parallel.
+func TestFailedAuthNotLoggedAsError(t *testing.T) {
+	is := is.New(t)
+	var logs bytes.Buffer
+	logger := log.New(&logs)
+	logger.SetLevel(log.DebugLevel)
+	prev := log.Default()
+	log.SetDefault(logger)
+	t.Cleanup(func() { log.SetDefault(prev) })
+
+	f := newOracleFixture(t)
+	ctx := log.WithContext(f.ctx, logger)
+	stranger, err := f.be.User(ctx, "stranger")
+	is.NoErr(err)
+	expired, err := f.be.CreateAccessToken(ctx, stranger, "old", time.Now().Add(-time.Hour))
+	is.NoErr(err)
+
+	basic := func(user, pass string) string {
+		r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+		r.SetBasicAuth(user, pass)
+		return r.Header.Get("Authorization")
+	}
+
+	for name, header := range map[string]string{
+		"bad token":                   "token ss_bad-token",
+		"expired token":               "token " + expired,
+		"bad bearer":                  "Bearer ss_bad-token",
+		"basic bad password":          basic("stranger", "bad-password"),
+		"basic expired token as pass": basic("stranger", expired),
+		"basic bad token as username": basic("ss_bad-token", ""),
+		"basic expired as username":   basic(expired, ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			is := is.New(t)
+			logs.Reset()
+			req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+			req.Header.Set("Authorization", header)
+
+			user, err := parseAuthHdr(req, "secret")
+			is.True(err != nil || user == nil)
+
+			if out := logs.String(); strings.Contains(out, "ERRO") {
+				t.Errorf("failed login logged at error level:\n%s", out)
+			}
 		})
 	}
 }
