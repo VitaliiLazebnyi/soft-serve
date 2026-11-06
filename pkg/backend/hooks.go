@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"sync"
@@ -45,7 +46,13 @@ func (d *Backend) Update(ctx context.Context, _ io.Writer, _ io.Writer, repo str
 		}
 
 		user, err = d.UserByPublicKey(ctx, pk)
-		if err != nil {
+		switch {
+		case errors.Is(err, proto.ErrUserNotFound):
+			// The SSH layer already authorized this push. A key without a
+			// user row, such as an initial_admin_keys entry with no account,
+			// still sends its events, with an empty sender.
+			user = nil
+		case err != nil:
 			d.logger.Error("error finding user from public key", "key", pubkey, "err", err)
 			return
 		}
