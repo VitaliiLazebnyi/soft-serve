@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/soft-serve/pkg/config"
@@ -404,8 +405,9 @@ func TestWebhookStoreDeliveriesOrder(t *testing.T) {
 	check()
 }
 
-// Pruning keeps the newest deliveries of one webhook and leaves the
-// deliveries of other webhooks alone.
+// Pruning keeps the most recently recorded deliveries of one webhook and
+// leaves the deliveries of other webhooks alone. Recording order is what
+// counts: created_at and the IDs are set to run the other way.
 func TestPruneWebhookDeliveriesKeepsNewest(t *testing.T) {
 	is := is.New(t)
 	ctx, dbx := newWebhookTestDB(t)
@@ -415,79 +417,70 @@ func TestPruneWebhookDeliveriesKeepsNewest(t *testing.T) {
 	other, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.35/b", "", 1, true)
 	is.NoErr(err)
 
-	// Eight deliveries one minute apart, inserted oldest first.
+	// Eight deliveries, recorded with descending IDs and created_at, and
+	// interleaved with deliveries of another webhook.
 	ids := make([]uuid.UUID, 8)
 	for i := range ids {
-		ids[i] = uuid.New()
+		ids[i] = uuid.MustParse(fmt.Sprintf("%08d-0000-1000-8000-000000000000", 99-i))
 		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, ids[i], hook, 1, "u", "POST", nil, "", "{}", 200, "", ""))
-		_, err := dbx.ExecContext(ctx, `UPDATE webhook_deliveries SET created_at = datetime('2024-01-01 00:00:00', ?) WHERE id = ?;`,
-			fmt.Sprintf("+%d minutes", i), ids[i])
+		_, err := dbx.ExecContext(ctx, `UPDATE webhook_deliveries SET created_at = ? WHERE id = ?;`,
+			fmt.Sprintf("2024-01-01 00:00:%02d", 59-i), ids[i])
 		is.NoErr(err)
+		if i < 3 {
+			is.NoErr(s.CreateWebhookDelivery(ctx, dbx, uuid.New(), other, 1, "u", "POST", nil, "", "{}", 200, "", ""))
+		}
 	}
-	for range 3 {
-		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, uuid.New(), other, 1, "u", "POST", nil, "", "{}", 200, "", ""))
+
+	keptIDs := func() []uuid.UUID {
+		t.Helper()
+		all, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+		is.NoErr(err)
+		out := []uuid.UUID{}
+		for _, d := range all {
+			out = append(out, d.ID)
+		}
+		return out
 	}
 
 	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 5))
-
-	all, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
-	is.NoErr(err)
-	is.Equal(len(all), 5)
-	kept := map[uuid.UUID]bool{}
-	for _, d := range all {
-		kept[d.ID] = true
-	}
-	for i, id := range ids {
-		is.Equal(kept[id], i >= 3) // the three oldest are gone
-	}
+	is.Equal(keptIDs(), ids[3:]) // the three recorded first are gone
 
 	others, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, other)
 	is.NoErr(err)
 	is.Equal(len(others), 3)
 
-	// Fewer deliveries than the limit: nothing is deleted.
+	// Exactly as many deliveries as the limit, or fewer: nothing is deleted.
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 5))
+	is.Equal(keptIDs(), ids[3:])
 	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 100))
-	all, err = s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
-	is.NoErr(err)
-	is.Equal(len(all), 5)
+	is.Equal(keptIDs(), ids[3:])
 
 	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 0))
-	all, err = s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+	is.Equal(keptIDs(), []uuid.UUID{})
+	others, err = s.GetWebhookDeliveriesByWebhookID(ctx, dbx, other)
 	is.NoErr(err)
-	is.Equal(len(all), 0)
+	is.Equal(len(others), 3)
 }
 
-// Deliveries recorded in the same second share created_at. The ID breaks the
-// tie, so which of them are kept does not depend on the query plan.
-func TestPruneWebhookDeliveriesTieBreaksByID(t *testing.T) {
+// The prune runs on every recorded delivery, so it must not scan the
+// deliveries table. On SQLite both its lookups use the (webhook_id, seq)
+// index.
+func TestPruneWebhookDeliveriesUsesIndex(t *testing.T) {
 	is := is.New(t)
 	ctx, dbx := newWebhookTestDB(t)
-	s := &webhookStore{}
-	hook, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 1, true)
-	is.NoErr(err)
-
-	for _, id := range []string{
-		"00000000-0000-0000-0000-000000000003",
-		"00000000-0000-0000-0000-000000000001",
-		"00000000-0000-0000-0000-000000000004",
-		"00000000-0000-0000-0000-000000000002",
-	} {
-		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, uuid.MustParse(id), hook, 1, "u", "POST", nil, "", "{}", 200, "", ""))
+	var plan []struct {
+		ID      int    `db:"id"`
+		Parent  int    `db:"parent"`
+		NotUsed int    `db:"notused"`
+		Detail  string `db:"detail"`
 	}
-	_, err = dbx.ExecContext(ctx, `UPDATE webhook_deliveries SET created_at = '2024-01-01 00:00:00';`)
-	is.NoErr(err)
-
-	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 2))
-
-	all, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
-	is.NoErr(err)
-	is.Equal(len(all), 2)
-	kept := map[string]bool{}
-	for _, d := range all {
-		kept[d.ID.String()] = true
+	is.NoErr(dbx.SelectContext(ctx, &plan, "EXPLAIN QUERY PLAN "+pruneWebhookDeliveriesQuery, 1, 1, 100))
+	is.True(len(plan) > 0)
+	for _, p := range plan {
+		t.Log(p.Detail)
+		is.True(!strings.HasPrefix(p.Detail, "SCAN"))       // no full scan
+		is.True(!strings.Contains(p.Detail, "TEMP B-TREE")) // no sort
 	}
-	is.True(kept["00000000-0000-0000-0000-000000000003"])
-	is.True(kept["00000000-0000-0000-0000-000000000004"])
 }
 
 func idsOf(whs []models.Webhook) []int64 {

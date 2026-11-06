@@ -781,9 +781,11 @@ Flags:
 ```
 
 Every attempt to send an event is recorded as a delivery, which `repo webhook
-deliveries` lists and can redeliver. Each webhook keeps about its 100 most
-recent deliveries (at most 109); older ones are deleted as new ones are
-recorded.
+deliveries` lists and can redeliver. Each webhook keeps its 100 most recent
+deliveries: recording one deletes the older ones. While deliveries are being
+recorded concurrently, or if a cleanup fails, a webhook can briefly hold a few
+more until its next delivery is recorded. Upgrading trims existing deliveries
+to the same limit. A repository can have at most 20 webhooks.
 
 ## The Soft Serve Plus TUI
 

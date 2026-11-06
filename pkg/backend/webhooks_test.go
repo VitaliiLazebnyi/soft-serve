@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -204,6 +205,29 @@ func TestCreateWebhookAcceptsDuplicateEvents(t *testing.T) {
 	is.NoErr(err)
 	is.Equal(len(hooks), 1)
 	is.Equal(hooks[0].Events, []webhook.Event{webhook.EventPush})
+}
+
+// A repository can have at most MaxWebhooksPerRepo webhooks, however their
+// URLs differ. Deleting one makes room again, and other repositories are not
+// affected.
+func TestCreateWebhookCapsWebhooksPerRepo(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	var ids []int64
+	for i := range webhook.MaxWebhooksPerRepo {
+		ids = append(ids, e.createHook(t, fmt.Sprintf("%s/%d", whURL, i), webhook.EventPush))
+	}
+
+	err := e.be.CreateWebhook(e.ctx, e.repo, whURL+"/extra", webhook.ContentTypeJSON, "", []webhook.Event{webhook.EventPush}, true)
+	is.True(errors.Is(err, webhook.ErrTooManyWebhooks))
+	hooks, err := e.be.ListWebhooks(e.ctx, e.repo)
+	is.NoErr(err)
+	is.Equal(len(hooks), webhook.MaxWebhooksPerRepo)
+
+	_, _ = e.otherRepo(t)
+
+	is.NoErr(e.be.DeleteWebhook(e.ctx, e.repo, ids[0]))
+	e.createHook(t, whURL+"/extra", webhook.EventPush)
 }
 
 func TestUpdateWebhookChangesEverything(t *testing.T) {
@@ -480,10 +504,6 @@ func TestRedeliverAfterPrune(t *testing.T) {
 		return e.be.store.UpdateWebhookByID(e.ctx, tx, e.repo.ID(), id, "http://127.0.0.1:1/", "", int(webhook.ContentTypeJSON), true)
 	}))
 	old := e.seedDelivery(t, id, "http://127.0.0.1:1/", `{"ref":"old"}`)
-	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
-		_, err := tx.ExecContext(e.ctx, tx.Rebind(`UPDATE webhook_deliveries SET created_at = '2000-01-01 00:00:00' WHERE id = ?;`), old)
-		return err
-	}))
 	kept := e.seedDelivery(t, id, "http://127.0.0.1:1/", `{"ref":"new"}`)
 	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
 		return e.be.store.PruneWebhookDeliveries(e.ctx, tx, id, 1)

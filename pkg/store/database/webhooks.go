@@ -121,25 +121,30 @@ func (*webhookStore) DeleteWebhookDeliveryByID(ctx context.Context, h db.Handler
 
 // PruneWebhookDeliveries implements store.WebhookStore.
 //
-// created_at has a resolution of one second, so several deliveries can share
-// it. The ID breaks those ties, which keeps the choice of what to delete
-// deterministic: among deliveries recorded in the same second, the ones with
-// the lowest IDs go first. The same statement works on SQLite and Postgres.
+// Deliveries are ordered by seq, which increases with every delivery
+// recorded. The subquery finds the seq of the newest delivery past the keep
+// most recent, and everything up to it is deleted. Both steps walk the
+// (webhook_id, seq) index, so the cost depends on keep and on the rows
+// deleted, not on the size of the table. With keep or fewer deliveries the
+// subquery is NULL and nothing is deleted. The same statement works on SQLite
+// and Postgres.
 func (*webhookStore) PruneWebhookDeliveries(ctx context.Context, h db.Handler, webhookID int64, keep int) error {
 	if keep < 0 {
 		keep = 0
 	}
-	query := h.Rebind(`DELETE FROM webhook_deliveries
-			WHERE webhook_id = ?
-			AND id NOT IN (
-				SELECT id FROM webhook_deliveries
-				WHERE webhook_id = ?
-				ORDER BY created_at DESC, id DESC
-				LIMIT ?
-			);`)
-	_, err := h.ExecContext(ctx, query, webhookID, webhookID, keep)
+	_, err := h.ExecContext(ctx, h.Rebind(pruneWebhookDeliveriesQuery), webhookID, webhookID, keep)
 	return err
 }
+
+// pruneWebhookDeliveriesQuery takes the webhook ID twice and then keep.
+const pruneWebhookDeliveriesQuery = `DELETE FROM webhook_deliveries
+	WHERE webhook_id = ?
+	AND seq <= (
+		SELECT seq FROM webhook_deliveries
+		WHERE webhook_id = ?
+		ORDER BY seq DESC
+		LIMIT 1 OFFSET ?
+	);`
 
 // DeleteWebhookEventsByID implements store.WebhookStore.
 func (*webhookStore) DeleteWebhookEventsByID(ctx context.Context, h db.Handler, ids []int64) error {

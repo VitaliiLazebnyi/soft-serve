@@ -31,6 +31,17 @@ func (b *Backend) CreateWebhook(ctx context.Context, repo proto.Repository, url 
 	events = dedupeEvents(events)
 
 	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
+		// Counted in the same transaction as the insert. SQLite serializes
+		// writers, so the cap is exact there; on Postgres two creates racing
+		// at the cap can each see room for one more.
+		existing, err := datastore.GetWebhooksByRepoID(ctx, tx, repo.ID())
+		if err != nil {
+			return db.WrapError(err)
+		}
+		if len(existing) >= webhook.MaxWebhooksPerRepo {
+			return webhook.ErrTooManyWebhooks
+		}
+
 		lastID, err := datastore.CreateWebhook(ctx, tx, repo.ID(), url, secret, int(contentType), active)
 		if err != nil {
 			return db.WrapError(err)

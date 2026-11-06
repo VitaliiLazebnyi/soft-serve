@@ -13,8 +13,6 @@ import (
 	"net/http"
 	neturl "net/url"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"charm.land/log/v2"
@@ -216,41 +214,30 @@ func recordDelivery(ctx context.Context, w models.Webhook, event Event, req requ
 		return db.WrapError(err)
 	}
 
-	// The delivery is recorded; a failed prune only delays the cleanup to a
-	// later delivery, so it is logged rather than returned.
-	if shouldPrune(w.ID) {
-		if err := datastore.PruneWebhookDeliveries(rctx, dbx, w.ID, maxDeliveries); err != nil {
-			log.Warn("pruning webhook deliveries", "webhook", w.ID, "err", err)
-		}
+	// The delivery is recorded; a failed prune only leaves the extra rows
+	// for the next delivery's prune, so it is logged rather than returned.
+	if err := datastore.PruneWebhookDeliveries(rctx, dbx, w.ID, maxDeliveries); err != nil {
+		log.Warn("pruning webhook deliveries", "webhook", w.ID, "err", err)
 	}
 	return nil
 }
 
-// maxDeliveries is how many deliveries are kept per webhook. Older ones are
-// deleted, so events, including ones recorded without sending when the queue
-// is full, cannot grow the deliveries table without limit. It is a variable
-// so tests can lower it.
+// maxDeliveries is how many deliveries are kept per webhook. Every recorded
+// delivery deletes the older ones, so events, including ones recorded without
+// sending when the queue is full, cannot grow the deliveries table without
+// limit. Migration 5 trimmed existing tables to the same number. It is a
+// variable so tests can lower it.
 var maxDeliveries = 100
 
-// pruneEvery is how many deliveries of a webhook are recorded between prunes.
-// The deliveries table has no index on webhook_id, so a prune scans it;
-// pruning every pruneEvery-th record instead of every one spreads that cost.
-// A webhook therefore holds at most maxDeliveries+pruneEvery-1 deliveries. It
-// is a variable so tests can change it.
-var pruneEvery uint64 = 10
+// MaxWebhooksPerRepo is how many webhooks a repository can have. Each event
+// is sent to, recorded for and pruned for every subscribed webhook, and each
+// webhook keeps maxDeliveries deliveries, so this bounds both the work one
+// event causes and the deliveries a repository stores.
+const MaxWebhooksPerRepo = 20
 
-// recordCounts counts, per webhook ID, the deliveries recorded by this
-// process. Its values are *atomic.Uint64.
-var recordCounts sync.Map
-
-// shouldPrune counts a recorded delivery of the webhook and reports whether
-// its deliveries should be pruned now. The first record of each webhook after
-// start prunes, so a table that grew before retention existed is trimmed.
-func shouldPrune(webhookID int64) bool {
-	v, _ := recordCounts.LoadOrStore(webhookID, new(atomic.Uint64))
-	n := v.(*atomic.Uint64).Add(1) //nolint:forcetypeassert
-	return pruneEvery <= 1 || n%pruneEvery == 1
-}
+// ErrTooManyWebhooks is returned when creating a webhook for a repository
+// that already has MaxWebhooksPerRepo webhooks.
+var ErrTooManyWebhooks = fmt.Errorf("a repository can have at most %d webhooks", MaxWebhooksPerRepo)
 
 // RecordUndelivered records a delivery of payload to each webhook without
 // sending it, with reason as the request error. Use it when an event cannot

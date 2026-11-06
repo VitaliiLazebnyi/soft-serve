@@ -1,0 +1,46 @@
+# vi: set ft=conf
+
+# Deliveries recorded by the git update hook, which runs as its own process
+# for every pushed ref, are pruned to the newest ones on every record. The
+# test build lets the limit be lowered to 3.
+env SOFT_SERVE_TEST_WEBHOOK_MAX_DELIVERIES=3
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+soft repo create repo-ret
+new-webhook WH_RET
+soft repo webhook create repo-ret $WH_RET -e branch_tag_create -e branch_tag_delete
+
+git clone ssh://localhost:$SSH_PORT/repo-ret repo-ret
+mkfile ./repo-ret/README.md 'foobar'
+git -C repo-ret add -A
+git -C repo-ret commit -m 'first'
+
+# five events, each recorded by a separate hook process, in this order:
+# create main, create v1, create v2, create v3, delete v1
+git -C repo-ret push origin HEAD
+git -C repo-ret tag v1
+git -C repo-ret push origin v1
+git -C repo-ret tag v2
+git -C repo-ret push origin v2
+git -C repo-ret tag v3
+git -C repo-ret push origin v3
+git -C repo-ret push origin --delete v1
+
+# all five were sent
+webhook-received
+stdout -count=4 '^branch_tag_create '
+stdout -count=1 '^branch_tag_delete '
+
+# only the three most recent are kept: create v2, create v3, delete v1
+soft repo webhook deliver list repo-ret 1
+stdout -count=3 '✅'
+stdout -count=2 'branch_tag_create'
+stdout -count=1 'branch_tag_delete'
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
+	"github.com/google/uuid"
 	"github.com/matryer/is"
 )
 
@@ -545,77 +546,71 @@ func TestRecordUndeliveredStoresRequestWithoutSending(t *testing.T) {
 	is.True(strings.Contains(ds[0].RequestHeaders, "X-Softserve-Signature: sha256="))
 }
 
-// useRetention sets the delivery retention for the test and forgets the
-// per-webhook record counts, which earlier tests' webhooks with the same IDs
-// left behind. It swaps package variables, so tests using it must not call
-// t.Parallel.
-func useRetention(t *testing.T, keep int, every uint64) {
+// useRetention sets how many deliveries each webhook keeps for the test. It
+// swaps a package variable, so tests using it must not call t.Parallel.
+func useRetention(t *testing.T, keep int) {
 	t.Helper()
-	origKeep, origEvery := maxDeliveries, pruneEvery
-	maxDeliveries, pruneEvery = keep, every
-	recordCounts.Clear()
-	t.Cleanup(func() {
-		maxDeliveries, pruneEvery = origKeep, origEvery
-		recordCounts.Clear()
-	})
+	orig := maxDeliveries
+	maxDeliveries = keep
+	t.Cleanup(func() { maxDeliveries = orig })
 }
 
 // Undelivered events cost no network time, so they are the quickest way to
-// grow the deliveries table. Each webhook keeps only its newest deliveries,
-// and pruning one webhook leaves the others' deliveries alone.
+// grow the deliveries table. Every record prunes, so a webhook never holds
+// more than the limit, and pruning one webhook leaves the others' deliveries
+// alone.
 func TestRecordedDeliveriesAreBoundedPerWebhook(t *testing.T) {
 	is := is.New(t)
-	useRetention(t, 5, 1)
+	useRetention(t, 5)
 	e := newTestEnv(t)
 	a := e.newWebhook(t, "https://93.184.216.34/a", "", ContentTypeJSON, EventPush)
 	b := e.newWebhook(t, "https://93.184.216.34/b", "", ContentTypeJSON, EventPush)
 	payload := samplePayloadFor(e)
 
-	for range 12 {
+	var recorded []uuid.UUID
+	for i := range 12 {
 		is.NoErr(RecordUndelivered(e.ctx, []models.Webhook{a}, payload, errors.New("queue full")))
+		ds := e.deliveries(t, a.ID)
+		is.Equal(len(ds), min(i+1, 5))
+		// The delivery just recorded is always kept.
+		recorded = append(recorded, ds[len(ds)-1].ID)
 	}
 	for range 3 {
 		is.NoErr(RecordUndelivered(e.ctx, []models.Webhook{b}, payload, errors.New("queue full")))
 	}
 
-	is.Equal(len(e.deliveries(t, a.ID)), 5)
+	// The five kept are the five most recent, oldest first.
+	var kept []uuid.UUID
+	for _, d := range e.deliveries(t, a.ID) {
+		kept = append(kept, d.ID)
+	}
+	is.Equal(kept, recorded[len(recorded)-5:])
 	is.Equal(len(e.deliveries(t, b.ID)), 3)
 }
 
-// Pruning only every few records lets a webhook exceed the limit by less
-// than that interval, and never by more.
-func TestRecordedDeliveriesPruneIsAmortized(t *testing.T) {
+// Production delivery IDs are time-based (version 1) UUIDs, whose text does
+// not sort by time, so retention must not depend on them. Deliveries with
+// IDs in descending order are still pruned oldest first.
+func TestRecordedDeliveriesPruneIgnoresIDOrder(t *testing.T) {
 	is := is.New(t)
-	useRetention(t, 5, 4)
+	useRetention(t, 2)
 	e := newTestEnv(t)
 	w := e.newWebhook(t, "https://93.184.216.34/a", "", ContentTypeJSON, EventPush)
-	payload := samplePayloadFor(e)
-
-	maxSeen := 0
-	for range 30 {
-		is.NoErr(RecordUndelivered(e.ctx, []models.Webhook{w}, payload, errors.New("queue full")))
-		maxSeen = max(maxSeen, len(e.deliveries(t, w.ID)))
+	ids := []uuid.UUID{
+		uuid.MustParse("ffffffff-0000-1000-8000-000000000000"),
+		uuid.MustParse("88888888-0000-1000-8000-000000000000"),
+		uuid.MustParse("00000000-0000-1000-8000-000000000000"),
 	}
-	is.Equal(maxSeen, 5+4-1)
-	// Record 29 pruned to 5, record 30 added one.
-	is.Equal(len(e.deliveries(t, w.ID)), 6)
-}
-
-// The first record of a webhook after start prunes, so deliveries that piled
-// up before retention existed are trimmed without waiting for a full interval.
-func TestFirstRecordPrunesExistingDeliveries(t *testing.T) {
-	is := is.New(t)
-	useRetention(t, 5, 10)
-	e := newTestEnv(t)
-	w := e.newWebhook(t, "https://93.184.216.34/a", "", ContentTypeJSON, EventPush)
-	for range 20 {
+	for _, id := range ids {
 		req, err := newRequest(w, EventPush, samplePayloadFor(e))
 		is.NoErr(err)
-		is.NoErr(e.ds.CreateWebhookDelivery(e.ctx, e.dbx, req.id, w.ID, int(EventPush), w.URL, http.MethodPost, nil, "", req.body, 200, "", ""))
+		req.id = id
+		is.NoErr(recordDelivery(e.ctx, w, EventPush, req, nil, 200, "", ""))
 	}
-
-	is.NoErr(RecordUndelivered(e.ctx, []models.Webhook{w}, samplePayloadFor(e), errors.New("queue full")))
-	is.Equal(len(e.deliveries(t, w.ID)), 5)
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 2)
+	is.Equal(ds[0].ID, ids[1])
+	is.Equal(ds[1].ID, ids[2])
 }
 
 // Deliver re-reads each webhook before sending, so an event that waited while
