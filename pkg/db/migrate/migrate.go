@@ -76,6 +76,12 @@ func Migrate(ctx context.Context, dbx *db.DB) error {
 			}
 		}
 
+		// Refuse to run against a database migrated by a newer binary: its
+		// schema may not match what this binary expects.
+		if n := len(migrations); n > 0 && migrs.Version > migrations[n-1].Version {
+			return fmt.Errorf("database is at migration version %d, newer than the latest version %d known to this binary; upgrade soft-serve", migrs.Version, migrations[n-1].Version)
+		}
+
 		for _, m := range migrations {
 			if m.Version <= migrs.Version {
 				continue
