@@ -16,11 +16,15 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 	"time"
 
+	"charm.land/log/v2"
+	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
+	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/matryer/is"
 )
 
@@ -482,9 +486,10 @@ func TestDeliverSlowWebhookDoesNotStarveOthers(t *testing.T) {
 	is.Equal(rec.calls, 1)
 }
 
-// A send whose context is already done fails, but the attempt is still
-// recorded: the row is written with a context of its own.
-func TestDeliverRecordsAttemptAfterContextDone(t *testing.T) {
+// A delivery whose context is already done sends nothing, but it is still
+// recorded: the re-read before the send fails on the done context, so the
+// event is recorded as undelivered, with a context of its own.
+func TestDeliverRecordsUndeliveredWhenContextDoneBeforeSend(t *testing.T) {
 	is := is.New(t)
 	useHTTPClient(t)
 	e := newTestEnv(t)
@@ -497,8 +502,38 @@ func TestDeliverRecordsAttemptAfterContextDone(t *testing.T) {
 
 	ds := e.deliveries(t, w.ID)
 	is.Equal(len(ds), 1)
-	is.True(strings.Contains(ds[0].RequestError.String, "context canceled"))
+	is.Equal(ds[0].RequestError.String, errRereadFailed.Error())
 	is.Equal(rec.calls, 0)
+}
+
+// A delivery whose context is cancelled while the request is in flight is
+// still recorded, with the cancellation as its error: the row is written with
+// a context of its own.
+func TestDeliverRecordsAttemptWhenContextCancelledDuringSend(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	e := newTestEnv(t)
+	ctx, cancel := context.WithCancel(e.ctx)
+	defer cancel()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		cancel()
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	w := e.newWebhook(t, srv.URL, "", ContentTypeJSON, EventPush)
+
+	is.NoErr(Deliver(ctx, []models.Webhook{w}, samplePayloadFor(e)))
+
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.True(strings.Contains(ds[0].RequestError.String, "context canceled"))
+	is.Equal(ds[0].ResponseStatus, 0)
 }
 
 // Unrecorded deliveries have no row to show a failed status, so a non-2xx
@@ -586,6 +621,131 @@ func TestDeliverSkipsRemovedOrUnsubscribedWebhook(t *testing.T) {
 
 	is.Equal(rec.calls, 0)
 	is.Equal(len(e.deliveries(t, unsubscribed.ID)), 0)
+}
+
+// useRereadTiming shortens the re-read timeout and retry delay for the test.
+// It swaps package variables, so tests using it must not call t.Parallel.
+func useRereadTiming(t *testing.T, timeout, delay time.Duration) {
+	t.Helper()
+	origTimeout, origDelay := rereadTimeout, rereadRetryDelay
+	rereadTimeout, rereadRetryDelay = timeout, delay
+	t.Cleanup(func() { rereadTimeout, rereadRetryDelay = origTimeout, origDelay })
+}
+
+// failingLookupStore is a store whose event lookup fails, as during a database
+// error, while everything else works. Only the first failures lookups fail,
+// or every lookup when failures is zero.
+type failingLookupStore struct {
+	store.Store
+	failures int32
+	calls    *atomic.Int32
+}
+
+func (s failingLookupStore) GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Handler, repoID int64, events []int) ([]models.Webhook, error) {
+	n := s.calls.Add(1)
+	if s.failures == 0 || n <= s.failures {
+		return nil, errors.New("lookup failed: dial tcp 10.0.0.5:5432")
+	}
+	return s.Store.GetWebhooksByRepoIDWhereEvent(ctx, h, repoID, events)
+}
+
+// A webhook that cannot be re-read before its send, even after a retry, may
+// have been deactivated, so it is not sent to. The event is recorded as
+// undelivered with a generic reason, so it can be redelivered; the database
+// error is logged with the webhook, repository and event, and is not stored,
+// since repository admins can read the stored reason.
+func TestDeliverRecordsUndeliveredWhenRereadFails(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	useRereadTiming(t, time.Second, time.Millisecond)
+	e := newTestEnv(t)
+	srv, rec := newReceiver(t, http.StatusOK, "")
+	w := e.newWebhook(t, srv.URL, "", ContentTypeJSON, EventPush)
+	calls := new(atomic.Int32)
+	var logs strings.Builder
+	ctx := store.WithContext(e.ctx, failingLookupStore{Store: e.ds, calls: calls})
+	ctx = log.WithContext(ctx, log.New(&logs))
+
+	is.NoErr(Deliver(ctx, []models.Webhook{w}, samplePayloadFor(e)))
+
+	is.Equal(rec.calls, 0)
+	is.Equal(calls.Load(), int32(2))
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.Equal(ds[0].RequestError.String, errRereadFailed.Error())
+	is.Equal(ds[0].ResponseStatus, 0)
+	is.Equal(ds[0].Event, int(EventPush))
+	out := logs.String()
+	is.True(strings.Contains(out, "WARN"))
+	is.True(strings.Contains(out, "lookup failed: dial tcp 10.0.0.5:5432"))
+	is.True(strings.Contains(out, fmt.Sprintf("webhook_id=%d", w.ID)))
+	is.True(strings.Contains(out, fmt.Sprintf("repo_id=%d", e.repo.ID)))
+	is.True(strings.Contains(out, "event=push"))
+	is.True(!strings.Contains(out, srv.URL))
+}
+
+// A re-read that fails once is retried, and the webhook is sent to when the
+// retry works.
+func TestDeliverRetriesFailedReread(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	useRereadTiming(t, time.Second, time.Millisecond)
+	e := newTestEnv(t)
+	srv, rec := newReceiver(t, http.StatusOK, "")
+	w := e.newWebhook(t, srv.URL, "", ContentTypeJSON, EventPush)
+	calls := new(atomic.Int32)
+	ctx := store.WithContext(e.ctx, failingLookupStore{Store: e.ds, failures: 1, calls: calls})
+
+	is.NoErr(Deliver(ctx, []models.Webhook{w}, samplePayloadFor(e)))
+
+	is.Equal(calls.Load(), int32(2))
+	is.Equal(rec.calls, 1)
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.Equal(ds[0].RequestError.String, "")
+	is.Equal(ds[0].ResponseStatus, http.StatusOK)
+}
+
+// hangingLookupStore is a store whose event lookup does not answer until its
+// context is done, as with a database that hangs.
+type hangingLookupStore struct {
+	store.Store
+	calls *atomic.Int32
+}
+
+func (s hangingLookupStore) GetWebhooksByRepoIDWhereEvent(ctx context.Context, _ db.Handler, _ int64, _ []int) ([]models.Webhook, error) {
+	s.calls.Add(1)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A background delivery runs with a context that is never cancelled, so the
+// re-read is bounded on its own: a database that hangs does not hold the
+// sender, and the event is recorded as undelivered.
+func TestDeliverRereadIsBounded(t *testing.T) {
+	is := is.New(t)
+	useHTTPClient(t)
+	useRereadTiming(t, 50*time.Millisecond, time.Millisecond)
+	e := newTestEnv(t)
+	srv, rec := newReceiver(t, http.StatusOK, "")
+	w := e.newWebhook(t, srv.URL, "", ContentTypeJSON, EventPush)
+	calls := new(atomic.Int32)
+	ctx := store.WithContext(context.WithoutCancel(e.ctx), hangingLookupStore{Store: e.ds, calls: calls})
+
+	done := make(chan error, 1)
+	go func() { done <- Deliver(ctx, []models.Webhook{w}, samplePayloadFor(e)) }()
+	select {
+	case err := <-done:
+		is.NoErr(err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Deliver did not return while the re-read hung")
+	}
+
+	is.Equal(calls.Load(), int32(2))
+	is.Equal(rec.calls, 0)
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.Equal(ds[0].RequestError.String, errRereadFailed.Error())
 }
 
 // endlessServer answers with a 200 and streams a body that never ends, until

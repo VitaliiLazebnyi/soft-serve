@@ -184,20 +184,22 @@ func (*webhookStore) GetWebhooksByRepoID(ctx context.Context, h db.Handler, repo
 	return whs, err
 }
 
-// GetWebhooksByRepoIDWhereEvent implements store.WebhookStore.
+// GetWebhooksByRepoIDWhereEvent implements store.WebhookStore. Only active
+// webhooks are returned, since this is what events are sent to; use
+// GetWebhooksByRepoID to list every webhook.
 func (*webhookStore) GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Handler, repoID int64, events []int) ([]models.Webhook, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
 
-	args := []any{repoID}
+	args := []any{repoID, true}
 	for _, e := range events {
 		args = append(args, e)
 	}
 	query := h.Rebind(`SELECT webhooks.*
 			FROM webhooks
 			INNER JOIN webhook_events ON webhooks.id = webhook_events.webhook_id
-			WHERE webhooks.repo_id = ? AND webhook_events.event IN (` + placeholders(len(events)) + `)
+			WHERE webhooks.repo_id = ? AND webhooks.active = ? AND webhook_events.event IN (` + placeholders(len(events)) + `)
 			ORDER BY webhooks.id;`)
 	var whs []models.Webhook
 	err := h.SelectContext(ctx, &whs, query, args...)

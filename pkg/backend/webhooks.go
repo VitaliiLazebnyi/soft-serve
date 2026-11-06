@@ -275,6 +275,11 @@ func (b *Backend) ListWebhookDeliveries(ctx context.Context, repo proto.Reposito
 }
 
 // RedeliverWebhookDelivery redelivers a webhook delivery.
+//
+// An inactive webhook is refused with webhook.ErrWebhookInactive: deactivating
+// a webhook stops every request to its URL, including manual redeliveries, so
+// a receiver that was turned off is not sent to by mistake. Activate the
+// webhook first to redeliver.
 func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repository, id int64, delID uuid.UUID) error {
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
@@ -292,6 +297,12 @@ func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repos
 		delivery, err = datastore.GetWebhookDeliveryByID(ctx, tx, id, delID)
 		if err != nil {
 			return db.WrapError(err)
+		}
+
+		// Checked after the lookup, so an unknown delivery is reported as
+		// not found whether or not the webhook is active.
+		if !wh.Active {
+			return webhook.ErrWebhookInactive
 		}
 
 		return nil
