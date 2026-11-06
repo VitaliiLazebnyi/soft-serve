@@ -322,14 +322,17 @@ func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repos
 	if ct == webhook.ContentTypeForm {
 		vals, err := neturl.ParseQuery(delivery.RequestBody)
 		if err != nil {
-			b.logger.Error("error parsing webhook form body", "delivery", delID, "webhook", id, "err", err)
+			// The parse error quotes part of the body, so it is returned to
+			// the caller but not logged.
+			b.logger.Error("error parsing webhook form body", "delivery", delID, "webhook", id)
 			return err
 		}
 		payload = vals
 	} else {
 		var raw json.RawMessage
 		if err := json.Unmarshal([]byte(delivery.RequestBody), &raw); err != nil {
-			b.logger.Error("error unmarshaling webhook payload", "delivery", delID, "webhook", id, "err", err)
+			// As above: the error can quote part of the body.
+			b.logger.Error("error unmarshaling webhook payload", "delivery", delID, "webhook", id)
 			return err
 		}
 		payload = raw

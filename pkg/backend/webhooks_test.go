@@ -474,6 +474,41 @@ func TestRedeliverDoesNotLogPayload(t *testing.T) {
 	}
 }
 
+// A stored body that fails to parse is reported to the caller, but the parse
+// error is not logged, since it quotes part of the body.
+func TestRedeliverParseErrorNotLogged(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ct   webhook.ContentType
+		body string
+		msg  string
+		// leak is the part of the body the parse error quotes.
+		leak string
+	}{
+		{"json", webhook.ContentTypeJSON, `{"a":x}`, "error unmarshaling webhook payload", "'x'"},
+		{"form", webhook.ContentTypeForm, `a=%zz`, "error parsing webhook form body", "%zz"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			is := is.New(t)
+			e := newWebhookEnv(t)
+			id := e.createHook(t, whURL, webhook.EventPush)
+			is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
+				return e.be.store.UpdateWebhookByID(e.ctx, tx, e.repo.ID(), id, whURL, "", int(tc.ct), true)
+			}))
+			delID := e.seedDelivery(t, id, whURL, tc.body)
+
+			err := e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, delID)
+			is.True(err != nil)
+			logs := e.logs.String()
+			is.True(strings.Contains(logs, tc.msg))
+			is.True(strings.Contains(err.Error(), tc.leak))
+			if strings.Contains(logs, tc.leak) {
+				t.Errorf("log contains %q from the parse error %q:\n%s", tc.leak, err, logs)
+			}
+		})
+	}
+}
+
 // Suspected bug: a form-encoded webhook cannot be redelivered, because the
 // stored JSON body is passed as a raw message and form encoding of it fails.
 func TestRedeliverFormWebhook(t *testing.T) {
