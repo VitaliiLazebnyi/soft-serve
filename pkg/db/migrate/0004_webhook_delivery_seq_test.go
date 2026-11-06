@@ -145,7 +145,7 @@ func TestWebhookDeliverySeqBackfill(t *testing.T) {
 func hasColumn(ctx context.Context, t *testing.T, dbx *db.DB, table, column string) bool {
 	t.Helper()
 	var n int
-	q := `SELECT COUNT(*) FROM information_schema.columns WHERE table_name = ? AND column_name = ?`
+	q := `SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?`
 	if dbx.DriverName() != "postgres" {
 		q = `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`
 	}
