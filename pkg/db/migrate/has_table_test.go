@@ -82,15 +82,30 @@ func TestHasTableMySQLQuery(t *testing.T) {
 	}
 }
 
+// Rollback must return a failure of its migrations table lookup, such as a
+// lost connection, instead of reading it as "no migrations table".
+func TestRollbackReportsTableLookupError(t *testing.T) {
+	lookupErr := errors.New("connection lost")
+	conn := &recordingConn{err: lookupErr}
+	dbx := &db.DB{DB: sqlx.NewDb(sql.OpenDB(recordingConnector{conn}), "sqlite")}
+	t.Cleanup(func() { dbx.Close() })
+
+	err := Rollback(context.TODO(), dbx)
+	if !errors.Is(err, lookupErr) {
+		t.Errorf("Rollback() with a failing table lookup => %v, want it to wrap %v", err, lookupErr)
+	}
+}
+
 type recordingConnector struct{ conn *recordingConn }
 
 func (c recordingConnector) Connect(context.Context) (driver.Conn, error) { return c.conn, nil }
 func (c recordingConnector) Driver() driver.Driver                        { return nil }
 
-// recordingConn records each query and returns no rows.
+// recordingConn records each query and returns no rows, or err if set.
 type recordingConn struct {
 	queries []string
 	args    []driver.Value
+	err     error
 }
 
 func (c *recordingConn) Prepare(string) (driver.Stmt, error) {
@@ -102,6 +117,9 @@ func (c *recordingConn) Begin() (driver.Tx, error) { return recordingTx{}, nil }
 func (c *recordingConn) Query(query string, args []driver.Value) (driver.Rows, error) {
 	c.queries = append(c.queries, query)
 	c.args = append(c.args, args...)
+	if c.err != nil {
+		return nil, c.err
+	}
 	return emptyRows{}, nil
 }
 
