@@ -117,6 +117,12 @@ func seedCreate(be *Backend, ctx context.Context, name string, user proto.User, 
 	return be.CreateRepository(ctx, name, user, opts)
 }
 
+// offlineRemote is the remote the import checks below use. The tests only
+// care whether the create policy lets the import through; a loopback literal
+// is then refused by the remote check without a DNS lookup or a dial, so
+// they run without network access.
+const offlineRemote = "https://127.0.0.1/x.git"
+
 // seedImport is seedCreate for ImportRepository.
 func seedImport(be *Backend, ctx context.Context, name string, user proto.User, remote string, opts proto.RepositoryOptions) (proto.Repository, error) {
 	prev := be.cfg.AdminOnlyCreate
@@ -142,7 +148,7 @@ func TestBackendRefusesNonAdminCreatesWhenFlagOn(t *testing.T) {
 	is.True(errors.Is(err, proto.ErrUnauthorized))
 	_, err = be.CreateRepository(ctx, "anon-junk", nil, proto.RepositoryOptions{})
 	is.True(errors.Is(err, proto.ErrUnauthorized))
-	_, err = be.ImportRepository(userCtx, "junk-import", user, "https://example.invalid/x.git", proto.RepositoryOptions{})
+	_, err = be.ImportRepository(userCtx, "junk-import", user, offlineRemote, proto.RepositoryOptions{})
 	is.True(errors.Is(err, proto.ErrUnauthorized))
 
 	_, err = be.Repository(ctx, "junk")
@@ -189,7 +195,7 @@ func TestBackendAllowsAdminCreatesWhenFlagOn(t *testing.T) {
 
 	_, err = be.CreateRepository(adminCtx, "made", admin, proto.RepositoryOptions{})
 	is.NoErr(err)
-	_, err = be.ImportRepository(adminCtx, "imported", admin, "https://example.invalid/x.git", proto.RepositoryOptions{})
+	_, err = be.ImportRepository(adminCtx, "imported", admin, offlineRemote, proto.RepositoryOptions{})
 	is.True(!errors.Is(err, proto.ErrUnauthorized))
 	is.NoErr(be.RenameRepository(adminCtx, "made", "made-again"))
 	_, err = be.Repository(ctx, "made-again")
@@ -213,7 +219,7 @@ func TestBackendAllowsNonAdminCreatesWhenFlagOff(t *testing.T) {
 	is.NoErr(be.RenameRepository(userCtx, "mine", "renamed"))
 	_, err = be.Repository(ctx, "renamed")
 	is.NoErr(err)
-	_, err = be.ImportRepository(userCtx, "imported", user, "https://example.invalid/x.git", proto.RepositoryOptions{})
+	_, err = be.ImportRepository(userCtx, "imported", user, offlineRemote, proto.RepositoryOptions{})
 	is.True(!errors.Is(err, proto.ErrUnauthorized))
 }
 
@@ -265,7 +271,7 @@ func TestBackendAllowsAdminKeyCreatesWhenFlagOn(t *testing.T) {
 
 			_, err = be.CreateRepository(keyCtx, "made", user, proto.RepositoryOptions{})
 			is.NoErr(err)
-			_, err = be.ImportRepository(keyCtx, "imported", user, "https://example.invalid/x.git", proto.RepositoryOptions{})
+			_, err = be.ImportRepository(keyCtx, "imported", user, offlineRemote, proto.RepositoryOptions{})
 			is.True(!errors.Is(err, proto.ErrUnauthorized))
 			if !registered {
 				// The rename webhook needs a sender, so rename is only

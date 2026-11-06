@@ -8,18 +8,26 @@ exec soft serve &
 # wait for SSH server to start
 ensureserverrunning SSH_PORT
 
+# a source repository on the server itself, so the import needs no network
+soft repo create src
+git clone ssh://localhost:$SSH_PORT/src src
+mkfile ./src/README.md '# Wizard Tutorial'
+git -C src add -A
+git -C src commit -m 'first'
+git -C src push origin HEAD
+
 # import private
-soft repo import --private repo1 https://github.com/charmbracelet/wizard-tutorial.git
+soft repo import --private repo1 ssh://git@127.0.0.1:$SSH_PORT/src
 soft repo private repo1
 stdout 'true'
 
 # import hidden
-soft repo import --hidden repo2 https://github.com/charmbracelet/wizard-tutorial.git
+soft repo import --hidden repo2 ssh://git@127.0.0.1:$SSH_PORT/src
 soft repo hidden repo2
 stdout 'true'
 
 # import with name and description
-soft repo import --name 'repo33' --description 'descriptive' repo3 https://github.com/charmbracelet/wizard-tutorial.git
+soft repo import --name 'repo33' --description 'descriptive' repo3 ssh://git@127.0.0.1:$SSH_PORT/src
 soft repo info repo3
 cmp stdout repo3.txt
 
@@ -35,6 +43,6 @@ Private: false
 Hidden: false
 Mirror: false
 Owner: admin
-Default Branch: main
+Default Branch: master
 Branches:
-  - main
+  - master

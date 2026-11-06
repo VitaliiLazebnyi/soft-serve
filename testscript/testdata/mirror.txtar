@@ -8,8 +8,16 @@ exec soft serve &
 # wait for SSH server to start
 ensureserverrunning SSH_PORT
 
+# a source repository on the server itself, so the import needs no network
+soft repo create src
+git clone ssh://localhost:$SSH_PORT/src src
+mkfile ./src/README.md '# Wizard Tutorial'
+git -C src add -A
+git -C src commit -m 'first'
+git -C src push origin HEAD
+
 # import a repo
-soft repo import --mirror charmbracelet/wizard-tutorial https://github.com/charmbracelet/wizard-tutorial.git
+soft repo import --mirror charmbracelet/wizard-tutorial ssh://git@127.0.0.1:$SSH_PORT/src
 
 # check empty description file
 readfile $DATA_PATH/repos/charmbracelet/wizard-tutorial.git/description ''
@@ -111,9 +119,9 @@ Private: false
 Hidden: false
 Mirror: true
 Owner: admin
-Default Branch: main
+Default Branch: master
 Branches:
-  - main
+  - master
 -- info2.txt --
 Project Name: wizard-tutorial
 Repository: charmbracelet/test
@@ -122,13 +130,8 @@ Private: true
 Hidden: true
 Mirror: true
 Owner: admin
-Default Branch: main
+Default Branch: master
 Branches:
-  - main
+  - master
 -- tree.txt --
--rw-r--r--	10 B	 .gitignore
--rw-r--r--	1.3 kB	 README.md
--rw-r--r--	970 B	 go.mod
--rw-r--r--	5.3 kB	 go.sum
--rw-r--r--	2.2 kB	 input.go
--rw-r--r--	2.9 kB	 main.go
+-rw-r--r--	17 B	 README.md
