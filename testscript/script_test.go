@@ -670,6 +670,9 @@ func cmdStopserver(ts *testscript.TestScript, neg bool, args []string) {
 	// stop the server
 	resp, err := loopbackClient.Head(fmt.Sprintf("%s/__stop", ts.Getenv("SOFT_SERVE_HTTP_PUBLIC_URL"))) //nolint:noctx
 	check(ts, err, neg)
+	if err != nil {
+		return // only reached under "! stopserver", where failing is expected
+	}
 	resp.Body.Close()
 
 	// Wait for the server process to exit. A fixed sleep was not always long
