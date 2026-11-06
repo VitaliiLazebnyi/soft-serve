@@ -136,7 +136,9 @@ func hasTable(tx *db.Tx, tableName string) bool {
 	case "sqlite3", "sqlite":
 		query = "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
 	case "postgres":
-		fallthrough
+		// Look in the schema unqualified CREATE TABLE statements write to,
+		// which follows search_path and is not necessarily "public".
+		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?"
 	case "mysql":
 		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?"
 	}
