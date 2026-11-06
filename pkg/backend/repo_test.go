@@ -9,11 +9,14 @@ import (
 	"testing"
 	"time"
 
+	charmssh "charm.land/ssh"
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"github.com/charmbracelet/soft-serve/pkg/ssrf"
 	"github.com/matryer/is"
+	"golang.org/x/crypto/ssh"
 )
 
 // TestCreateRepositoryAnonymousOwner verifies that a repository created with
@@ -99,7 +102,7 @@ func TestValidateImportRemote(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			is := is.New(t)
-			v, err := validateImportRemote(tt.remote, tt.policy)
+			v, err := validateImportRemote(context.Background(), tt.remote, tt.policy)
 
 			if tt.wantErr != nil {
 				is.True(errors.Is(err, tt.wantErr))
@@ -223,6 +226,244 @@ func TestImportRepositorySSHRequiresAdmin(t *testing.T) {
 	is.True(errors.Is(err, proto.ErrRepoNotFound))
 	_, err = be.Repository(ctx, "admin-ssh")
 	is.True(errors.Is(err, proto.ErrRepoNotFound))
+}
+
+// TestImportRepositorySSHAdminKey verifies that a caller whose session key is
+// listed in initial_admin_keys may import over ssh with no allowlist, whether
+// it has no account or a non-admin one, as the SSH layer's isServerAdmin
+// treats it. The same caller without the key on the context, or with any
+// other key, is still refused.
+func TestImportRepositorySSHAdminKey(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("ssh client not available")
+	}
+
+	for _, registered := range []bool{false, true} {
+		name := "anonymous"
+		if registered {
+			name = "non-admin user"
+		}
+		t.Run(name, func(t *testing.T) {
+			is := is.New(t)
+			be, cfg := newTestBackend(t)
+			ctx := backendTestContext(be, cfg)
+			is.Equal(len(cfg.SSH.AllowedHosts()), 0)
+
+			pub := newTestPublicKey(t)
+			cfg.InitialAdminKeys = append(cfg.InitialAdminKeys, sshutils.MarshalAuthorizedKey(pub))
+
+			var user proto.User
+			if registered {
+				var err error
+				user, err = be.CreateUser(ctx, "alice", proto.UserOptions{PublicKeys: []ssh.PublicKey{pub}})
+				is.NoErr(err)
+				is.True(!user.IsAdmin())
+			}
+
+			// Nothing listens on loopback port 1, so a remote that passes
+			// policy fails at the clone without touching the network.
+			remote := "ssh://git@127.0.0.1:1/x.git"
+			opts := proto.RepositoryOptions{}
+
+			_, err := be.ImportRepository(ctx, "nokey", user, remote, opts)
+			is.True(errors.Is(err, proto.ErrUnauthorized)) // no key on the context
+
+			otherCtx := context.WithValue(ctx, charmssh.ContextKeyPublicKey, newTestPublicKey(t))
+			_, err = be.ImportRepository(otherCtx, "otherkey", user, remote, opts)
+			is.True(errors.Is(err, proto.ErrUnauthorized)) // not an admin key
+
+			keyCtx := context.WithValue(ctx, charmssh.ContextKeyPublicKey, pub)
+			_, err = be.ImportRepository(keyCtx, "adminkey", user, remote, opts)
+			is.True(errors.Is(err, proto.ErrImportFailed)) // admin key passes policy
+
+			// An ssh LFS endpoint is checked, before the clone, against the
+			// same policy, so the admin key covers it as well.
+			lfsOpts := proto.RepositoryOptions{LFSEndpoint: remote}
+			_, err = be.ImportRepository(otherCtx, "otherkey-lfs", user, remote, lfsOpts)
+			is.True(errors.Is(err, proto.ErrUnauthorized))
+			_, err = be.ImportRepository(keyCtx, "adminkey-lfs", user, remote, lfsOpts)
+			is.True(errors.Is(err, proto.ErrImportFailed))
+
+			// A mirror is synced later by the mirror job with its owner's
+			// stored privileges. An anonymous caller's mirror is owned by
+			// the default admin, so the key suffices. A non-admin account's
+			// mirror would never sync, so it is refused with the reason.
+			mirrorOpts := proto.RepositoryOptions{Mirror: true}
+			_, err = be.ImportRepository(keyCtx, "adminkey-mirror", user, remote, mirrorOpts)
+			if registered {
+				is.True(errors.Is(err, proto.ErrUnauthorized))
+				is.True(errors.Is(err, errMirrorImportOwnerNotAdmin))
+				is.True(errors.Is(err, errMirrorOwnerNotAdmin))
+			} else {
+				is.True(errors.Is(err, proto.ErrImportFailed))
+			}
+			mirrorOpts.LFSEndpoint = remote
+			_, err = be.ImportRepository(keyCtx, "adminkey-mirror-lfs", user, remote, mirrorOpts)
+			if registered {
+				is.True(errors.Is(err, errMirrorOwnerNotAdmin))
+			} else {
+				is.True(errors.Is(err, proto.ErrImportFailed))
+			}
+
+			// A configured allowlist binds the admin key too. A host it
+			// names is open to the mirror job as well, so a non-admin
+			// account may mirror from it.
+			cfg.SSH.ClientAllowedHosts = []string{"git.internal.example"}
+			is.NoErr(cfg.Validate())
+			_, err = be.ImportRepository(keyCtx, "adminkey-allowlist", user, remote, opts)
+			is.True(errors.Is(err, proto.ErrInvalidRemote))
+			is.True(errors.Is(err, ssrf.ErrSSHHostNotAllowed))
+			cfg.SSH.ClientAllowedHosts = []string{"127.0.0.1:1"}
+			is.NoErr(cfg.Validate())
+			_, err = be.ImportRepository(keyCtx, "adminkey-allowed-mirror", user, remote, proto.RepositoryOptions{Mirror: true})
+			is.True(errors.Is(err, proto.ErrImportFailed))
+		})
+	}
+}
+
+// TestSetMirrorChecksOwnerPolicy verifies that switching mirroring on is
+// refused when the mirror job, which validates every remote with
+// RemotePolicy for the owner, would skip the repository on every run, and
+// that an LFS endpoint the job would skip is not a refusal. Such a repository arises when a non-admin account holding an
+// admin key imports from ssh without --mirror.
+func TestSetMirrorChecksOwnerPolicy(t *testing.T) {
+	is := is.New(t)
+	be, cfg := newTestBackend(t)
+	ctx := backendTestContext(be, cfg)
+	is.Equal(len(cfg.SSH.AllowedHosts()), 0)
+
+	alice, err := be.CreateUser(ctx, "alice", proto.UserOptions{})
+	is.NoErr(err)
+	is.True(!alice.IsAdmin())
+	admin, err := be.User(ctx, "admin")
+	is.NoErr(err)
+
+	// newRepo creates a repository owned by owner whose git config holds
+	// the given remote and, if non-empty, LFS endpoint, as an import does.
+	newRepo := func(name string, owner proto.User, remote, lfsURL string) {
+		t.Helper()
+		_, err := seedCreate(be, ctx, name, owner, proto.RepositoryOptions{})
+		is.NoErr(err)
+		r, err := git.Open(be.repoPath(name))
+		is.NoErr(err)
+		rcfg, err := r.Config()
+		is.NoErr(err)
+		rcfg.Section("remote").Subsection("origin").SetOption("url", remote)
+		if lfsURL != "" {
+			rcfg.Section("lfs").SetOption("url", lfsURL)
+		}
+		is.NoErr(r.SetConfig(rcfg))
+	}
+	isMirror := func(name string) bool {
+		t.Helper()
+		m, err := be.IsMirror(ctx, name)
+		is.NoErr(err)
+		return m
+	}
+
+	const sshRemote = "ssh://git@127.0.0.1:1/x.git"
+	const httpsRemote = "https://1.1.1.1/x.git"
+
+	// A non-admin owner's ssh remote would never sync, so it is refused,
+	// and the flag and git config are left alone.
+	newRepo("alice-ssh", alice, sshRemote, "")
+	err = be.SetMirror(ctx, "alice-ssh", true)
+	is.True(errors.Is(err, proto.ErrUnauthorized))
+	is.True(errors.Is(err, errMirrorOwnerNotAdmin))
+	is.True(!isMirror("alice-ssh"))
+	r, err := git.Open(be.repoPath("alice-ssh"))
+	is.NoErr(err)
+	rcfg, err := r.Config()
+	is.NoErr(err)
+	is.Equal(rcfg.Section("remote").Subsection("origin").Option("mirror"), "")
+
+	// An LFS endpoint that fails validation does not refuse the switch,
+	// with LFS on or off: the job syncs the git data regardless and skips
+	// only the LFS objects.
+	newRepo("alice-lfs", alice, httpsRemote, sshRemote)
+	is.True(cfg.LFS.Enabled)
+	is.NoErr(be.SetMirror(ctx, "alice-lfs", true))
+	is.True(isMirror("alice-lfs"))
+	is.NoErr(be.SetMirror(ctx, "alice-lfs", false))
+	cfg.LFS.Enabled = false
+	is.NoErr(be.SetMirror(ctx, "alice-lfs", true))
+	is.True(isMirror("alice-lfs"))
+	cfg.LFS.Enabled = true
+
+	// Switching mirroring off is never refused.
+	is.NoErr(be.SetMirror(ctx, "alice-ssh", false))
+
+	// A public https remote, and an admin owner's ssh remote, pass.
+	newRepo("alice-https", alice, httpsRemote, "")
+	is.NoErr(be.SetMirror(ctx, "alice-https", true))
+	is.True(isMirror("alice-https"))
+	newRepo("admin-ssh", admin, sshRemote, sshRemote)
+	is.NoErr(be.SetMirror(ctx, "admin-ssh", true))
+	is.True(isMirror("admin-ssh"))
+
+	// An allowlist that names the host opens it to the job, and so to the
+	// flag, for a non-admin owner. One that does not is refused with the
+	// remote error, for an admin owner too.
+	cfg.SSH.ClientAllowedHosts = []string{"127.0.0.1:1"}
+	is.NoErr(cfg.Validate())
+	is.NoErr(be.SetMirror(ctx, "alice-ssh", true))
+	is.True(isMirror("alice-ssh"))
+	newRepo("alice-other", alice, "ssh://git@10.0.0.1/x.git", "")
+	err = be.SetMirror(ctx, "alice-other", true)
+	is.True(errors.Is(err, proto.ErrInvalidRemote))
+	is.True(errors.Is(err, ssrf.ErrSSHHostNotAllowed))
+	is.True(!isMirror("alice-other"))
+	is.NoErr(be.SetMirror(ctx, "admin-ssh", false))
+	cfg.SSH.ClientAllowedHosts = []string{"git.internal.example"}
+	is.NoErr(cfg.Validate())
+	err = be.SetMirror(ctx, "admin-ssh", true)
+	is.True(errors.Is(err, ssrf.ErrSSHHostNotAllowed))
+	is.True(!isMirror("admin-ssh"))
+}
+
+// TestSetMirrorValidatesOutsideTransaction verifies that SetMirror resolves
+// remotes with a deadline and before it opens a transaction, so a slow
+// resolver cannot hold the database lock and stall other writers.
+func TestSetMirrorValidatesOutsideTransaction(t *testing.T) {
+	is := is.New(t)
+	be, cfg := newTestBackend(t)
+	ctx := backendTestContext(be, cfg)
+
+	admin, err := be.User(ctx, "admin")
+	is.NoErr(err)
+	_, err = seedCreate(be, ctx, "slow", admin, proto.RepositoryOptions{})
+	is.NoErr(err)
+	r, err := git.Open(be.repoPath("slow"))
+	is.NoErr(err)
+	rcfg, err := r.Config()
+	is.NoErr(err)
+	rcfg.Section("remote").Subsection("origin").SetOption("url", "https://1.1.1.1/x.git")
+	is.NoErr(r.SetConfig(rcfg))
+
+	entered := make(chan bool, 1)
+	release := make(chan struct{})
+	prev := validateGitRemote
+	t.Cleanup(func() { validateGitRemote = prev })
+	validateGitRemote = func(ctx context.Context, remote string, policy ssrf.GitRemotePolicy) (ssrf.ValidatedGitRemote, error) {
+		_, hasDeadline := ctx.Deadline()
+		entered <- hasDeadline
+		<-release
+		return prev(ctx, remote, policy)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- be.SetMirror(ctx, "slow", true) }()
+	is.True(<-entered) // the lookup is bounded
+
+	// While validation is stalled, another writer still commits.
+	_, err = be.CreateUser(ctx, "bob", proto.UserOptions{})
+	is.NoErr(err)
+
+	close(release)
+	is.NoErr(<-done)
+	m, err := be.IsMirror(ctx, "slow")
+	is.NoErr(err)
+	is.True(m)
 }
 
 // TestImportRepositoryDisabled verifies that when the installed git is too
