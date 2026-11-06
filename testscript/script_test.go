@@ -3,6 +3,7 @@ package testscript
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -666,21 +668,54 @@ func cmdStopserver(ts *testscript.TestScript, neg bool, args []string) {
 
 	// Wait until every listener is closed, so a server started next can bind
 	// the same ports. A fixed sleep was not always long enough under load.
-	deadline := time.Now().Add(30 * time.Second)
-	for _, env := range []string{"SSH_PORT", "GIT_PORT", "HTTP_PORT", "STATS_PORT"} {
-		addr := net.JoinHostPort(loopback, ts.Getenv(env))
-		for {
-			conn, _ := net.DialTimeout("tcp", addr, time.Second) //nolint:noctx
-			if conn == nil {
-				break
-			}
-			conn.Close()
-			if time.Now().After(deadline) {
-				ts.Fatalf("server on %s did not stop within 30 seconds", addr)
-			}
-			time.Sleep(10 * time.Millisecond)
+	// Only a refused connection counts as closed: a dial that times out on a
+	// loaded machine says nothing. The ports are checked at once because on
+	// Windows a refusal takes about two seconds to arrive. The process
+	// itself may still be finishing its shutdown; testscript waits for it at
+	// the end of the script.
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i, env := range []string{"SSH_PORT", "GIT_PORT", "HTTP_PORT", "STATS_PORT"} {
+		wg.Go(func() {
+			errs[i] = waitClosed(net.JoinHostPort(loopback, ts.Getenv(env)), 30*time.Second)
+		})
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			ts.Fatalf("%v", err)
 		}
 	}
+}
+
+// waitClosed waits until connecting to addr is refused, that is, until
+// nothing listens on it.
+func waitClosed(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 5*time.Second) //nolint:noctx
+		if err == nil {
+			conn.Close()
+		} else if connRefused(err) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("server on %s did not stop within %v (last dial: %v)", addr, timeout, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// connRefused reports whether err from a dial means that nothing listens on
+// the address.
+func connRefused(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	// On Windows, syscall.ECONNREFUSED is not the code Winsock returns.
+	const wsaeconnrefused = 10061
+	return errno == syscall.ECONNREFUSED || runtime.GOOS == "windows" && errno == wsaeconnrefused
 }
 
 func setupPostgres(t testscript.T, cfg *config.Config) (func(), error) {
