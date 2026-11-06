@@ -89,8 +89,9 @@ var errInvalidURL = errors.New("invalid URL")
 // redactURLError redacts the URL of a *url.Error, which the HTTP client
 // returns for every failed request and which prints the whole URL except for
 // a password. The returned error keeps the operation and the underlying
-// error (except for a parse error, whose message is replaced), so errors.Is and errors.As (context.DeadlineExceeded, net.Error
-// timeouts and so on) still work. Any other error is returned unchanged.
+// error (except for a parse error, whose message is replaced), so errors.Is
+// and errors.As (context.DeadlineExceeded, net.Error timeouts and so on)
+// still work. Any other error is returned unchanged.
 func redactURLError(err error) error {
 	uerr, ok := err.(*neturl.Error) //nolint:errorlint // only the top-level error is replaced
 	if !ok {

@@ -23,6 +23,9 @@ func TestRedactURL(t *testing.T) {
 		{"https://example.com?token=XXXX", "https://example.com/[redacted]"},
 		{"https://example.com/#XXXX", "https://example.com/[redacted]"},
 		{"https://user:XXXX@example.com:8443/", "https://example.com:8443"},
+		// net/http prints a username in full (only a password is masked).
+		{"https://XXXX@example.com/x", "https://example.com/[redacted]"},
+		{"https://XXXX@example.com", "https://example.com"},
 		{"https://example.com", "https://example.com"},
 		{"https://example.com/", "https://example.com"},
 		{"http://[::1", "[redacted]"},
@@ -84,12 +87,14 @@ func assertNoSecret(t *testing.T, s string) {
 }
 
 // A failed unrecorded send returns an error for the caller to log; it must
-// not reveal the token in the webhook URL's path, query or user info.
+// not reveal the token in the webhook URL's path, query or user info. The
+// token is the username here: net/http masks a password itself but prints a
+// username in full.
 func TestDeliverUnrecordedTransportErrorRedactsURL(t *testing.T) {
 	is := is.New(t)
 	useHTTPClient(t)
 	e := newTestEnv(t)
-	base := strings.Replace(closingServer(t), "http://", "http://user:USERSECRET@", 1)
+	base := strings.Replace(closingServer(t), "http://", "http://USERSECRET@", 1)
 	w := e.newWebhook(t, base+secretPath+secretQuery, "", ContentTypeJSON, EventPush)
 
 	err := DeliverUnrecorded(e.ctx, []models.Webhook{w}, samplePayloadFor(e))
