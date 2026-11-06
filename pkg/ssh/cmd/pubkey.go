@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/soft-serve/pkg/backend"
-	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"github.com/spf13/cobra"
 )
@@ -48,7 +47,7 @@ func PubkeyCommand() *cobra.Command {
 			// knows to ask an admin rather than retry. That tells the
 			// caller the key is listed, which is harmless: it is a public
 			// key, and listing grants nothing without the private half.
-			if !isServerAdmin(ctx) && IsPublicKeyAdmin(config.FromContext(ctx), apk) {
+			if !isServerAdmin(ctx) && IsPublicKeyAdmin(ctx, apk) {
 				return errListedAdminKey
 			}
 
