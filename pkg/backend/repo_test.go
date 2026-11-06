@@ -275,6 +275,47 @@ func TestImportRepositorySSHAdminKey(t *testing.T) {
 			keyCtx := context.WithValue(ctx, charmssh.ContextKeyPublicKey, pub)
 			_, err = be.ImportRepository(keyCtx, "adminkey", user, remote, opts)
 			is.True(errors.Is(err, proto.ErrImportFailed)) // admin key passes policy
+
+			// An ssh LFS endpoint is checked, before the clone, against the
+			// same policy, so the admin key covers it as well.
+			lfsOpts := proto.RepositoryOptions{LFSEndpoint: remote}
+			_, err = be.ImportRepository(otherCtx, "otherkey-lfs", user, remote, lfsOpts)
+			is.True(errors.Is(err, proto.ErrUnauthorized))
+			_, err = be.ImportRepository(keyCtx, "adminkey-lfs", user, remote, lfsOpts)
+			is.True(errors.Is(err, proto.ErrImportFailed))
+
+			// A mirror is synced later by the mirror job with its owner's
+			// stored privileges. An anonymous caller's mirror is owned by
+			// the default admin, so the key suffices. A non-admin account's
+			// mirror would never sync, so it is refused with the reason.
+			mirrorOpts := proto.RepositoryOptions{Mirror: true}
+			_, err = be.ImportRepository(keyCtx, "adminkey-mirror", user, remote, mirrorOpts)
+			if registered {
+				is.True(errors.Is(err, proto.ErrUnauthorized))
+				is.True(errors.Is(err, errMirrorOwnerNotAdmin))
+			} else {
+				is.True(errors.Is(err, proto.ErrImportFailed))
+			}
+			mirrorOpts.LFSEndpoint = remote
+			_, err = be.ImportRepository(keyCtx, "adminkey-mirror-lfs", user, remote, mirrorOpts)
+			if registered {
+				is.True(errors.Is(err, errMirrorOwnerNotAdmin))
+			} else {
+				is.True(errors.Is(err, proto.ErrImportFailed))
+			}
+
+			// A configured allowlist binds the admin key too. A host it
+			// names is open to the mirror job as well, so a non-admin
+			// account may mirror from it.
+			cfg.SSH.ClientAllowedHosts = []string{"git.internal.example"}
+			is.NoErr(cfg.Validate())
+			_, err = be.ImportRepository(keyCtx, "adminkey-allowlist", user, remote, opts)
+			is.True(errors.Is(err, proto.ErrInvalidRemote))
+			is.True(errors.Is(err, ssrf.ErrSSHHostNotAllowed))
+			cfg.SSH.ClientAllowedHosts = []string{"127.0.0.1:1"}
+			is.NoErr(cfg.Validate())
+			_, err = be.ImportRepository(keyCtx, "adminkey-allowed-mirror", user, remote, proto.RepositoryOptions{Mirror: true})
+			is.True(errors.Is(err, proto.ErrImportFailed))
 		})
 	}
 }

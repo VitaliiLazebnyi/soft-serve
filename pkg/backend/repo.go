@@ -30,11 +30,45 @@ import (
 // RemotePolicy returns the policy for git remotes supplied on behalf of user:
 // the operator's ssh allowlist, and, for server admins, leave to pick any ssh
 // host when no allowlist is configured. A nil user gets neither.
+//
+// Only the user's stored admin flag counts. It is meant for callers with no
+// live session, such as the mirror job acting for a repository's owner. A
+// caller acting for a live session must also honour an admin key on the
+// session context (see isServerAdmin); ImportRepository does so through
+// importRemotePolicy.
 func RemotePolicy(cfg *config.Config, user proto.User) ssrf.GitRemotePolicy {
 	return ssrf.GitRemotePolicy{
 		AllowedSSHHosts: cfg.SSH.AllowedHosts(),
 		AllowAnySSHHost: user != nil && user.IsAdmin(),
 	}
+}
+
+// errMirrorOwnerNotAdmin explains a refused ssh mirror import. It wraps
+// proto.ErrUnauthorized, so callers that test for that still match.
+var errMirrorOwnerNotAdmin = fmt.Errorf("%w: an ssh mirror is synced with its owner's privileges, and the owner is not an admin; add an ssh.client_allowed_hosts entry for the host or import without --mirror", proto.ErrUnauthorized)
+
+// importRemotePolicy returns the policy for the remote and LFS endpoint that
+// user, acting live on ctx, supplies to ImportRepository.
+//
+// The caller's own privilege counts: the stored admin flag or an admin key
+// on the session (see isServerAdmin). A mirror is also synced later by the
+// mirror job, which has no session and re-validates every remote with
+// RemotePolicy for the repository's owner. So for a mirror the leave to use
+// any ssh host is granted only when that later check will grant it too:
+// the owner is the user when there is one, and the default admin otherwise
+// (see CreateRepository). Without this, a non-admin account holding an
+// admin key could create a mirror that the job then skips on every run.
+// mirrorRestricted reports whether the mirror rule withdrew a leave the
+// caller would otherwise have had.
+func (d *Backend) importRemotePolicy(ctx context.Context, user proto.User, mirror bool) (policy ssrf.GitRemotePolicy, mirrorRestricted bool) {
+	policy = RemotePolicy(d.cfg, user)
+	live := d.isServerAdmin(ctx, user)
+	policy.AllowAnySSHHost = live
+	if mirror && user != nil && !user.IsAdmin() {
+		policy.AllowAnySSHHost = false
+		mirrorRestricted = live
+	}
+	return policy, mirrorRestricted
 }
 
 // validateImportRemote validates a user-supplied remote and maps the outcome
@@ -239,11 +273,19 @@ func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.
 	}
 
 	remote = utils.Sanitize(remote)
-	policy := RemotePolicy(d.cfg, user)
-	// The caller is acting live, so an admin key on the session counts too,
-	// as it does for every other admin check (see isServerAdmin).
-	policy.AllowAnySSHHost = d.isServerAdmin(ctx, user)
-	v, err := validateImportRemote(remote, policy)
+	policy, mirrorRestricted := d.importRemotePolicy(ctx, user, opts.Mirror)
+	// checkRemote validates one user-supplied remote, explaining a refusal
+	// that only the mirror rule caused.
+	checkRemote := func(r string) (ssrf.ValidatedGitRemote, error) {
+		v, err := validateImportRemote(r, policy)
+		if mirrorRestricted && errors.Is(err, proto.ErrUnauthorized) {
+			d.logger.Warn("refusing ssh mirror import: owner is not an admin, so the mirror job could not sync it",
+				"name", name, "remote", redactRemote(r), "user", user.Username())
+			return v, errMirrorOwnerNotAdmin
+		}
+		return v, err
+	}
+	v, err := checkRemote(remote)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +309,7 @@ func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.
 		// A user-supplied endpoint is persisted to the repo config, where
 		// the mirror job later reads it, so it obeys the same validation
 		// and ssh policy as the remote itself.
-		if _, err := validateImportRemote(opts.LFSEndpoint, policy); err != nil {
+		if _, err := checkRemote(opts.LFSEndpoint); err != nil {
 			return nil, err
 		}
 		imp.lfs, err = lfs.NewEndpoint(opts.LFSEndpoint)
