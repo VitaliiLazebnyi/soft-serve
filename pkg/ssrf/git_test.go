@@ -1,18 +1,23 @@
 package ssrf
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
 // anySSH is the policy of a server admin with no allowlist configured; it
-// keeps the address-validation table independent of the ssh policy.
-var anySSH = GitRemotePolicy{AllowAnySSHHost: true}
+// keeps the address-validation table independent of the ssh policy. Its
+// resolver knows no names, so a hostname slipping into a table fails instead
+// of reaching real DNS.
+var anySSH = GitRemotePolicy{AllowAnySSHHost: true, lookup: fakeLookup(nil)}
 
 func TestValidateGitRemote(t *testing.T) {
 	tests := []struct {
@@ -124,21 +129,71 @@ func TestValidateGitRemote(t *testing.T) {
 }
 
 // TestValidateGitRemoteResolvesHostnames covers the DNS path, which the main
-// table deliberately avoids so it can run offline.
+// table deliberately avoids. The resolver is faked, so it runs offline.
 func TestValidateGitRemoteResolvesHostnames(t *testing.T) {
-	// A fixed public address, so the test needs no network or DNS.
-	fakeResolver(t, map[string][]string{"github.com": {"140.82.112.3"}})
+	t.Parallel()
 
-	v, err := ValidateGitRemote("https://github.com/charmbracelet/soft-serve.git", anySSH)
-	if err != nil {
-		t.Fatalf("public hostname rejected: %v", err)
+	tests := []struct {
+		name    string
+		remote  string
+		ips     []string
+		wantErr error
+		// wantMsg, when set, must appear in the error; it tells apart the
+		// branches that share ErrInvalidURL.
+		wantMsg string
+	}{
+		{"public https", "https://git.example/x.git", []string{"140.82.112.3"}, nil, ""},
+		{"public git", "git://git.example/x.git", []string{"140.82.112.3"}, nil, ""},
+		{"private https", "https://git.example/x.git", []string{"10.0.0.1"}, ErrPrivateIP, ""},
+		{"metadata git", "git://git.example/x.git", []string{"169.254.169.254"}, ErrPrivateIP, ""},
+		{"loopback v6", "https://git.example/x.git", []string{"::1"}, ErrPrivateIP, ""},
+		// A name answering with both is a rebinding attempt.
+		{"public and private", "https://git.example/x.git", []string{"140.82.112.3", "10.0.0.1"}, ErrPrivateIP, ""},
+		{"does not resolve", "https://git.example/x.git", nil, ErrInvalidURL, "cannot resolve hostname"},
+		// A resolver may answer with no addresses and no error.
+		{"empty answer", "https://git.example/x.git", []string{}, ErrInvalidURL, "no addresses for hostname"},
+		{"empty answer git", "git://git.example/x.git", []string{}, ErrInvalidURL, "no addresses for hostname"},
 	}
-	if v.Transport != GitTransportHTTP {
-		t.Errorf("transport = %v, want %v", v.Transport, GitTransportHTTP)
-	}
-	// A resolved hostname must be pinned, or git re-resolves it.
-	if len(v.Config) == 0 {
-		t.Error("resolved hostname was not pinned")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			table := map[string][]string{}
+			if tt.ips != nil {
+				table["git.example"] = tt.ips
+			}
+			var lookups atomic.Int32
+			fake := fakeLookup(table)
+			policy := GitRemotePolicy{AllowAnySSHHost: true, lookup: func(ctx context.Context, host string) ([]net.IPAddr, error) {
+				lookups.Add(1)
+				return fake(ctx, host)
+			}}
+
+			v, err := ValidateGitRemote(tt.remote, policy)
+			// The injected resolver, not the system one, answered.
+			if lookups.Load() != 1 {
+				t.Fatalf("fake resolver called %d times, want 1", lookups.Load())
+			}
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("ValidateGitRemote(%q) error = %v, want %v", tt.remote, err, tt.wantErr)
+				}
+				if tt.wantMsg != "" && !strings.Contains(err.Error(), tt.wantMsg) {
+					t.Fatalf("ValidateGitRemote(%q) error = %q, want it to mention %q", tt.remote, err, tt.wantMsg)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("public hostname rejected: %v", err)
+			}
+			// A resolved http hostname must be pinned, or git re-resolves it.
+			if v.Transport == GitTransportHTTP && !slices.ContainsFunc(v.Config, func(e GitConfigEntry) bool {
+				return e.Key == "http.curloptResolve" && strings.HasSuffix(e.Value, ":"+tt.ips[0])
+			}) {
+				t.Errorf("resolved hostname was not pinned to %s: %v", tt.ips[0], v.Config)
+			}
+		})
 	}
 }
 
@@ -308,16 +363,26 @@ func hasGitConfig(env []string, key, value string) bool {
 // TestValidateGitRemoteErrorsHideResolver verifies that the messages handed
 // back to an importing user do not include the resolver's own error, which
 // names the server's DNS server ("lookup x on 10.0.0.53:53: no such host").
+// The fake resolver fails the way the system one does, so this runs offline.
 func TestValidateGitRemoteErrorsHideResolver(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires DNS")
-	}
+	t.Parallel()
 
+	var lookups atomic.Int32
+	failing := GitRemotePolicy{AllowAnySSHHost: true, lookup: func(_ context.Context, host string) ([]net.IPAddr, error) {
+		lookups.Add(1)
+		return nil, &net.DNSError{Err: "server misbehaving", Name: host, Server: "10.0.0.53:53"}
+	}}
 	for _, remote := range []string{
 		"https://does-not-exist.invalid/x.git",
 		"git://does-not-exist.invalid/x.git",
 	} {
-		_, err := ValidateGitRemote(remote, anySSH)
+		before := lookups.Load()
+		_, err := ValidateGitRemote(remote, failing)
+		// Without this, a check rejecting the name before lookup would let
+		// the test pass without exercising the resolver-error path.
+		if got := lookups.Load() - before; got != 1 {
+			t.Fatalf("ValidateGitRemote(%q) called the resolver %d times, want 1", remote, got)
+		}
 		if !errors.Is(err, ErrInvalidURL) {
 			t.Fatalf("ValidateGitRemote(%q) error = %v, want ErrInvalidURL", remote, err)
 		}
