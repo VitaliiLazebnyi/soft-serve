@@ -49,9 +49,26 @@ stderr 'make the owner an admin'
 stderr 'also limits admins'
 stderr 'import without --mirror'
 
+# a plain import from a reachable ssh host succeeds: the server itself,
+# reading a public repository with its own client key
+soft repo create src
+usoft repo import user3 ssh://git@127.0.0.1:$SSH_PORT/src
+usoft repo mirror user3
+stdout 'false'
+
+# switching mirroring on later is refused for the same reason, and the flag
+# is left alone
+! usoft repo mirror user3 true
+stderr 'unauthorized'
+stderr 'owner is not an admin'
+! stderr 'import without --mirror'
+usoft repo mirror user3
+stdout 'false'
+
 soft repo list
 ! stdout 'anon'
-! stdout 'user'
+! stdout 'user[12]'
+stdout 'user3'
 
 # stop the server
 [windows] stopserver
