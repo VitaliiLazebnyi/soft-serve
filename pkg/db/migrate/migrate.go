@@ -112,11 +112,26 @@ func Rollback(ctx context.Context, dbx *db.DB) error {
 			}
 		}
 
-		if migrs.Version == 0 || len(migrations) < int(migrs.Version) {
+		if migrs.Version == 0 {
 			return fmt.Errorf("there are no migrations to rollback")
 		}
 
-		m := migrations[migrs.Version-1]
+		// Look the migration up by version rather than by position, and
+		// refuse to roll back one this binary does not know.
+		var m *Migration
+		for i := range migrations {
+			if migrations[i].Version == migrs.Version {
+				m = &migrations[i]
+				break
+			}
+		}
+		if m == nil {
+			if n := len(migrations); n > 0 && migrs.Version > migrations[n-1].Version {
+				return fmt.Errorf("database is at migration version %d, newer than the latest version %d known to this binary; upgrade soft-serve", migrs.Version, migrations[n-1].Version)
+			}
+			return fmt.Errorf("database is at migration version %d, which is unknown to this binary", migrs.Version)
+		}
+
 		logger.Infof("rolling back migration %d. %s", m.Version, m.Name)
 		if err := m.Rollback(ctx, tx); err != nil {
 			return err
