@@ -57,7 +57,7 @@ var (
 	// $SOFT_SERVE_DATA_PATH. We already parse the config when the binary
 	// starts, so we don't need to do it again.
 	// The --config flag is now deprecated.
-	hooksRunE = func(cmd *cobra.Command, args []string) error {
+	hooksRunE = cmd.CloseDBOnError(func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		hks := backend.FromContext(ctx)
 		cfg := config.FromContext(ctx)
@@ -123,7 +123,7 @@ var (
 		}
 
 		return nil
-	}
+	})
 
 	preReceiveCmd = &cobra.Command{
 		Use:   "pre-receive",
