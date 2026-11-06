@@ -1,42 +1,36 @@
 # vi: set ft=conf
 
 # Test ssh imports by a caller whose key is listed in initial_admin_keys but
-# who is not a database admin.
+# whose account is not a database admin.
 #
 # Such a key is an admin for every other check, so with no
 # ssh.client_allowed_hosts it may import from any ssh host. A mirror is
 # synced later with its owner's stored privileges, so a non-admin account
-# may not create an ssh mirror; an anonymous caller's mirror is owned by the
-# default admin and may.
+# may not create an ssh mirror.
+#
+# A listed key that no account holds is attached to the admin account at
+# startup, so the only way to get here is to list a key that a non-admin
+# account already holds.
 
-# first boot seeds the admin account with admin1's key only
+# first boot seeds the admin account with admin1's key only; user1 gets an
+# ordinary account
 exec soft serve &
 ensureserverrunning SSH_PORT
+soft user create user1 --key "$USER1_AUTHORIZED_KEY"
 # stopserver goes through the HTTP server, which may start after ssh
 ensureserverrunning HTTP_PORT
 stopserver
 ensureservernotrunning SSH_PORT
 
-# user1's key becomes an admin key, but no account holds it
+# user1's key becomes an admin key; startup leaves it on user1's account
 env SOFT_SERVE_INITIAL_ADMIN_KEYS=$USER1_AUTHORIZED_KEY
 exec soft serve &
 ensureserverrunning SSH_PORT
+soft user info user1
+stdout 'Admin: false'
 
 # remotes that pass policy fail only at the clone, since nothing listens on
 # loopback port 1
-! usoft repo import anon1 ssh://git@127.0.0.1:1/x.git
-stderr 'import failed'
-! stderr 'unauthorized'
-! usoft repo import anon2 --lfs-endpoint ssh://git@127.0.0.1:1/x.git ssh://git@127.0.0.1:1/x.git
-stderr 'import failed'
-! stderr 'unauthorized'
-! usoft repo import --mirror anon3 ssh://git@127.0.0.1:1/x.git
-stderr 'import failed'
-! stderr 'unauthorized'
-
-# give the key a non-admin account
-soft user create user1 --key "$USER1_AUTHORIZED_KEY"
-
 ! usoft repo import user1 ssh://git@127.0.0.1:1/x.git
 stderr 'import failed'
 ! stderr 'unauthorized'
@@ -66,7 +60,6 @@ usoft repo mirror user3
 stdout 'false'
 
 soft repo list
-! stdout 'anon'
 ! stdout 'user[12]'
 stdout 'user3'
 
