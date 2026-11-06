@@ -56,7 +56,7 @@ func parseUsernamePassword(ctx context.Context, username, password string) (prot
 		if utils.ValidateUsername(username) == nil {
 			logger = logger.With("username", username)
 		}
-		logger.Error("invalid password or token", "err", err)
+		logger.Info("invalid password or token", "err", err)
 		return nil, ErrInvalidPassword
 	} else if username != "" {
 		// Try to authenticate using access token as the username
@@ -67,7 +67,7 @@ func parseUsernamePassword(ctx context.Context, username, password string) (prot
 			return user, nil
 		}
 
-		logger.Error("failed to get user", "err", err)
+		logger.Info("failed to get user", "err", err)
 		return nil, ErrInvalidToken
 	}
 
@@ -107,7 +107,7 @@ func parseAuthHdr(r *http.Request, repo string) (proto.User, error) {
 	case "token":
 		user, err := be.UserByAccessToken(ctx, parts[1])
 		if err != nil {
-			logger.Error("failed to get user", "err", err)
+			logger.Info("failed to get user", "err", err)
 			return nil, err
 		}
 
@@ -173,7 +173,7 @@ func parseJWT(ctx context.Context, bearer, repo string) (*jwt.RegisteredClaims, 
 		jwt.WithAudience(repo),
 	)
 	if err != nil {
-		logger.Error("failed to parse jwt", "err", err)
+		logger.Info("failed to parse jwt", "err", err)
 		return nil, ErrInvalidToken
 	}
 

@@ -1,0 +1,40 @@
+# vi: set ft=conf
+
+# An anonymous HTTP push, allowed by anon-access read-write, sends its push
+# and branch_tag_create webhooks like any other push.
+
+# FIXME: don't skip windows
+[windows] skip 'curl makes github actions hang'
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+soft settings anon-access read-write
+soft repo create repo1
+
+new-webhook WH_REPO1
+soft repo webhook create repo1 $WH_REPO1 -e branch_tag_create -e push
+
+# push anonymously over HTTP
+git clone http://localhost:$HTTP_PORT/repo1 repo1
+mkfile ./repo1/README.md 'foobar'
+git -C repo1 add -A
+git -C repo1 commit -m 'first'
+git -C repo1 push origin HEAD
+
+soft repo webhook deliver list repo1 1
+stdout '✅.*branch_tag_create'
+stdout '✅.*push'
+webhook-received
+[windows] dos2unix received.txt
+cmp stdout received.txt
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .
+
+-- received.txt --
+branch_tag_create /hooks/WH_REPO1
+push /hooks/WH_REPO1
