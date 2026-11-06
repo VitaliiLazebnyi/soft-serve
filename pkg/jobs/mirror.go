@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/ssrf"
 	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/charmbracelet/soft-serve/pkg/sync"
+	"github.com/charmbracelet/soft-serve/pkg/utils"
 )
 
 func init() {
@@ -173,7 +174,7 @@ func (m mirrorPull) Func(ctx context.Context) func() {
 
 						client := lfs.NewClient(ep)
 						if client == nil {
-							logger.Errorf("failed to create lfs client: unsupported endpoint %s", lfsEndpoint)
+							logger.Errorf("failed to create lfs client: unsupported endpoint %s", utils.RedactURL(lfsEndpoint))
 							return
 						}
 

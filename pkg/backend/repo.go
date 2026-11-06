@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -99,14 +98,10 @@ func validateImportRemote(ctx context.Context, remote string, policy ssrf.GitRem
 // stand in for a slow resolver.
 var validateGitRemote = ssrf.ValidateGitRemoteContext
 
-// redactRemote strips any password from a remote URL so it can be logged.
-// scp-style remotes have no userinfo to leak and pass through unchanged.
+// redactRemote strips any user info and query from a remote URL so it can be
+// logged: either can hold a token. scp-style remotes pass through unchanged.
 func redactRemote(remote string) string {
-	u, err := url.Parse(remote)
-	if err != nil || u.User == nil {
-		return remote
-	}
-	return u.Redacted()
+	return utils.RedactURL(remote)
 }
 
 // checkCanCreate refuses the creation of a new repository name by user when

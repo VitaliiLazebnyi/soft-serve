@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"net/url"
 	"path"
 	"strings"
 	"unicode"
@@ -80,4 +81,29 @@ func ValidateRepo(repo string) error {
 	}
 
 	return nil
+}
+
+// RedactURL returns rawURL without its user info, query and fragment, so it
+// can be logged or returned in an error. Remotes and LFS endpoints can carry
+// a token as the user name or password, and LFS hrefs are often presigned
+// URLs with a signature in the query. A URL that cannot be parsed is
+// replaced entirely; a string with no scheme or host to parse (such as an
+// scp-style remote) is returned unchanged.
+func RedactURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		if strings.Contains(rawURL, "://") {
+			return "[redacted]"
+		}
+		return rawURL
+	}
+	if u.Host == "" {
+		return rawURL
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String()
 }

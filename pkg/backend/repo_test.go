@@ -166,11 +166,12 @@ func TestImportRepositoryCloneFailure(t *testing.T) {
 
 func TestRedactRemote(t *testing.T) {
 	tests := map[string]string{
-		"https://user:secret@example.com/x.git": "https://user:xxxxx@example.com/x.git",
-		"https://user@example.com/x.git":        "https://user@example.com/x.git",
+		"https://user:secret@example.com/x.git": "https://example.com/x.git",
+		"https://TOKEN@example.com/x.git":       "https://example.com/x.git",
+		"https://example.com/x.git?t=TOKEN":     "https://example.com/x.git",
 		"https://example.com/x.git":             "https://example.com/x.git",
 		"git@github.com:x/y.git":                "git@github.com:x/y.git",
-		"ssh://git@10.0.0.1/x.git":              "ssh://git@10.0.0.1/x.git",
+		"ssh://git@10.0.0.1/x.git":              "ssh://10.0.0.1/x.git",
 	}
 	for in, want := range tests {
 		if got := redactRemote(in); got != want {

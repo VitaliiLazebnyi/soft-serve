@@ -7,10 +7,35 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/ssrf"
+	"github.com/charmbracelet/soft-serve/pkg/utils"
 )
+
+// errInvalidURL replaces the parser's message when a request URL cannot be
+// parsed.
+var errInvalidURL = errors.New("invalid URL")
+
+// redactURLError redacts the URL of a *url.Error, which the HTTP client
+// returns for every failed request and which prints the whole URL except for
+// a password: endpoints can carry a token as the user name, and hrefs are
+// often presigned URLs with a signature in the query. The operation and the
+// underlying error are kept (except for a parse error, whose message can
+// quote part of the URL), so errors.Is and errors.As still work. Any other
+// error is returned unchanged.
+func redactURLError(err error) error {
+	uerr, ok := err.(*url.Error) //nolint:errorlint // only the top-level error is replaced
+	if !ok {
+		return err
+	}
+	inner := uerr.Err
+	if uerr.Op == "parse" {
+		inner = errInvalidURL
+	}
+	return &url.Error{Op: uerr.Op, URL: utils.RedactURL(uerr.URL), Err: inner}
+}
 
 // httpClient is a Git LFS client to communicate with a LFS source API.
 type httpClient struct {
@@ -68,10 +93,11 @@ func (c *httpClient) batch(ctx context.Context, operation string, objects []Poin
 		return nil, err
 	}
 
-	logger.Debugf("Calling: %s", url)
+	logger.Debugf("Calling: %s", utils.RedactURL(url))
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, payload)
 	if err != nil {
+		err = redactURLError(err)
 		logger.Errorf("Error creating request: %v", err)
 		return nil, err
 	}
@@ -85,6 +111,7 @@ func (c *httpClient) batch(ctx context.Context, operation string, objects []Poin
 			return nil, ctx.Err()
 		default:
 		}
+		err = redactURLError(err)
 		logger.Errorf("Error while processing request: %v", err)
 		return nil, err
 	}
@@ -153,7 +180,7 @@ func (c *httpClient) performOperation(ctx context.Context, objects []Pointer, dc
 
 			link, ok := object.Actions[ActionUpload]
 			if !ok {
-				logger.Debugf("%+v", object)
+				logger.Debugf("%v has no usable action", object.Pointer)
 				return errors.New("missing action 'upload'")
 			}
 
@@ -179,7 +206,7 @@ func (c *httpClient) performOperation(ctx context.Context, objects []Pointer, dc
 		} else {
 			link, ok := object.Actions[ActionDownload]
 			if !ok {
-				logger.Debugf("%+v", object)
+				logger.Debugf("%v has no usable action", object.Pointer)
 				return errors.New("missing action 'download'")
 			}
 
