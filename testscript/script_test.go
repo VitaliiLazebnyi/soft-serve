@@ -83,7 +83,7 @@ func TestScript(t *testing.T) {
 	}
 
 	admin1Key, admin1 := mkkey("admin1")
-	_, admin2 := mkkey("admin2")
+	admin2Key, admin2 := mkkey("admin2")
 	user1Key, user1 := mkkey("user1")
 	attackerKey, attacker := mkkey("attacker")
 	attackerSigner := &maliciousSigner{
@@ -102,6 +102,7 @@ func TestScript(t *testing.T) {
 			"ksoft":                  cmdKeylessSoft,
 			"git":                    cmdGit(admin1Key),
 			"ugit":                   cmdGit(user1Key),
+			"a2git":                  cmdGit(admin2Key),
 			"agit":                   cmdGit(attackerKey),
 			"curl":                   cmdCurl,
 			"mkfile":                 cmdMkfile,
