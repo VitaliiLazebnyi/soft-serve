@@ -76,6 +76,12 @@ func Migrate(ctx context.Context, dbx *db.DB) error {
 			}
 		}
 
+		// Refuse to run against a database migrated by a newer binary: its
+		// schema may not match what this binary expects.
+		if n := len(migrations); n > 0 && migrs.Version > migrations[n-1].Version {
+			return fmt.Errorf("database is at migration version %d, newer than the latest version %d known to this binary; upgrade soft-serve", migrs.Version, migrations[n-1].Version)
+		}
+
 		for _, m := range migrations {
 			if m.Version <= migrs.Version {
 				continue
@@ -130,7 +136,9 @@ func hasTable(tx *db.Tx, tableName string) bool {
 	case "sqlite3", "sqlite":
 		query = "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
 	case "postgres":
-		fallthrough
+		// Look in the schema unqualified CREATE TABLE statements write to,
+		// which follows search_path and is not necessarily "public".
+		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?"
 	case "mysql":
 		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?"
 	}
