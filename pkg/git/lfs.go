@@ -234,12 +234,50 @@ var _ transfer.LockBackend = (*lfsLockBackend)(nil)
 func (t *lfsTransfer) LockBackend(args transfer.Args) transfer.LockBackend {
 	user := proto.UserFromContext(t.ctx)
 	if user == nil {
-		t.logger.Errorf("no user in context while creating lock backend, repo %s", t.repo.Name())
-		return nil
+		// Locks are owned by an account. A caller without one (an anonymous
+		// key, or an initial_admin_keys key with no user row) can't hold or
+		// list them. Returning nil here would make the transfer processor
+		// panic on the first lock command, so refuse each one instead.
+		t.logger.Debugf("no user in context, refusing lock commands, repo %s", t.repo.Name())
+		return noUserLockBackend{}
 	}
 
 	return &lfsLockBackend{t, args, user}
 }
+
+// noUserLockBackend is the lock backend for a caller with no account. Every
+// method returns transfer.ErrForbidden, which the processor sends back to the
+// client as a 403 status.
+type noUserLockBackend struct{}
+
+var _ transfer.LockBackend = noUserLockBackend{}
+
+// Create implements transfer.LockBackend.
+func (noUserLockBackend) Create(string, string) (transfer.Lock, error) {
+	return nil, errNoUserLocks
+}
+
+// Unlock implements transfer.LockBackend.
+func (noUserLockBackend) Unlock(transfer.Lock) error {
+	return errNoUserLocks
+}
+
+// FromPath implements transfer.LockBackend.
+func (noUserLockBackend) FromPath(string) (transfer.Lock, error) {
+	return nil, errNoUserLocks
+}
+
+// FromID implements transfer.LockBackend.
+func (noUserLockBackend) FromID(string) (transfer.Lock, error) {
+	return nil, errNoUserLocks
+}
+
+// Range implements transfer.LockBackend.
+func (noUserLockBackend) Range(string, int, func(transfer.Lock) error) (string, error) {
+	return "", errNoUserLocks
+}
+
+var errNoUserLocks = fmt.Errorf("%w: locks need a user account", transfer.ErrForbidden)
 
 // Create implements transfer.LockBackend.
 func (l *lfsLockBackend) Create(path string, refname string) (transfer.Lock, error) {

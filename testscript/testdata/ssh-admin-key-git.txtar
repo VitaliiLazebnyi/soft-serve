@@ -41,6 +41,12 @@ stdout '000eversion=1\n000clocking\n0000'
 soft git-lfs-transfer upriv upload
 stdout '000eversion=1\n000clocking\n0000'
 
+# LFS locks over SSH work for the admin key, held by its account
+git -C apriv lfs lock README.md
+git -C apriv lfs locks
+stdout 'README.md\s+admin'
+git -C apriv lfs unlock README.md
+
 # git-lfs-authenticate issues a token the HTTP LFS endpoint checks against
 # the account alone, so it uses the account's access, not the admin key's
 ! soft git-lfs-authenticate upriv download
@@ -85,6 +91,12 @@ stdout '✅.*push'
 ! stdout '❌'
 webhook-received
 stdout 'push /hooks/WH_UPRIV'
+
+# locks belong to an account, so a key with none is refused, not crashed
+! git -C apriv lfs lock README.md
+stderr 'forbidden'
+! git -C apriv lfs locks
+stderr 'forbidden'
 
 # stop the server
 [windows] stopserver
