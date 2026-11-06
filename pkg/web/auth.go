@@ -48,11 +48,14 @@ func parseUsernamePassword(ctx context.Context, username, password string) (prot
 			return user, nil
 		}
 
-		logger.Error("invalid password or token", "username", username, "err", err)
+		// The username is not logged: clients that follow the GitHub
+		// convention send the access token as the username.
+		logger.Error("invalid password or token", "err", err)
 		return nil, ErrInvalidPassword
 	} else if username != "" {
 		// Try to authenticate using access token as the username
-		logger.Debug("trying to authenticate using access token as username", "username", username)
+		// The username is the access token here, so it is not logged.
+		logger.Debug("trying to authenticate using access token as username")
 		user, err := be.UserByAccessToken(ctx, username)
 		if err == nil {
 			return user, nil
@@ -84,10 +87,17 @@ func parseAuthHdr(r *http.Request, repo string) (proto.User, error) {
 		return nil, errors.New("invalid authorization header")
 	}
 
-	// Log the scheme only: the rest of the header is a credential.
-	logger.Debug("authorization auth header", "scheme", parts[0])
+	// Log only a known scheme: the rest of the header is a credential, and
+	// in a malformed header the first word can be one too.
+	scheme := strings.ToLower(parts[0])
+	logged := "other"
+	switch scheme {
+	case "token", "bearer", "basic":
+		logged = scheme
+	}
+	logger.Debug("authorization auth header", "scheme", logged)
 
-	switch strings.ToLower(parts[0]) {
+	switch scheme {
 	case "token":
 		user, err := be.UserByAccessToken(ctx, parts[1])
 		if err != nil {
