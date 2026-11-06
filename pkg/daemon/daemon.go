@@ -88,15 +88,18 @@ func (d *GitDaemon) ListenAndServe() error {
 
 // Serve listens on the TCP network address and serves Git requests.
 func (d *GitDaemon) Serve(listener net.Listener) error {
+	// Register under liMu, which closeListener holds while it marks the
+	// daemon done, so that Serve either sees it done or is counted before
+	// Shutdown starts waiting.
+	d.liMu.Lock()
 	if d.done.Load() {
+		d.liMu.Unlock()
 		return ErrServerClosed
 	}
-
 	d.wg.Add(1)
-	defer d.wg.Done()
-	d.liMu.Lock()
 	d.listeners = append(d.listeners, listener)
 	d.liMu.Unlock()
+	defer d.wg.Done()
 
 	var tempDelay time.Duration
 	for {
@@ -324,17 +327,19 @@ func (d *GitDaemon) closeListener() error {
 	}
 	var err error
 	d.liMu.Lock()
-	for _, l := range d.listeners {
-		if err = l.Close(); err != nil {
-			err = errors.Join(err, fmt.Errorf("close listener %s: %w", l.Addr(), err))
-		}
-	}
-	d.listeners = d.listeners[:0]
-	d.liMu.Unlock()
+	defer d.liMu.Unlock()
+	// Mark the daemon done before closing the listeners, so that a Serve
+	// whose Accept fails because of it reports ErrServerClosed.
 	d.once.Do(func() {
 		d.done.Store(true)
 		close(d.finished)
 	})
+	for _, l := range d.listeners {
+		if cerr := l.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close listener %s: %w", l.Addr(), cerr))
+		}
+	}
+	d.listeners = d.listeners[:0]
 	return err
 }
 

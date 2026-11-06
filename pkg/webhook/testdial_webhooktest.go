@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/charmbracelet/soft-serve/pkg/ssrf"
 )
@@ -19,7 +20,14 @@ import (
 // that address instead of the webhook's host. Webhook URLs are still validated
 // as usual, so the tests use public addresses, but nothing leaves the machine:
 // the requests reach a receiver the test runs on loopback.
+//
+// SOFT_SERVE_TEST_WEBHOOK_MAX_DELIVERIES lowers how many deliveries each
+// webhook keeps, so a test can reach the limit with a few events.
 func init() {
+	if n, err := strconv.Atoi(os.Getenv("SOFT_SERVE_TEST_WEBHOOK_MAX_DELIVERIES")); err == nil && n >= 0 {
+		maxDeliveries = n
+	}
+
 	addr := os.Getenv("SOFT_SERVE_TEST_WEBHOOK_ADDR")
 	if addr == "" {
 		return
