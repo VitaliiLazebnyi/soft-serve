@@ -63,3 +63,21 @@ func TestWaitExit(t *testing.T) {
 		t.Fatalf("exit status lost: %v", err)
 	}
 }
+
+// stopserver waits only for the server its stop request went to, not for
+// another one the script runs at the same time.
+func TestServerProcesses(t *testing.T) {
+	a, b := &os.Process{Pid: 1}, &os.Process{Pid: 2}
+	cmds := []*exec.Cmd{
+		{Args: []string{"soft", "serve"}, Process: a, Env: []string{
+			"SOFT_SERVE_HTTP_PUBLIC_URL=http://localhost:2", // overridden below
+			"SOFT_SERVE_HTTP_PUBLIC_URL=http://localhost:1",
+		}},
+		{Args: []string{"soft", "serve"}, Process: b, Env: []string{"SOFT_SERVE_HTTP_PUBLIC_URL=http://localhost:2"}},
+		{Args: []string{"soft", "repo"}, Process: &os.Process{Pid: 3}, Env: []string{"SOFT_SERVE_HTTP_PUBLIC_URL=http://localhost:1"}},
+	}
+	got := serverProcesses(cmds, "http://localhost:1")
+	if len(got) != 1 || got[0] != a {
+		t.Fatalf("serverProcesses returned %v, want only the first server's process", got)
+	}
+}

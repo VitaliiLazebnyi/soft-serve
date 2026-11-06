@@ -668,7 +668,8 @@ func cmdEnsureServerNotRunning(ts *testscript.TestScript, neg bool, args []strin
 
 func cmdStopserver(ts *testscript.TestScript, neg bool, args []string) {
 	// stop the server
-	resp, err := loopbackClient.Head(fmt.Sprintf("%s/__stop", ts.Getenv("SOFT_SERVE_HTTP_PUBLIC_URL"))) //nolint:noctx
+	publicURL := ts.Getenv("SOFT_SERVE_HTTP_PUBLIC_URL")
+	resp, err := loopbackClient.Head(fmt.Sprintf("%s/__stop", publicURL)) //nolint:noctx
 	check(ts, err, neg)
 	if err != nil {
 		return // only reached under "! stopserver", where failing is expected
@@ -678,13 +679,7 @@ func cmdStopserver(ts *testscript.TestScript, neg bool, args []string) {
 	// Wait for the server process to exit. A fixed sleep was not always long
 	// enough under load, and a server that is still shutting down when the
 	// script goes on to skip or end is killed, which fails the script.
-	var procs []*os.Process
-	for _, c := range ts.BackgroundCmds() {
-		if len(c.Args) > 1 && c.Args[1] == "serve" && c.Process != nil {
-			procs = append(procs, c.Process)
-		}
-	}
-	if len(procs) > 0 {
+	if procs := serverProcesses(ts.BackgroundCmds(), publicURL); len(procs) > 0 {
 		for _, p := range procs {
 			if err := waitExit(p, 30*time.Second); err != nil {
 				ts.Fatalf("server did not stop: %v", err)
@@ -710,6 +705,34 @@ func cmdStopserver(ts *testscript.TestScript, neg bool, args []string) {
 			ts.Fatalf("%v", err)
 		}
 	}
+}
+
+// serverProcesses returns the processes of the background "soft serve"
+// commands that were started with publicURL as their HTTP public URL, that
+// is, the servers a stop request sent to publicURL stops. A script that runs
+// another server at the same time gives it a different URL, so stopserver
+// does not wait for it.
+func serverProcesses(cmds []*exec.Cmd, publicURL string) []*os.Process {
+	var procs []*os.Process
+	for _, c := range cmds {
+		if len(c.Args) > 1 && c.Args[1] == "serve" && c.Process != nil &&
+			envValue(c.Env, "SOFT_SERVE_HTTP_PUBLIC_URL") == publicURL {
+			procs = append(procs, c.Process)
+		}
+	}
+	return procs
+}
+
+// envValue returns the value of key in env, where a later entry overrides an
+// earlier one, as it does for the process.
+func envValue(env []string, key string) string {
+	var v string
+	for _, kv := range env {
+		if k, val, ok := strings.Cut(kv, "="); ok && k == key {
+			v = val
+		}
+	}
+	return v
 }
 
 // waitClosed waits until connecting to addr is refused, that is, until
