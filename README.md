@@ -104,12 +104,17 @@ Using this environment variable, Soft Serve Plus will create a new `admin` user 
 has full privileges. You can rename and change the user settings later.
 
 The keys are reconciled on every start, not only the first one: a key you add
-to `initial_admin_keys` later is attached to the admin user (the admin with
-the lowest id, normally the one created on first boot; if no admin exists, a
-new `admin` user is created). A key that already belongs to a non-admin user
-is left on that user, who is not promoted; a warning is logged. Removing a key
-from the config does not remove it from the database or revoke admin rights;
-use the `user` commands for that.
+to `initial_admin_keys` later is attached to an admin user (the admin that
+already owns another configured key, else the admin named `admin`, else the
+admin with the lowest id; if no admin exists, a new `admin` user is created).
+A key that already belongs to a non-admin user is left on that user, who is
+not promoted; a warning is logged.
+
+To rotate a key, replace it in `initial_admin_keys` and restart. A key that
+was attached on a later start is removed from the admin user when it leaves
+the config. Keys seeded on the very first start, and keys added with the
+`user` commands, stay in the database when you remove them from the config:
+remove those with `user remove-pubkey`.
 
 If you'd like a repository to exist the moment the server finishes booting,
 with no human logging in to run `repo create`, set `SOFT_SERVE_DEFAULT_REPO`

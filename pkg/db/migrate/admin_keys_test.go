@@ -4,7 +4,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
+	"net/url"
+	"os"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -12,6 +17,52 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"golang.org/x/crypto/ssh"
 )
+
+// openDB opens an empty test database: postgres when SOFT_SERVE_DB_DRIVER is
+// "postgres" (a disposable database next to SOFT_SERVE_DB_DATA_SOURCE, as the
+// test_postgres CI job sets), sqlite otherwise.
+func openDB(t *testing.T, ctx context.Context) *db.DB {
+	t.Helper()
+	if os.Getenv("SOFT_SERVE_DB_DRIVER") != "postgres" {
+		dbx, err := test.OpenSqlite(ctx, t)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dbx
+	}
+
+	dsn := os.Getenv("SOFT_SERVE_DB_DATA_SOURCE")
+	if dsn == "" {
+		dsn = "postgres://postgres@localhost:5432/postgres?sslmode=disable"
+	}
+	admin, err := db.Open(ctx, "postgres", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("softserve_migrate_test_%d", time.Now().UnixNano())
+	if _, err := admin.ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
+		admin.Close() //nolint:errcheck
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.ExecContext(context.TODO(), "DROP DATABASE "+name+" WITH (FORCE)"); err != nil {
+			t.Error(err)
+		}
+		admin.Close() //nolint:errcheck
+	})
+
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Path = "/" + name
+	dbx, err := db.Open(ctx, "postgres", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dbx.Close() }) //nolint:errcheck
+	return dbx
+}
 
 func newAuthorizedKey(t *testing.T) string {
 	t.Helper()
@@ -26,14 +77,14 @@ func newAuthorizedKey(t *testing.T) string {
 	return sshutils.MarshalAuthorizedKey(pk)
 }
 
-type keyOwner struct {
+type ownerRow struct {
 	Username string `db:"username"`
 	Admin    bool   `db:"admin"`
 }
 
-func ownerOf(t *testing.T, dbx *db.DB, ak string) (keyOwner, bool) {
+func ownerOf(t *testing.T, dbx *db.DB, ak string) (ownerRow, bool) {
 	t.Helper()
-	var owners []keyOwner
+	var owners []ownerRow
 	if err := dbx.Select(&owners, dbx.Rebind(`SELECT users.username, users.admin
 		FROM users INNER JOIN public_keys ON users.id = public_keys.user_id
 		WHERE public_keys.public_key = ?`), ak); err != nil {
@@ -43,7 +94,7 @@ func ownerOf(t *testing.T, dbx *db.DB, ak string) (keyOwner, bool) {
 		t.Fatalf("key %q has %d owners", ak, len(owners))
 	}
 	if len(owners) == 0 {
-		return keyOwner{}, false
+		return ownerRow{}, false
 	}
 	return owners[0], true
 }
@@ -75,10 +126,7 @@ func boot(t *testing.T, ctx context.Context, cfg *config.Config, dbx *db.DB) {
 
 func TestAdminKeyAddedAfterFirstBootBecomesAdminKey(t *testing.T) {
 	ctx := context.TODO()
-	dbx, err := test.OpenSqlite(ctx, t)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dbx := openDB(t, ctx)
 
 	first := newAuthorizedKey(t)
 	cfg := config.DefaultConfig()
@@ -110,20 +158,166 @@ func TestAdminKeyAddedAfterFirstBootBecomesAdminKey(t *testing.T) {
 		t.Errorf("users after re-boot = %d, want %d", got, users)
 	}
 
-	// Removing a key from the config does not remove it from the database.
+	// Removing a key the sync attached from the config removes it again,
+	// as it stopped being an admin key before keys were synced.
 	cfg.InitialAdminKeys = []string{first}
 	boot(t, ctx, cfg, dbx)
-	if o, ok := ownerOf(t, dbx, later); !ok || !o.Admin {
-		t.Errorf("removed key owner = %+v, %v; want it kept on admin", o, ok)
+	if o, ok := ownerOf(t, dbx, later); ok {
+		t.Errorf("removed key owner = %+v; want it removed", o)
+	}
+	if n := count(t, dbx, `SELECT COUNT(*) FROM settings WHERE "key" LIKE 'initial_admin_key:%'`); n != 0 {
+		t.Errorf("synced key records = %d, want 0", n)
+	}
+
+	// A key the first migration seeded is kept when it leaves the config,
+	// as before.
+	cfg.InitialAdminKeys = nil
+	boot(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, first); !ok || o.Username != "admin" {
+		t.Errorf("seeded key owner = %+v, %v; want it kept on admin", o, ok)
+	}
+
+	// Adding the key back attaches it again.
+	cfg.InitialAdminKeys = []string{first, later}
+	boot(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, later); !ok || o.Username != "admin" {
+		t.Errorf("re-added key owner = %+v, %v; want admin", o, ok)
+	}
+}
+
+func TestAdminKeyRemovedOnlyFromUserItWasAttachedTo(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+
+	ak := newAuthorizedKey(t)
+	cfg.InitialAdminKeys = []string{ak}
+	boot(t, ctx, cfg, dbx)
+
+	// The key was moved to another account by hand.
+	mustExec(t, dbx, `INSERT INTO users (username, admin, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, "erin", false)
+	mustExec(t, dbx, `UPDATE public_keys SET user_id = (SELECT id FROM users WHERE username = ?) WHERE public_key = ?`, "erin", ak)
+
+	cfg.InitialAdminKeys = nil
+	boot(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "erin" {
+		t.Errorf("key owner = %+v, %v; want it left on erin", o, ok)
+	}
+}
+
+func TestAdminKeyGoesToAdminOwningAnotherConfiguredKey(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+
+	// carol is a later admin who owns a configured key; admin has the
+	// lower id.
+	owned := newAuthorizedKey(t)
+	mustExec(t, dbx, `INSERT INTO users (username, admin, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, "carol", true)
+	mustExec(t, dbx, `INSERT INTO public_keys (user_id, public_key, updated_at)
+		VALUES ((SELECT id FROM users WHERE username = ?), ?, CURRENT_TIMESTAMP)`, "carol", owned)
+
+	ak := newAuthorizedKey(t)
+	cfg.InitialAdminKeys = []string{owned, ak}
+	boot(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "carol" {
+		t.Errorf("key owner = %+v, %v; want carol", o, ok)
+	}
+}
+
+func TestAdminKeyPrefersAdminNamedAdmin(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+
+	// The original admin is renamed; carol is promoted; a new "admin"
+	// account comes after both.
+	mustExec(t, dbx, `UPDATE users SET username = ? WHERE username = ?`, "zed", "admin")
+	for _, name := range []string{"carol", "admin"} {
+		mustExec(t, dbx, `INSERT INTO users (username, admin, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, name, true)
+	}
+
+	ak := newAuthorizedKey(t)
+	cfg.InitialAdminKeys = []string{ak}
+	boot(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "admin" {
+		t.Errorf("key owner = %+v, %v; want admin", o, ok)
+	}
+}
+
+func TestAdminKeyFallsBackToLowestIDAdmin(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+
+	// The original admin was deleted; two admins were promoted later.
+	mustExec(t, dbx, `DELETE FROM users WHERE username = ?`, "admin")
+	for _, name := range []string{"dave", "carol"} {
+		mustExec(t, dbx, `INSERT INTO users (username, admin, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, name, true)
+	}
+
+	ak := newAuthorizedKey(t)
+	cfg.InitialAdminKeys = []string{ak}
+	boot(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "dave" {
+		t.Errorf("key owner = %+v, %v; want dave (lowest id)", o, ok)
+	}
+}
+
+func TestAdminKeyConcurrentBoots(t *testing.T) {
+	if os.Getenv("SOFT_SERVE_DB_DRIVER") != "postgres" {
+		t.Skip("concurrent boots need a server database; set SOFT_SERVE_DB_DRIVER=postgres")
+	}
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+	// No admin left, so every boot also races to create one.
+	mustExec(t, dbx, `UPDATE users SET username = ?, admin = ? WHERE username = ?`, "bob", false, "admin")
+
+	keys := []string{newAuthorizedKey(t), newAuthorizedKey(t)}
+	cfg.InitialAdminKeys = keys
+	cctx := config.WithContext(ctx, cfg)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- Migrate(cctx, dbx)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("Migrate() => %v", err)
+		}
+	}
+
+	for _, ak := range keys {
+		if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "admin" || !o.Admin {
+			t.Errorf("key owner = %+v, %v; want admin", o, ok)
+		}
+	}
+	if n := count(t, dbx, `SELECT COUNT(*) FROM settings WHERE "key" LIKE 'initial_admin_key:%'`); n != len(keys) {
+		t.Errorf("synced key records = %d, want %d", n, len(keys))
 	}
 }
 
 func TestAdminKeyOwnedByNonAdminIsNotPromoted(t *testing.T) {
 	ctx := context.TODO()
-	dbx, err := test.OpenSqlite(ctx, t)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dbx := openDB(t, ctx)
 
 	cfg := config.DefaultConfig()
 	boot(t, ctx, cfg, dbx)
@@ -147,10 +341,7 @@ func TestAdminKeyOwnedByNonAdminIsNotPromoted(t *testing.T) {
 
 func TestAdminKeyCreatesAdminWhenNoneExists(t *testing.T) {
 	ctx := context.TODO()
-	dbx, err := test.OpenSqlite(ctx, t)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dbx := openDB(t, ctx)
 
 	cfg := config.DefaultConfig()
 	boot(t, ctx, cfg, dbx)
@@ -171,10 +362,7 @@ func TestAdminKeyCreatesAdminWhenNoneExists(t *testing.T) {
 
 func TestAdminKeyNotAttachedToNonAdminNamedAdmin(t *testing.T) {
 	ctx := context.TODO()
-	dbx, err := test.OpenSqlite(ctx, t)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dbx := openDB(t, ctx)
 
 	cfg := config.DefaultConfig()
 	boot(t, ctx, cfg, dbx)
