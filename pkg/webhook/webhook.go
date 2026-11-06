@@ -45,19 +45,69 @@ var secureHTTPClient = ssrf.NewSecureClient()
 
 // do sends a webhook.
 // Caller must close the returned body.
+// A returned error never contains the webhook URL's path, query, fragment or
+// user info, which can hold secrets (see redactURLError).
 func do(ctx context.Context, url string, method string, headers http.Header, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	req.Header = headers
 	res, err := secureHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	return res, nil
+}
+
+// redactedURLPart replaces the parts of a webhook URL that are left out of
+// errors.
+const redactedURLPart = "[redacted]"
+
+// redactURL returns rawURL reduced to its scheme and host. Many receivers
+// (Slack, Discord, Teams and the like) put a token in the path or query, so
+// those parts, the fragment and any user info are replaced with
+// redactedURLPart. A URL that cannot be parsed is replaced entirely.
+//
+// The host is kept on purpose, so an operator can tell which receiver failed.
+// A receiver that puts a token in the host name (a per-hook subdomain such as
+// https://<id>.m.pipedream.net) therefore still has that token in the error.
+func redactURL(rawURL string) string {
+	u, err := neturl.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return redactedURLPart
+	}
+	redacted := u.Scheme + "://" + u.Host
+	if u.Opaque != "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		redacted += "/" + redactedURLPart
+	}
+	return redacted
+}
+
+// errInvalidURL replaces the parser's message when a webhook URL cannot be
+// parsed.
+var errInvalidURL = errors.New("invalid URL")
+
+// redactURLError redacts the URL of a *url.Error, which the HTTP client
+// returns for every failed request and which prints the whole URL except for
+// a password. The returned error keeps the operation and the underlying
+// error (except for a parse error, whose message is replaced), so errors.Is
+// and errors.As (context.DeadlineExceeded, net.Error timeouts and so on)
+// still work. Any other error is returned unchanged.
+func redactURLError(err error) error {
+	uerr, ok := err.(*neturl.Error) //nolint:errorlint // only the top-level error is replaced
+	if !ok {
+		return err
+	}
+	inner := uerr.Err
+	if uerr.Op == "parse" {
+		// A parse error's message can quote part of the URL, such as an
+		// invalid escape or port.
+		inner = errInvalidURL
+	}
+	return &neturl.Error{Op: uerr.Op, URL: redactURL(uerr.URL), Err: inner}
 }
 
 // SendWebhook sends a webhook event and records the attempt.
@@ -168,7 +218,12 @@ func sendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 		if reqErr == nil && (resStatus < 200 || resStatus > 299) {
 			return fmt.Errorf("webhook %d: receiver responded with status %d", w.ID, resStatus)
 		}
-		return reqErr
+		if reqErr != nil {
+			// The URL in reqErr is redacted, so name the webhook: several
+			// hooks on one host would otherwise log the same line.
+			return fmt.Errorf("webhook %d: %w", w.ID, reqErr)
+		}
+		return nil
 	}
 
 	return recordDelivery(ctx, w, event, req, reqErr, resStatus, resHeaders, resBody)
