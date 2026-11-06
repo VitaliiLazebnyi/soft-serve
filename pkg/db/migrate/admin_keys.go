@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,32 +24,46 @@ const defaultAdminUsername = "admin"
 // syncAdminKeys attached. See db.SyncedAdminKeyPrefix.
 const syncedKeyPrefix = db.SyncedAdminKeyPrefix
 
-// syncAdminKeys makes sure every key in initial_admin_keys is in the
-// database. The first migration seeds the keys once; without this, a key
-// added to the config later never reaches the database, and anything that
-// checks only the account's admin flag ignores it.
+// SyncAdminKeys makes sure every key in initial_admin_keys is in the
+// database, in its own transaction. The first migration seeds the keys once;
+// without this, a key added to the config later never reaches the database,
+// and anything that checks only the account's admin flag ignores it.
 //
-// It runs on every Migrate, after the migrations and in the same
-// transaction, and is idempotent:
+// Only "soft serve" runs it, on every start after Migrate. "soft admin
+// migrate" does not: it may run with a different config, such as a stale
+// shell environment, and must not attach keys the server no longer lists.
+//
+// It is idempotent:
 //   - a key no account owns is attached to an admin account: the admin that
-//     owns another configured key, else the admin named "admin", else the
-//     admin with the lowest id. If there is no admin at all, an "admin"
-//     account is created as the first migration does;
+//     owns the other configured keys, else the admin named "admin". If there
+//     is no admin at all, an "admin" account is created as the first
+//     migration does. If the configured keys belong to several admins, or
+//     there are admins but none is named "admin", the key is not attached and
+//     a warning is logged: it is still an admin key through the config;
 //   - a key an admin already owns is left alone;
 //   - a key a non-admin account owns is left alone with a warning: the
 //     account is not promoted and the key is not moved;
 //   - a key this function attached is removed again once it leaves the
 //     config, the same way a config-only key stopped being an admin key when
-//     it was removed before keys were synced. Keys the first migration seeded
-//     and keys added or removed with the user commands since are never
-//     removed. Nothing is removed while an initial_admin_keys entry cannot be
-//     read or parsed, since that entry may be a key that is still wanted.
+//     it was removed before keys were synced, even if its user is no longer
+//     an admin. Keys the first migration seeded and keys added or removed
+//     with the user commands since are never removed. Nothing is removed
+//     while an initial_admin_keys entry names a key file that cannot be read,
+//     since that file may hold a key that is still wanted; each key kept for
+//     that reason is logged as an error. Blank and "#" comment entries, and
+//     entries that are neither a key nor a file path, do not block removal.
 //
 // Keys are inserted and removed in sorted order, so boots that run at the
 // same time on a shared database take row locks in the same order and do not
 // deadlock. All instances sharing a database must use the same
 // initial_admin_keys: a run with a different list attaches and removes keys to
 // match its own list.
+func SyncAdminKeys(ctx context.Context, dbx *db.DB) error {
+	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
+		return syncAdminKeys(ctx, tx)
+	})
+}
+
 func syncAdminKeys(ctx context.Context, tx *db.Tx) error {
 	cfg := config.FromContext(ctx)
 	if cfg == nil {
@@ -63,10 +78,9 @@ func syncAdminKeys(ctx context.Context, tx *db.Tx) error {
 	})
 	configured := make(map[string]struct{}, len(keys))
 
-	// The admin a configured key already belongs to, so that all configured
-	// keys end up on one account.
-	var targetID int64
-	var haveTarget bool
+	// The admins configured keys already belong to. New keys go to that
+	// admin only when there is exactly one.
+	owners := make(map[int64]string)
 	var missing []gossh.PublicKey
 	for _, k := range keys {
 		ak := sshutils.MarshalAuthorizedKey(k)
@@ -82,26 +96,28 @@ func syncAdminKeys(ctx context.Context, tx *db.Tx) error {
 		case !o.Admin:
 			logger.Warn("initial admin key belongs to a non-admin user; not promoting the user",
 				"user", o.Username, "key", gossh.FingerprintSHA256(k))
-		case !haveTarget:
-			targetID, haveTarget = o.ID, true
+		default:
+			owners[o.ID] = o.Username
 		}
 	}
 
-	if len(missing) > 0 && !haveTarget {
-		id, ok, err := adminUserID(ctx, tx)
+	if len(missing) > 0 {
+		targetID, ok, err := attachTarget(ctx, tx, logger, owners)
 		if err != nil {
 			return err
 		}
-		if ok {
-			targetID, haveTarget = id, true
-		} else {
-			logger.Warn("no admin user to attach initial admin keys to, and the username is taken by a non-admin user",
-				"user", defaultAdminUsername)
+		if !ok {
+			fps := make([]string, 0, len(missing))
+			for _, k := range missing {
+				fps = append(fps, gossh.FingerprintSHA256(k))
+			}
+			logger.Warn("initial admin keys not attached to a user; they are still admin keys through the config",
+				"keys", fps)
 		}
-	}
-
-	if haveTarget {
 		for _, k := range missing {
+			if !ok {
+				break
+			}
 			ak := sshutils.MarshalAuthorizedKey(k)
 			added, err := insertPublicKey(ctx, tx, targetID, ak)
 			if err != nil {
@@ -119,13 +135,33 @@ func syncAdminKeys(ctx context.Context, tx *db.Tx) error {
 		}
 	}
 
-	if invalid := cfg.InvalidAdminKeys(); len(invalid) > 0 {
-		logger.Warn("some initial_admin_keys entries could not be read or parsed; not removing synced admin keys until they can",
-			"entries", invalid)
-		return nil
+	if n := cfg.IgnoredAdminKeys(); n > 0 {
+		logger.Warn("ignored initial_admin_keys entries that are neither a key nor a key file", "count", n)
+	}
+	unreadable := cfg.UnreadableAdminKeyFiles()
+	if len(unreadable) > 0 {
+		logger.Error("initial_admin_keys key files could not be read or hold no key; keeping admin keys removed from the config until they can",
+			"files", unreadable)
 	}
 
-	return removeUnconfiguredKeys(ctx, tx, logger, configured)
+	return removeUnconfiguredKeys(ctx, tx, logger, configured, len(unreadable) == 0)
+}
+
+// attachTarget returns the admin account new initial admin keys go to. See
+// SyncAdminKeys. ok is false, with a warning logged, when there is none.
+func attachTarget(ctx context.Context, tx *db.Tx, logger *log.Logger, owners map[int64]string) (id int64, ok bool, err error) {
+	switch len(owners) {
+	case 0:
+		return adminUserID(ctx, tx, logger)
+	case 1:
+		for id := range owners {
+			return id, true, nil
+		}
+	}
+	names := slices.Sorted(maps.Values(owners))
+	logger.Warn("initial admin keys belong to several admin users; not choosing one for new keys",
+		"users", names)
+	return 0, false, nil
 }
 
 type keyOwnerRow struct {
@@ -150,14 +186,16 @@ func keyOwner(ctx context.Context, tx *db.Tx, ak string) (keyOwnerRow, bool, err
 	return o, true, nil
 }
 
-// adminUserID returns the id of the admin account new initial admin keys go
-// to when no admin owns a configured key yet: the admin named "admin", else
-// the admin with the lowest id. It creates the default admin account when
-// there is no admin at all. ok is false when there is no admin and the
-// default username belongs to a non-admin account, which is never promoted.
-func adminUserID(ctx context.Context, tx *db.Tx) (id int64, ok bool, err error) {
-	err = tx.GetContext(ctx, &id, tx.Rebind(`SELECT id FROM users WHERE admin = ?
-		ORDER BY CASE WHEN username = ? THEN 0 ELSE 1 END, id LIMIT 1`), true, defaultAdminUsername)
+// adminUserID returns the id of the admin named "admin", which new initial
+// admin keys go to when no admin owns a configured key yet. It creates that
+// account when there is no admin at all. ok is false, with a warning logged,
+// when there are admins but none is named "admin" (another admin may be a
+// person or a bot, and the key holder would act as them), or when there is
+// no admin and the username belongs to a non-admin account, which is never
+// promoted.
+func adminUserID(ctx context.Context, tx *db.Tx, logger *log.Logger) (id int64, ok bool, err error) {
+	byName := tx.Rebind(`SELECT id FROM users WHERE username = ? AND admin = ?`)
+	err = tx.GetContext(ctx, &id, byName, defaultAdminUsername, true)
 	if err == nil {
 		return id, true, nil
 	}
@@ -165,13 +203,25 @@ func adminUserID(ctx context.Context, tx *db.Tx) (id int64, ok bool, err error) 
 		return 0, false, fmt.Errorf("look up admin user: %w", err)
 	}
 
+	var admins int
+	if err := tx.GetContext(ctx, &admins, tx.Rebind(`SELECT COUNT(*) FROM users WHERE admin = ?`), true); err != nil {
+		return 0, false, fmt.Errorf("count admin users: %w", err)
+	}
+	if admins > 0 {
+		logger.Warn("no admin user is named admin and no admin owns a configured key; not choosing another admin for new keys",
+			"user", defaultAdminUsername)
+		return 0, false, nil
+	}
+
 	insert := insertIgnore(tx, `INTO users (username, admin, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, "username")
 	if _, err := tx.ExecContext(ctx, insert, defaultAdminUsername, true); err != nil {
 		return 0, false, fmt.Errorf("create admin user: %w", err)
 	}
 
-	err = tx.GetContext(ctx, &id, tx.Rebind(`SELECT id FROM users WHERE username = ? AND admin = ?`), defaultAdminUsername, true)
+	err = tx.GetContext(ctx, &id, byName, defaultAdminUsername, true)
 	if errors.Is(err, sql.ErrNoRows) {
+		logger.Warn("no admin user to attach initial admin keys to, and the username is taken by a non-admin user",
+			"user", defaultAdminUsername)
 		return 0, false, nil
 	}
 	if err != nil {
@@ -219,8 +269,10 @@ type syncedKeyRow struct {
 
 // removeUnconfiguredKeys removes the keys syncAdminKeys attached that are no
 // longer in the config. A key is removed only from the user it was attached
-// to; if it has since moved to another account, it is left there.
-func removeUnconfiguredKeys(ctx context.Context, tx *db.Tx, logger *log.Logger, configured map[string]struct{}) error {
+// to; if it has since moved to another account, it is left there. When
+// remove is false, nothing is removed and each key that would have been is
+// logged as an error.
+func removeUnconfiguredKeys(ctx context.Context, tx *db.Tx, logger *log.Logger, configured map[string]struct{}, remove bool) error {
 	var rows []syncedKeyRow
 	// "_" is a LIKE wildcard; the prefix is checked again below.
 	if err := tx.SelectContext(ctx, &rows, tx.Rebind(`SELECT "key", value FROM settings WHERE "key" LIKE ?`),
@@ -241,27 +293,65 @@ func removeUnconfiguredKeys(ctx context.Context, tx *db.Tx, logger *log.Logger, 
 		if _, ok := configured[ak]; ok {
 			continue
 		}
-
-		if userID, err := strconv.ParseInt(r.Value, 10, 64); err == nil {
-			res, err := tx.ExecContext(ctx, tx.Rebind(`DELETE FROM public_keys WHERE public_key = ? AND user_id = ?`), ak, userID)
-			if err != nil {
-				return fmt.Errorf("remove initial admin key: %w", err)
-			}
-			if n, err := res.RowsAffected(); err == nil && n > 0 {
-				fp := ak
-				if pk, _, err := sshutils.ParseAuthorizedKey(ak); err == nil {
-					fp = gossh.FingerprintSHA256(pk)
-				}
-				logger.Warn("initial admin key removed from the config; removed it from the admin user",
-					"user_id", userID, "key", fp)
-			}
-		}
-
-		if _, err := tx.ExecContext(ctx, tx.Rebind(`DELETE FROM settings WHERE "key" = ?`), r.Key); err != nil {
-			return fmt.Errorf("forget initial admin key: %w", err)
+		if err := removeSyncedKey(ctx, tx, logger, r, ak, remove); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// removeSyncedKey removes the key ak recorded by r from the user it was
+// attached to. See removeUnconfiguredKeys.
+func removeSyncedKey(ctx context.Context, tx *db.Tx, logger *log.Logger, r syncedKeyRow, ak string, remove bool) error {
+	userID, idErr := strconv.ParseInt(r.Value, 10, 64)
+
+	if !remove {
+		if idErr != nil {
+			return nil
+		}
+		var n int
+		if err := tx.GetContext(ctx, &n, tx.Rebind(`SELECT COUNT(*) FROM public_keys WHERE public_key = ? AND user_id = ?`),
+			ak, userID); err != nil {
+			return fmt.Errorf("look up initial admin key: %w", err)
+		}
+		if n > 0 {
+			logger.Error("initial admin key removed from the config is still an admin key because a key file could not be read",
+				"user_id", userID, "key", fingerprint(ak))
+		}
+		return nil
+	}
+
+	// Forget the record first, and remove the key only if this run is the
+	// one that forgot it. The row lock orders this with a user command that
+	// adds or removes the key by hand (and so forgets the record) at the
+	// same time: the key is then left alone.
+	res, err := tx.ExecContext(ctx, tx.Rebind(`DELETE FROM settings WHERE "key" = ? AND value = ?`), r.Key, r.Value)
+	if err != nil {
+		return fmt.Errorf("forget initial admin key: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("forget initial admin key: %w", err)
+	} else if n != 1 || idErr != nil {
+		return nil
+	}
+
+	res, err = tx.ExecContext(ctx, tx.Rebind(`DELETE FROM public_keys WHERE public_key = ? AND user_id = ?`), ak, userID)
+	if err != nil {
+		return fmt.Errorf("remove initial admin key: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		logger.Warn("initial admin key removed from the config; removed it from the user it was attached to",
+			"user_id", userID, "key", fingerprint(ak))
+	}
+	return nil
+}
+
+// fingerprint returns the SHA256 fingerprint of an authorized key.
+func fingerprint(ak string) string {
+	if pk, _, err := sshutils.ParseAuthorizedKey(ak); err == nil {
+		return gossh.FingerprintSHA256(pk)
+	}
+	return "unparsable key"
 }
 
 // insertIgnore builds an INSERT that does nothing on a unique conflict on

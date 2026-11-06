@@ -69,6 +69,12 @@ var (
 			if err := migrate.Migrate(ctx, db); err != nil {
 				return fmt.Errorf("migration error: %w", err)
 			}
+			// Reconcile initial_admin_keys on every start, not only on the
+			// first migration, so keys added to the config later become
+			// admin keys. "soft admin migrate" does not do this.
+			if err := migrate.SyncAdminKeys(ctx, db); err != nil {
+				return fmt.Errorf("sync initial admin keys: %w", err)
+			}
 
 			s, err := NewServer(ctx)
 			if err != nil {

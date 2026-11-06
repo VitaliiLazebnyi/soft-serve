@@ -1,18 +1,22 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/internal/test"
@@ -118,13 +122,29 @@ func mustExec(t *testing.T, dbx *db.DB, query string, args ...any) {
 	}
 }
 
-// boot opens the database and runs the migrations the way the server does
+// boot runs the migrations and the admin key sync the way "soft serve" does
 // on every start, with cfg in the context.
 func boot(t *testing.T, ctx context.Context, cfg *config.Config, dbx *db.DB) {
 	t.Helper()
-	if err := Migrate(config.WithContext(ctx, cfg), dbx); err != nil {
-		t.Fatalf("Migrate() => %v", err)
+	if err := serveStart(config.WithContext(ctx, cfg), dbx); err != nil {
+		t.Fatalf("start => %v", err)
 	}
+}
+
+// serveStart is what "soft serve" runs on the database before it starts.
+func serveStart(ctx context.Context, dbx *db.DB) error {
+	if err := Migrate(ctx, dbx); err != nil {
+		return err
+	}
+	return SyncAdminKeys(ctx, dbx)
+}
+
+// bootLogs is boot with the log output returned.
+func bootLogs(t *testing.T, ctx context.Context, cfg *config.Config, dbx *db.DB) string {
+	t.Helper()
+	var buf bytes.Buffer
+	boot(t, log.WithContext(ctx, log.New(&buf)), cfg, dbx)
+	return buf.String()
 }
 
 func TestAdminKeyAddedAfterFirstBootBecomesAdminKey(t *testing.T) {
@@ -254,14 +274,15 @@ func TestAdminKeyPrefersAdminNamedAdmin(t *testing.T) {
 	}
 }
 
-func TestAdminKeyFallsBackToLowestIDAdmin(t *testing.T) {
+func TestAdminKeyNotAttachedToAnotherAdmin(t *testing.T) {
 	ctx := context.TODO()
 	dbx := openDB(t, ctx)
 
 	cfg := config.DefaultConfig()
 	boot(t, ctx, cfg, dbx)
 
-	// The original admin was deleted; two admins were promoted later.
+	// The original admin was deleted; two admins were promoted later. Either
+	// may be a person or a bot, so the key is not given to one of them.
 	mustExec(t, dbx, `DELETE FROM users WHERE username = ?`, "admin")
 	for _, name := range []string{"dave", "carol"} {
 		mustExec(t, dbx, `INSERT INTO users (username, admin, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, name, true)
@@ -269,9 +290,82 @@ func TestAdminKeyFallsBackToLowestIDAdmin(t *testing.T) {
 
 	ak := newAuthorizedKey(t)
 	cfg.InitialAdminKeys = []string{ak}
+	logs := bootLogs(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, ak); ok {
+		t.Errorf("key owner = %+v; want it left out", o)
+	}
+	if !strings.Contains(logs, "not choosing another admin") {
+		t.Errorf("logs = %q; want a warning", logs)
+	}
+	if n := count(t, dbx, "SELECT COUNT(*) FROM users"); n != 2 {
+		t.Errorf("users = %d, want 2 (no admin created)", n)
+	}
+}
+
+func TestAdminKeyNotAttachedWhenSeveralAdminsOwnConfiguredKeys(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+
+	cfg := config.DefaultConfig()
 	boot(t, ctx, cfg, dbx)
-	if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "dave" {
-		t.Errorf("key owner = %+v, %v; want dave (lowest id)", o, ok)
+
+	// admin and carol each own a configured key.
+	mine, hers := newAuthorizedKey(t), newAuthorizedKey(t)
+	mustExec(t, dbx, `INSERT INTO users (username, admin, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, "carol", true)
+	for user, ak := range map[string]string{"admin": mine, "carol": hers} {
+		mustExec(t, dbx, `INSERT INTO public_keys (user_id, public_key, updated_at)
+			VALUES ((SELECT id FROM users WHERE username = ?), ?, CURRENT_TIMESTAMP)`, user, ak)
+	}
+
+	ak := newAuthorizedKey(t)
+	cfg.InitialAdminKeys = []string{mine, hers, ak}
+	logs := bootLogs(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, ak); ok {
+		t.Errorf("key owner = %+v; want it left out", o)
+	}
+	if !strings.Contains(logs, "several admin users") || !strings.Contains(logs, "carol") {
+		t.Errorf("logs = %q; want a warning naming the admins", logs)
+	}
+}
+
+func TestAdminKeyRemovedFromDemotedAdmin(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+
+	ak := newAuthorizedKey(t)
+	cfg.InitialAdminKeys = []string{ak}
+	boot(t, ctx, cfg, dbx)
+
+	// The account the key was attached to is no longer an admin. The key
+	// was attached because it was configured, so it still goes when it
+	// leaves the config.
+	mustExec(t, dbx, `UPDATE users SET admin = ? WHERE username = ?`, false, "admin")
+	cfg.InitialAdminKeys = nil
+	boot(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, ak); ok {
+		t.Errorf("key owner = %+v; want it removed", o)
+	}
+}
+
+func TestAdminMigrateDoesNotSyncKeys(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+
+	// "soft admin migrate" with a stale config listing a key the server no
+	// longer has must not attach it.
+	ak := newAuthorizedKey(t)
+	cfg.InitialAdminKeys = []string{ak}
+	if err := Migrate(config.WithContext(ctx, cfg), dbx); err != nil {
+		t.Fatal(err)
+	}
+	if o, ok := ownerOf(t, dbx, ak); ok {
+		t.Errorf("key owner = %+v; want it not attached", o)
 	}
 }
 
@@ -297,14 +391,14 @@ func TestAdminKeyConcurrentBoots(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs <- Migrate(cctx, dbx)
+			errs <- serveStart(cctx, dbx)
 		}()
 	}
 	wg.Wait()
 	close(errs)
 	for err := range errs {
 		if err != nil {
-			t.Errorf("Migrate() => %v", err)
+			t.Errorf("start => %v", err)
 		}
 	}
 
@@ -384,7 +478,7 @@ func TestAdminKeyNotAttachedToNonAdminNamedAdmin(t *testing.T) {
 	}
 }
 
-func TestAdminKeyNotRemovedWhileAnEntryCannotBeRead(t *testing.T) {
+func TestAdminKeyNotRemovedWhileAKeyFileCannotBeRead(t *testing.T) {
 	ctx := context.TODO()
 	dbx := openDB(t, ctx)
 
@@ -407,9 +501,18 @@ func TestAdminKeyNotRemovedWhileAnEntryCannotBeRead(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	boot(t, ctx, cfg, dbx)
+	logs := bootLogs(t, ctx, cfg, dbx)
 	if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "admin" {
 		t.Errorf("key owner with the file missing = %+v, %v; want it kept on admin", o, ok)
+	}
+	pk, _, err := sshutils.ParseAuthorizedKey(ak)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ERRO", path, ssh.FingerprintSHA256(pk)} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("logs = %q; want %q", logs, want)
+		}
 	}
 
 	// The same when Validate already dropped the entry, as on a real start.
@@ -427,11 +530,39 @@ func TestAdminKeyNotRemovedWhileAnEntryCannotBeRead(t *testing.T) {
 		t.Errorf("key owner after Validate = %+v, %v; want it kept on admin", o, ok)
 	}
 
-	// Once every entry parses again, the key that left the config goes.
+	// Once every key file can be read again, the key that left the config
+	// goes.
 	cfg.InitialAdminKeys = nil
 	boot(t, ctx, cfg, dbx)
 	if o, ok := ownerOf(t, dbx, ak); ok {
 		t.Errorf("key owner = %+v; want it removed", o)
+	}
+}
+
+func TestAdminKeyRemovedDespiteCommentsAndBadEntries(t *testing.T) {
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+
+	leaked, kept := newAuthorizedKey(t), newAuthorizedKey(t)
+	cfg.InitialAdminKeys = []string{leaked, kept}
+	boot(t, ctx, cfg, dbx)
+
+	// The leaked key is dropped from a list that also has a comment line, a
+	// blank line and a mistyped key. None of them can stand for a wanted
+	// key, so they do not keep the leaked one.
+	cfg.InitialAdminKeys = []string{"# ops keys", "", kept, "ssh-ed25519 AAAAnot-base64", "abc"}
+	logs := bootLogs(t, ctx, cfg, dbx)
+	if o, ok := ownerOf(t, dbx, leaked); ok {
+		t.Errorf("leaked key owner = %+v; want it removed", o)
+	}
+	if o, ok := ownerOf(t, dbx, kept); !ok || o.Username != "admin" {
+		t.Errorf("kept key owner = %+v, %v; want admin", o, ok)
+	}
+	if !strings.Contains(logs, "count=2") {
+		t.Errorf("logs = %q; want the 2 ignored entries counted", logs)
 	}
 }
 
@@ -492,6 +623,54 @@ func TestAdminKeyAddedByHandIsKept(t *testing.T) {
 	}
 	if o, ok := ownerOf(t, dbx, other); ok {
 		t.Errorf("synced key owner = %+v; want it removed", o)
+	}
+}
+
+// A boot that read the sync records, then sees the key removed and added
+// back by hand (committed by another connection) before it removes the key,
+// leaves the key alone.
+func TestAdminKeyReaddedByHandDuringRemovalIsKept(t *testing.T) {
+	if os.Getenv("SOFT_SERVE_DB_DRIVER") != "postgres" {
+		t.Skip("needs a second connection writing during the transaction; set SOFT_SERVE_DB_DRIVER=postgres")
+	}
+	ctx := context.TODO()
+	dbx := openDB(t, ctx)
+	st := database.New(ctx, dbx)
+
+	cfg := config.DefaultConfig()
+	boot(t, ctx, cfg, dbx)
+	ak := newAuthorizedKey(t)
+	cfg.InitialAdminKeys = []string{ak}
+	boot(t, ctx, cfg, dbx)
+	pk, _, err := sshutils.ParseAuthorizedKey(ak)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := dbx.TransactionContext(ctx, func(tx *db.Tx) error {
+		var r syncedKeyRow
+		if err := tx.GetContext(ctx, &r, tx.Rebind(`SELECT "key", value FROM settings WHERE "key" = ?`),
+			syncedKeyPrefix+ak); err != nil {
+			return err
+		}
+
+		// The operator keeps the key by hand, on another connection.
+		if err := dbx.TransactionContext(ctx, func(tx2 *db.Tx) error {
+			if err := st.RemovePublicKeyByUsername(ctx, tx2, "admin", pk); err != nil {
+				return err
+			}
+			return st.AddPublicKeyByUsername(ctx, tx2, "admin", pk)
+		}); err != nil {
+			return err
+		}
+
+		return removeSyncedKey(ctx, tx, log.New(io.Discard), r, ak, true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if o, ok := ownerOf(t, dbx, ak); !ok || o.Username != "admin" {
+		t.Errorf("key owner = %+v, %v; want it kept on admin", o, ok)
 	}
 }
 
@@ -577,14 +756,14 @@ func TestAdminKeyConcurrentBootsDifferentOrder(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs <- Migrate(cctx, dbx)
+			errs <- serveStart(cctx, dbx)
 		}()
 	}
 	wg.Wait()
 	close(errs)
 	for err := range errs {
 		if err != nil {
-			t.Errorf("Migrate() => %v", err)
+			t.Errorf("start => %v", err)
 		}
 	}
 	for _, ak := range keys {

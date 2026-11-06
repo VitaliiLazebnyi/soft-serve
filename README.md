@@ -103,25 +103,31 @@ full privileges.
 Using this environment variable, Soft Serve Plus will create a new `admin` user that
 has full privileges. You can rename and change the user settings later.
 
-The keys are reconciled on every start, not only the first one: a key you add
-to `initial_admin_keys` later is attached to an admin user (the admin that
-already owns another configured key, else the admin named `admin`, else the
-admin with the lowest id; if no admin exists, a new `admin` user is created).
+The keys are reconciled every time `soft serve` starts, not only the first
+time (`soft admin migrate` does not do this). A key you add to
+`initial_admin_keys` later is attached to the admin user that owns the other
+configured keys, or, if no admin owns one, to the admin named `admin` (created
+if there is no admin at all). If the configured keys belong to several admins,
+or there are admins but none is named `admin`, the key is not attached to
+anyone and a warning is logged; it is still an admin key through the config.
 A key that already belongs to a non-admin user is left on that user, who is
 not promoted; a warning is logged.
 
 To rotate a key, replace it in `initial_admin_keys` and restart. A key that
-was attached on a later start is removed from the admin user when it leaves
-the config. Keys seeded on the very first start, and keys added or removed
-with the `user` commands since, stay in the database when you remove them from
-the config: remove those with `user remove-pubkey`. To keep an attached key
-after dropping it from the config, run `user remove-pubkey` and then
-`user add-pubkey` for it first.
+was attached on a later start is removed from the user it was attached to when
+it leaves the config, even if that user is no longer an admin. Keys seeded on
+the very first start, and keys added or removed with the `user` commands
+since, stay in the database when you remove them from the config: remove those
+with `user remove-pubkey`. To keep an attached key after dropping it from the
+config, run `user remove-pubkey` and then `user add-pubkey` for it first.
 
-Nothing is removed while an `initial_admin_keys` entry cannot be read or
-parsed (for example a key file whose secret is not mounted yet); a warning
-names the entry's position in its list. Every instance that shares a database,
-and `soft admin migrate`, must use the same `initial_admin_keys`: a run with a
+Blank lines and lines starting with `#` are ignored, and so is an entry that is
+neither a key nor a file path (a warning counts them). But while an entry names
+a key file that cannot be read or holds no key (for example a secret that is
+not mounted yet, or a stale path), no key is removed, since the file may hold
+a key that is still wanted: an error names the file and every key kept because
+of it. Fix or remove the entry to let the removal happen. Every instance that
+shares a database must use the same `initial_admin_keys`: a run with a
 different list attaches and removes keys to match its own list.
 
 If you'd like a repository to exist the moment the server finishes booting,
