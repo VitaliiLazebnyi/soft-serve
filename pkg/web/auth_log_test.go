@@ -36,6 +36,7 @@ func TestAuthDoesNotLogCredentials(t *testing.T) {
 	const (
 		badToken = "ss_bad-token-do-not-log"
 		badPass  = "bad-password-do-not-log"
+		badJWT   = "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ4In0.bad-sig-do-not-log"
 	)
 	basic := func(user, pass string) string {
 		r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
@@ -50,21 +51,25 @@ func TestAuthDoesNotLogCredentials(t *testing.T) {
 		scheme string
 		// secrets must not appear in the logs.
 		secrets []string
+		// logged must appear in the logs.
+		logged []string
 	}{
-		{"token", "Token " + f.token, true, "token", []string{f.token}},
-		{"bad token", "token " + badToken, false, "token", []string{badToken}},
-		{"bearer", "Bearer " + jwt, true, "bearer", []string{jwt}},
-		{"bad bearer", "Bearer " + badToken, false, "bearer", []string{badToken}},
-		{"basic password", basic("stranger", "hunter2-password"), true, "basic", []string{"hunter2-password"}},
-		{"basic bad password", basic("stranger", badPass), false, "basic", []string{badPass}},
-		{"basic token as password", basic("stranger", f.token), true, "basic", []string{f.token}},
-		{"basic token as username", basic(f.token, ""), true, "basic", []string{f.token}},
-		{"basic bad token as username", basic(badToken, ""), false, "basic", []string{badToken}},
+		{"token", "Token " + f.token, true, "token", []string{f.token}, nil},
+		{"bad token", "token " + badToken, false, "token", []string{badToken}, nil},
+		{"bearer", "Bearer " + jwt, true, "bearer", []string{jwt}, nil},
+		{"bad bearer", "Bearer " + badToken, false, "bearer", []string{badToken}, nil},
+		{"basic password", basic("stranger", "hunter2-password"), true, "basic", []string{"hunter2-password"}, nil},
+		// A valid username is logged on failure, for per-account monitoring.
+		{"basic bad password", basic("stranger", badPass), false, "basic", []string{badPass}, []string{"username=stranger"}},
+		{"basic token as password", basic("stranger", f.token), true, "basic", []string{f.token}, nil},
+		{"basic token as username", basic(f.token, ""), true, "basic", []string{f.token}, nil},
+		{"basic bad token as username", basic(badToken, ""), false, "basic", []string{badToken}, nil},
 		// GitHub-style clients send the token as the username with a
 		// placeholder password; both lookups fail.
-		{"basic token with placeholder", basic(badToken, "x-oauth-basic"), false, "basic", []string{badToken}},
+		{"basic token with placeholder", basic(badToken, "x-oauth-basic"), false, "basic", []string{badToken}, nil},
+		{"basic jwt with placeholder", basic(badJWT, "x-oauth-basic"), false, "basic", []string{badJWT}, nil},
 		// A malformed header whose first word is the credential.
-		{"malformed", badToken + " x", false, "other", []string{badToken}},
+		{"malformed", badToken + " x", false, "other", []string{badToken}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			is := is.New(t)
@@ -79,6 +84,11 @@ func TestAuthDoesNotLogCredentials(t *testing.T) {
 			for _, s := range tc.secrets {
 				if strings.Contains(out, s) {
 					t.Errorf("auth log contains credential %q:\n%s", s, out)
+				}
+			}
+			for _, s := range tc.logged {
+				if !strings.Contains(out, s) {
+					t.Errorf("auth log does not contain %q:\n%s", s, out)
 				}
 			}
 			// Whatever follows a known scheme, such as the base64 Basic

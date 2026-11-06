@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/utils"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -48,8 +49,13 @@ func parseUsernamePassword(ctx context.Context, username, password string) (prot
 			return user, nil
 		}
 
-		// The username is not logged: clients that follow the GitHub
-		// convention send the access token as the username.
+		// Clients that follow the GitHub convention send the access token
+		// as the username, so the username is logged only when it is a
+		// valid one: tokens ("ss_...") and JWTs never are. The client
+		// address is already on the request logger.
+		if utils.ValidateUsername(username) == nil {
+			logger = logger.With("username", username)
+		}
 		logger.Error("invalid password or token", "err", err)
 		return nil, ErrInvalidPassword
 	} else if username != "" {
