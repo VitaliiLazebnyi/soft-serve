@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -161,4 +162,40 @@ func readPktline(c net.Conn) (string, error) {
 		return "", pktout.Err()
 	}
 	return strings.TrimSpace(string(pktout.Bytes())), nil
+}
+
+// Serve and Shutdown can run at the same time: Serve either sees the daemon
+// closed or is waited for. Serve used to start counting on the WaitGroup
+// that Shutdown might already be waiting on, which the race detector reports.
+func TestServeRacingShutdown(t *testing.T) {
+	ctx := config.WithContext(context.Background(), testDaemon.cfg)
+	ctx = backend.WithContext(ctx, testBackend)
+	for i := range 100 {
+		d, err := NewGitDaemon(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		served := make(chan error, 1)
+		go func() { served <- d.Serve(l) }()
+
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = d.Shutdown(sctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("run %d: Shutdown: %v", i, err)
+		}
+		_ = l.Close() // Serve may not have registered it before Shutdown
+		select {
+		case err := <-served:
+			if !errors.Is(err, ErrServerClosed) {
+				t.Fatalf("run %d: Serve returned %v, want ErrServerClosed", i, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("run %d: Serve did not return after Shutdown", i)
+		}
+	}
 }

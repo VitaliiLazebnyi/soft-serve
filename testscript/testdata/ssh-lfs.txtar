@@ -59,14 +59,35 @@ git -C repo1 lfs track '*.png'
 git -C repo1 add -A
 git -C repo1 commit -m 'first'
 git -C repo1 tag v0.1.0
+# Trace git-lfs so the push can be shown to use git-lfs-transfer. If pure SSH
+# fails, git-lfs silently falls back to git-lfs-authenticate and HTTP, which
+# the server also offers, so the transfer must be checked in the trace.
+env GIT_TRACE=1
 git -C repo1 push origin HEAD
+stderr 'git-lfs-transfer'
+stderr 'pure SSH connection successful'
+! stderr 'pure SSH protocol connection failed'
+! stderr 'git-lfs-authenticate'
+env GIT_TRACE=
 git -C repo1 push origin HEAD --tags
 
 # clone repo with ssh lfs-transfer
-git clone ssh://localhost:$SSH_PORT/repo1 repo1c
+# System and global git config are not read in tests, so the LFS filter is
+# configured on the clone itself; without it checkout leaves pointer files
+# and nothing is downloaded over lfs-transfer.
+# The trace shows the objects came over git-lfs-transfer and not the HTTP
+# fallback.
+env GIT_TRACE=1
+git clone -c filter.lfs.process='git-lfs filter-process' -c filter.lfs.required=true ssh://localhost:$SSH_PORT/repo1 repo1c
+stderr 'git-lfs-transfer'
+stderr 'pure SSH connection successful'
+! stderr 'pure SSH protocol connection failed'
+! stderr 'git-lfs-authenticate'
+env GIT_TRACE=
 exists repo1c/README.md
-exists repo1c/foo.png
-exists repo1c/bar.png
+grep '^foo$' repo1c/foo.png
+grep '^bar$' repo1c/bar.png
+exists repo1c/.git/lfs/objects
 
 # stop the server
 [windows] stopserver

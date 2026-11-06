@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	charmlog "charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
@@ -440,6 +441,72 @@ func TestRedeliverRecordsNewDelivery(t *testing.T) {
 	list, err := e.be.ListWebhookDeliveries(e.ctx, e.repo, id)
 	is.NoErr(err)
 	is.Equal(len(list), 2)
+}
+
+// Redelivery logs identifiers only, never the stored request body, headers
+// or the hook URL.
+//
+// The old leak went through the global logger, so that is captured too. The
+// test swaps the global default logger and must not run in parallel.
+func TestRedeliverDoesNotLogPayload(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	prev := charmlog.Default()
+	charmlog.SetDefault(charmlog.New(e.logs))
+	t.Cleanup(func() { charmlog.SetDefault(prev) })
+	id := e.createHook(t, whURL, webhook.EventPush)
+	const hookURL = "http://127.0.0.1:1/secret-path?token=hook-token"
+	is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
+		return e.be.store.UpdateWebhookByID(e.ctx, tx, e.repo.ID(), id, hookURL, "", int(webhook.ContentTypeJSON), true)
+	}))
+	const marker = "payload-marker-do-not-log"
+	delID := e.seedDelivery(t, id, hookURL, `{"ref":"main","commit":"`+marker+`"}`)
+
+	is.NoErr(e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, delID))
+
+	logs := e.logs.String()
+	is.True(strings.Contains(logs, "redelivering webhook delivery"))
+	is.True(strings.Contains(logs, delID.String()))
+	for _, leak := range []string{marker, `"ref"`, "X-Test", "secret-path", "hook-token"} {
+		if strings.Contains(logs, leak) {
+			t.Errorf("redelivery log contains %q:\n%s", leak, logs)
+		}
+	}
+}
+
+// A stored body that fails to parse is reported to the caller, but the parse
+// error is not logged, since it quotes part of the body.
+func TestRedeliverParseErrorNotLogged(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ct   webhook.ContentType
+		body string
+		msg  string
+		// leak is the part of the body the parse error quotes.
+		leak string
+	}{
+		{"json", webhook.ContentTypeJSON, `{"a":x}`, "error unmarshaling webhook payload", "'x'"},
+		{"form", webhook.ContentTypeForm, `a=%zz`, "error parsing webhook form body", "%zz"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			is := is.New(t)
+			e := newWebhookEnv(t)
+			id := e.createHook(t, whURL, webhook.EventPush)
+			is.NoErr(e.be.db.TransactionContext(e.ctx, func(tx *db.Tx) error {
+				return e.be.store.UpdateWebhookByID(e.ctx, tx, e.repo.ID(), id, whURL, "", int(tc.ct), true)
+			}))
+			delID := e.seedDelivery(t, id, whURL, tc.body)
+
+			err := e.be.RedeliverWebhookDelivery(e.ctx, e.repo, id, delID)
+			is.True(err != nil)
+			logs := e.logs.String()
+			is.True(strings.Contains(logs, tc.msg))
+			is.True(strings.Contains(err.Error(), tc.leak))
+			if strings.Contains(logs, tc.leak) {
+				t.Errorf("log contains %q from the parse error %q:\n%s", tc.leak, err, logs)
+			}
+		})
+	}
 }
 
 // Suspected bug: a form-encoded webhook cannot be redelivered, because the

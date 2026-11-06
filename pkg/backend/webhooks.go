@@ -290,7 +290,7 @@ func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repos
 		var err error
 		wh, err = datastore.GetWebhookByID(ctx, tx, repo.ID(), id)
 		if err != nil {
-			log.Errorf("error getting webhook: %v", err)
+			b.logger.Error("error getting webhook", "webhook", id, "repo", repo.Name(), "err", err)
 			return db.WrapError(err)
 		}
 
@@ -310,7 +310,9 @@ func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repos
 		return db.WrapError(err)
 	}
 
-	log.Infof("redelivering webhook delivery %s for webhook %d\n\n%s\n\n", delID, id, delivery.RequestBody)
+	// Log identifiers only: the stored body, headers and signature carry repo,
+	// user and commit data, and must not end up in server logs.
+	b.logger.Info("redelivering webhook delivery", "delivery", delID, "webhook", id, "event", webhook.Event(delivery.Event), "repo", repo.Name())
 
 	// The stored body is in the content type the delivery was sent with, which
 	// may differ from the webhook's current one if it was changed since. Use
@@ -331,14 +333,17 @@ func (b *Backend) RedeliverWebhookDelivery(ctx context.Context, repo proto.Repos
 	if ct == webhook.ContentTypeForm {
 		vals, err := neturl.ParseQuery(delivery.RequestBody)
 		if err != nil {
-			log.Errorf("error parsing webhook form body: %v", err)
+			// The parse error quotes part of the body, so it is returned to
+			// the caller but not logged.
+			b.logger.Error("error parsing webhook form body", "delivery", delID, "webhook", id)
 			return err
 		}
 		payload = vals
 	} else {
 		var raw json.RawMessage
 		if err := json.Unmarshal([]byte(delivery.RequestBody), &raw); err != nil {
-			log.Errorf("error unmarshaling webhook payload: %v", err)
+			// As above: the error can quote part of the body.
+			b.logger.Error("error unmarshaling webhook payload", "delivery", delID, "webhook", id)
 			return err
 		}
 		payload = raw
