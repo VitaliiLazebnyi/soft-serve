@@ -81,6 +81,14 @@ soft repo webhook create upriv $WH_UPRIV -e push
 soft repo delete anew
 soft user delete admin
 ! soft user info admin
+
+# locks belong to an account, so a key with none is refused, not crashed
+! git -C apriv lfs lock README.md
+stderr 'forbidden'
+! git -C apriv lfs locks
+stderr 'forbidden'
+
+# its push to an existing repo still sends webhooks
 git -C apriv pull origin master
 mkfile ./apriv/NOACCT.md '# no account'
 git -C apriv add -A
@@ -91,12 +99,6 @@ stdout '✅.*push'
 ! stdout '❌'
 webhook-received
 stdout 'push /hooks/WH_UPRIV'
-
-# locks belong to an account, so a key with none is refused, not crashed
-! git -C apriv lfs lock README.md
-stderr 'forbidden'
-! git -C apriv lfs locks
-stderr 'forbidden'
 
 # stop the server
 [windows] stopserver
