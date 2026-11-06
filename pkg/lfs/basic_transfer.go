@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"charm.land/log/v2"
+	"github.com/charmbracelet/soft-serve/pkg/utils"
 )
 
 // BasicTransferAdapter implements the "basic" adapter
@@ -70,10 +71,11 @@ func (a *BasicTransferAdapter) Verify(ctx context.Context, p Pointer, l *Link) e
 
 func (a *BasicTransferAdapter) performRequest(ctx context.Context, method string, l *Link, body io.Reader, callback func(*http.Request)) (*http.Response, error) {
 	logger := log.FromContext(ctx).WithPrefix("lfs")
-	logger.Debugf("Calling: %s %s", method, l.Href)
+	logger.Debugf("Calling: %s %s", method, utils.RedactURL(l.Href))
 
 	req, err := http.NewRequestWithContext(ctx, method, l.Href, body)
 	if err != nil {
+		err = redactURLError(err)
 		logger.Errorf("Error creating request: %v", err)
 		return nil, err
 	}
@@ -93,6 +95,7 @@ func (a *BasicTransferAdapter) performRequest(ctx context.Context, method string
 			return res, ctx.Err()
 		default:
 		}
+		err = redactURLError(err)
 		logger.Errorf("Error while processing request: %v", err)
 		return res, err
 	}

@@ -110,3 +110,21 @@ func TestValidateUsernameRejectsCredentials(t *testing.T) {
 		t.Errorf("ValidateUsername(%q) = %v, want nil", "stranger", err)
 	}
 }
+
+func TestRedactURL(t *testing.T) {
+	tests := map[string]string{
+		"https://user:secret@example.com/x.git":               "https://example.com/x.git",
+		"https://TOKEN@example.com/x.git":                     "https://example.com/x.git",
+		"https://example.com/x.git":                           "https://example.com/x.git",
+		"https://s3.example.com/obj?X-Amz-Signature=SIG#frag": "https://s3.example.com/obj",
+		"https://example.com/obj?":                            "https://example.com/obj",
+		"ssh://git@10.0.0.1/x.git":                            "ssh://10.0.0.1/x.git",
+		"git@github.com:x/y.git":                              "git@github.com:x/y.git",
+		"https://TOKEN@example.com/%zz":                       "[redacted]",
+	}
+	for in, want := range tests {
+		if got := RedactURL(in); got != want {
+			t.Errorf("RedactURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

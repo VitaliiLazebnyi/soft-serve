@@ -6,12 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	charmssh "charm.land/ssh"
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/db"
+	"github.com/charmbracelet/soft-serve/pkg/lfs"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/sshutils"
 	"github.com/charmbracelet/soft-serve/pkg/ssrf"
@@ -166,11 +168,12 @@ func TestImportRepositoryCloneFailure(t *testing.T) {
 
 func TestRedactRemote(t *testing.T) {
 	tests := map[string]string{
-		"https://user:secret@example.com/x.git": "https://user:xxxxx@example.com/x.git",
-		"https://user@example.com/x.git":        "https://user@example.com/x.git",
+		"https://user:secret@example.com/x.git": "https://example.com/x.git",
+		"https://TOKEN@example.com/x.git":       "https://example.com/x.git",
+		"https://example.com/x.git?t=TOKEN":     "https://example.com/x.git",
 		"https://example.com/x.git":             "https://example.com/x.git",
 		"git@github.com:x/y.git":                "git@github.com:x/y.git",
-		"ssh://git@10.0.0.1/x.git":              "ssh://git@10.0.0.1/x.git",
+		"ssh://git@10.0.0.1/x.git":              "ssh://10.0.0.1/x.git",
 	}
 	for in, want := range tests {
 		if got := redactRemote(in); got != want {
@@ -509,5 +512,48 @@ func TestImportRepositoryDisabled(t *testing.T) {
 			_, err = be.Repository(ctx, "gated")
 			is.True(errors.Is(err, proto.ErrRepoNotFound))
 		})
+	}
+}
+
+// TestImportUnsupportedLFSEndpointRedacted verifies that an import whose LFS
+// endpoint has no client (ssh) logs that endpoint without its credentials.
+func TestImportUnsupportedLFSEndpointRedacted(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	is := is.New(t)
+	var logs syncBuffer
+	be, _ := newTestBackendWithLog(t, &logs)
+	ctx := context.Background()
+
+	admin, err := be.User(ctx, "admin")
+	is.NoErr(err)
+
+	src := t.TempDir()
+	is.NoErr(exec.CommandContext(t.Context(), "git", "init", "--bare", "-q", src).Run())
+
+	const endpoint = "ssh://TOKEN@example.com/x.git"
+	ep, err := lfs.NewEndpoint(endpoint)
+	is.NoErr(err)
+	is.True(lfs.NewClient(ep) == nil) // the path under test
+
+	imp := importSpec{
+		name:        "lfs-ssh",
+		path:        be.repoPath("lfs-ssh"),
+		remote:      src,
+		logRemote:   src,
+		lfsEndpoint: endpoint,
+		lfs:         ep,
+	}
+	is.NoErr(claimRepoPath(imp.path))
+	r, err := be.importRepository(ctx, admin, imp)
+	is.NoErr(err)
+	is.True(r != nil)
+
+	out := logs.String()
+	is.True(strings.Contains(out, "unsupported endpoint"))
+	if strings.Contains(out, "TOKEN") {
+		t.Errorf("logs contain the endpoint credentials:\n%s", out)
 	}
 }
