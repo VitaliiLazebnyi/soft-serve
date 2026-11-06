@@ -21,7 +21,8 @@ type WebhookStore interface {
 	// insert already holds the write lock; counting before the insert would
 	// make concurrent callers fail with SQLITE_BUSY instead of waiting.
 	LockAndCountWebhooks(ctx context.Context, h db.Handler, repoID int64) (int, error)
-	// GetWebhooksByRepoIDWhereEvent returns all webhooks for a repository where event is in the events.
+	// GetWebhooksByRepoIDWhereEvent returns the active webhooks for a repository where event is in the events.
+	// Inactive webhooks are left out, since events are not sent to them.
 	GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Handler, repoID int64, events []int) ([]models.Webhook, error)
 	// CreateWebhook creates a webhook.
 	CreateWebhook(ctx context.Context, h db.Handler, repoID int64, url string, secret string, contentType int, active bool) (int64, error)

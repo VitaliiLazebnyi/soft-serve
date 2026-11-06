@@ -41,24 +41,78 @@ type Delivery struct {
 	Event Event
 }
 
+// ErrWebhookInactive is returned when a delivery is redelivered to a webhook
+// that is not active. Activate the webhook first to send to it again.
+var ErrWebhookInactive = errors.New("webhook is not active")
+
 // secureHTTPClient is an HTTP client with SSRF protection.
 var secureHTTPClient = ssrf.NewSecureClient()
 
 // do sends a webhook.
 // Caller must close the returned body.
+// A returned error never contains the webhook URL's path, query, fragment or
+// user info, which can hold secrets (see redactURLError).
 func do(ctx context.Context, url string, method string, headers http.Header, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	req.Header = headers
 	res, err := secureHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	return res, nil
+}
+
+// redactedURLPart replaces the parts of a webhook URL that are left out of
+// errors.
+const redactedURLPart = "[redacted]"
+
+// redactURL returns rawURL reduced to its scheme and host. Many receivers
+// (Slack, Discord, Teams and the like) put a token in the path or query, so
+// those parts, the fragment and any user info are replaced with
+// redactedURLPart. A URL that cannot be parsed is replaced entirely.
+//
+// The host is kept on purpose, so an operator can tell which receiver failed.
+// A receiver that puts a token in the host name (a per-hook subdomain such as
+// https://<id>.m.pipedream.net) therefore still has that token in the error.
+func redactURL(rawURL string) string {
+	u, err := neturl.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return redactedURLPart
+	}
+	redacted := u.Scheme + "://" + u.Host
+	if u.Opaque != "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		redacted += "/" + redactedURLPart
+	}
+	return redacted
+}
+
+// errInvalidURL replaces the parser's message when a webhook URL cannot be
+// parsed.
+var errInvalidURL = errors.New("invalid URL")
+
+// redactURLError redacts the URL of a *url.Error, which the HTTP client
+// returns for every failed request and which prints the whole URL except for
+// a password. The returned error keeps the operation and the underlying
+// error (except for a parse error, whose message is replaced), so errors.Is
+// and errors.As (context.DeadlineExceeded, net.Error timeouts and so on)
+// still work. Any other error is returned unchanged.
+func redactURLError(err error) error {
+	uerr, ok := err.(*neturl.Error) //nolint:errorlint // only the top-level error is replaced
+	if !ok {
+		return err
+	}
+	inner := uerr.Err
+	if uerr.Op == "parse" {
+		// A parse error's message can quote part of the URL, such as an
+		// invalid escape or port.
+		inner = errInvalidURL
+	}
+	return &neturl.Error{Op: uerr.Op, URL: redactURL(uerr.URL), Err: inner}
 }
 
 // SendWebhook sends a webhook event and records the attempt.
@@ -73,6 +127,21 @@ var sendTimeout = ssrf.ClientTimeout
 
 // recordTimeout bounds writing one delivery row.
 const recordTimeout = 5 * time.Second
+
+// rereadTimeout bounds each try at re-reading a webhook before its send, so a
+// database that does not answer cannot hold a background sender. It is a
+// variable so tests can shorten it.
+var rereadTimeout = recordTimeout
+
+// rereadRetryDelay is the wait before the one retry of a failed re-read. It is
+// a variable so tests can shorten it.
+var rereadRetryDelay = 200 * time.Millisecond
+
+// errRereadFailed is the reason stored on a delivery that was not sent because
+// its webhook could not be re-read. The database error itself is only logged:
+// the stored reason is shown to repository admins, who need not see database
+// details.
+var errRereadFailed = errors.New("not sent: could not re-read webhook (database error)")
 
 // request is a webhook request ready to send or record.
 type request struct {
@@ -169,7 +238,12 @@ func sendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 		if reqErr == nil && (resStatus < 200 || resStatus > 299) {
 			return fmt.Errorf("webhook %d: receiver responded with status %d", w.ID, resStatus)
 		}
-		return reqErr
+		if reqErr != nil {
+			// The URL in reqErr is redacted, so name the webhook: several
+			// hooks on one host would otherwise log the same line.
+			return fmt.Errorf("webhook %d: %w", w.ID, reqErr)
+		}
+		return nil
 	}
 
 	return recordDelivery(ctx, w, event, req, reqErr, resStatus, resHeaders, resBody)
@@ -280,9 +354,10 @@ func RecordUndelivered(ctx context.Context, hooks []models.Webhook, payload Even
 	return errors.Join(errs...)
 }
 
-// Subscribers returns the webhooks of the payload's repository that subscribe
-// to its event. Call it before a change that removes those webhooks, since
-// they cannot be found afterwards.
+// Subscribers returns the active webhooks of the payload's repository that
+// subscribe to its event. Inactive webhooks are not sent events. Call it
+// before a change that removes those webhooks, since they cannot be found
+// afterwards.
 func Subscribers(ctx context.Context, payload EventPayload) ([]models.Webhook, error) {
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
@@ -295,7 +370,10 @@ func Subscribers(ctx context.Context, payload EventPayload) ([]models.Webhook, e
 
 // Deliver sends the payload to each webhook and records every attempt. Each
 // webhook is re-read just before its send: one deleted or unsubscribed since
-// hooks was read is skipped, and a changed URL or secret is used.
+// hooks was read is skipped, as is one deactivated since, and a changed URL or
+// secret is used. A webhook that cannot be re-read is not sent to: the event
+// is recorded for it as undelivered, so it can be redelivered later, and a
+// warning with the error is logged.
 func Deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload) error {
 	return deliver(ctx, hooks, payload, true)
 }
@@ -315,10 +393,25 @@ func deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload, 
 	var errs []error
 	for _, w := range hooks {
 		if record {
-			var ok bool
-			if w, ok = currentHook(ctx, w, payload.Event()); !ok {
+			cur, ok, err := currentHook(ctx, w, payload.Event())
+			if err != nil {
+				// Whether w may still be sent to is unknown, so it is not
+				// sent to. The event is recorded as undelivered instead, so
+				// it can be redelivered once the webhook can be read. The
+				// error is logged here, since a recorded delivery is not
+				// returned as an error; the stored reason leaves out the
+				// database details. Only a failure to record is returned.
+				log.FromContext(ctx).WithPrefix("webhook").Warn("webhook not sent: re-reading it failed; recorded as undelivered",
+					"webhook_id", w.ID, "repo_id", w.RepoID, "event", payload.Event(), "err", err)
+				if err := RecordUndelivered(ctx, []models.Webhook{w}, payload, errRereadFailed); err != nil {
+					errs = append(errs, err)
+				}
 				continue
 			}
+			if !ok {
+				continue
+			}
+			w = cur
 		}
 		if err := sendWebhook(ctx, w, payload.Event(), payload, record); err != nil {
 			errs = append(errs, err)
@@ -330,22 +423,43 @@ func deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload, 
 // currentHook re-reads w right before it is sent, since a delivery can wait in
 // the background queue while its webhook is changed. It returns the webhook as
 // stored now, so a rotated secret or changed URL is used, and false when the
-// webhook was deleted or no longer subscribes to event. If the webhook cannot
-// be read, w is returned unchanged and the send goes ahead as before, with its
-// outcome recorded as usual.
-func currentHook(ctx context.Context, w models.Webhook, event Event) (models.Webhook, bool) {
-	dbx := db.FromContext(ctx)
-	datastore := store.FromContext(ctx)
-	hooks, err := datastore.GetWebhooksByRepoIDWhereEvent(ctx, dbx, w.RepoID, []int{int(event)})
+// webhook was deleted, deactivated, or no longer subscribes to event. It
+// returns an error when the webhook cannot be read; the caller then does not
+// send, since the webhook may have been deactivated.
+//
+// Each try is bounded by rereadTimeout, and a failed try is retried once after
+// rereadRetryDelay unless ctx is done, so a short database hiccup does not
+// leave the event undelivered.
+func currentHook(ctx context.Context, w models.Webhook, event Event) (models.Webhook, bool, error) {
+	hooks, err := lookupSubscribers(ctx, w.RepoID, event)
+	if err != nil && ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+		case <-time.After(rereadRetryDelay):
+			hooks, err = lookupSubscribers(ctx, w.RepoID, event)
+		}
+	}
 	if err != nil {
-		return w, true
+		return models.Webhook{}, false, err
 	}
 	for _, h := range hooks {
 		if h.ID == w.ID {
-			return h, true
+			return h, true, nil
 		}
 	}
-	return models.Webhook{}, false
+	return models.Webhook{}, false, nil
+}
+
+// lookupSubscribers reads the active webhooks of a repository that subscribe
+// to event, giving up after rereadTimeout.
+func lookupSubscribers(ctx context.Context, repoID int64, event Event) ([]models.Webhook, error) {
+	lctx, cancel := context.WithTimeout(ctx, rereadTimeout)
+	defer cancel()
+	hooks, err := store.FromContext(ctx).GetWebhooksByRepoIDWhereEvent(lctx, db.FromContext(ctx), repoID, []int{int(event)})
+	if err != nil {
+		return nil, db.WrapError(err)
+	}
+	return hooks, nil
 }
 
 // SendEvent sends a webhook event to the repository's subscribers.
