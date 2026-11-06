@@ -41,6 +41,12 @@ func (d *Backend) adminKeyList() []ssh.PublicKey {
 	return d.adminKeys
 }
 
+// IsAdminKey reports whether pk is one of the configured admin keys
+// (initial_admin_keys). It uses the cached key list; see adminKeyList.
+func (d *Backend) IsAdminKey(pk ssh.PublicKey) bool {
+	return d.isAdminKey(pk)
+}
+
 // isAdminKey reports whether pk is one of the configured admin keys.
 func (d *Backend) isAdminKey(pk ssh.PublicKey) bool {
 	if pk == nil {
