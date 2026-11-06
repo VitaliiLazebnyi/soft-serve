@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
+	"time"
 
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/ssrf"
@@ -46,10 +48,23 @@ type httpClient struct {
 
 var _ Client = (*httpClient)(nil)
 
+// stallTimeout is how long an LFS connection may go without sending or
+// receiving any data before it is closed. Tests lower it.
+var stallTimeout = ssrf.ClientTimeout
+
 // secureHTTPClient is the SSRF-protected HTTP client shared by every LFS
 // client, so they all draw from one connection pool instead of each keeping
-// its own idle connections.
-var secureHTTPClient = ssrf.NewSecureClient()
+// its own idle connections. Its transfer timeouts are set once here, as
+// setTransferTimeouts wraps the shared transport's dialer.
+var secureHTTPClient = newTransferClient(ssrf.NewSecureClient())
+
+// newTransferClient sets up client for LFS transfers and returns it. Tests
+// pass a client that may reach loopback, so the stall tests run through the
+// same setup as secureHTTPClient.
+func newTransferClient(client *http.Client) *http.Client {
+	setTransferTimeouts(client)
+	return client
+}
 
 // newHTTPClient returns a new Git LFS client.
 func newHTTPClient(endpoint Endpoint) *httpClient {
@@ -61,6 +76,53 @@ func newHTTPClient(endpoint Endpoint) *httpClient {
 			TransferBasic: &BasicTransferAdapter{client},
 		},
 	}
+}
+
+// setTransferTimeouts replaces the client's whole-request timeout, which also
+// covers reading the response body and so cuts off any object that takes
+// longer than it to transfer, with an idle timeout on each connection: a
+// transfer may take as long as it needs while data keeps moving, and a stalled
+// one still fails. It panics if the client's transport is not an
+// *http.Transport with a DialContext, since it could not add the stall limit
+// and transfers would then have no bound at all.
+func setTransferTimeouts(client *http.Client) {
+	t, ok := client.Transport.(*http.Transport)
+	if !ok || t.DialContext == nil {
+		panic(fmt.Sprintf("lfs: cannot add a stall timeout to transport %T", client.Transport))
+	}
+	client.Timeout = 0
+	dial := t.DialContext
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dial(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &stallTimeoutConn{Conn: conn, timeout: stallTimeout}, nil
+	}
+}
+
+// stallTimeoutConn pushes the connection's deadline forward on every read and
+// write, so it only expires once neither direction has made progress for the
+// timeout. Setting the deadline from either side also extends a read already
+// waiting, such as the transport's wait for a response while a large upload
+// is still being written.
+type stallTimeoutConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *stallTimeoutConn) Read(b []byte) (int, error) {
+	if err := c.Conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err //nolint:wrapcheck
+	}
+	return c.Conn.Read(b) //nolint:wrapcheck
+}
+
+func (c *stallTimeoutConn) Write(b []byte) (int, error) {
+	if err := c.Conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err //nolint:wrapcheck
+	}
+	return c.Conn.Write(b) //nolint:wrapcheck
 }
 
 // Download implements Client.
