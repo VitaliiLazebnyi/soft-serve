@@ -93,3 +93,20 @@ func TestSanitizeRepo(t *testing.T) {
 		})
 	}
 }
+
+// Authentication failures log the username only when it is valid, so
+// credentials sent in the username field must never pass.
+func TestValidateUsernameRejectsCredentials(t *testing.T) {
+	for _, s := range []string{
+		"ss_x",
+		"ss_0123456789abcdef0123456789abcdef",
+		"eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ4In0.c2ln",
+	} {
+		if err := ValidateUsername(s); err == nil {
+			t.Errorf("ValidateUsername(%q) = nil, want an error", s)
+		}
+	}
+	if err := ValidateUsername("stranger"); err != nil {
+		t.Errorf("ValidateUsername(%q) = %v, want nil", "stranger", err)
+	}
+}

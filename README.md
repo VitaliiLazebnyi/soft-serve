@@ -198,7 +198,13 @@ ssh:
   # client key above is presented to every host a user imports from, so list
   # only hosts you trust that key with. Entries are hostnames, IP addresses,
   # or CIDR ranges, each with an optional port. When the list is empty, only
-  # server admins may import from or mirror ssh remotes.
+  # server admins may import from or mirror ssh remotes. Once the list is
+  # non-empty it binds admins too: they may then reach only the hosts it
+  # names. A mirror is synced with its owner's privileges, so a key in
+  # initial_admin_keys that belongs to a non-admin account may import from
+  # ssh but not mirror from it, nor turn mirroring on later. To let such an
+  # account mirror, give it the admin flag, or list the host here, keeping
+  # in mind that the list then limits every admin as well.
   # CIDR entries are checked against DNS only at import or sync time and ssh
   # resolves the name again, so prefer hostnames for anything you do not
   # control. The list is matched against the name given to ssh; your
@@ -806,6 +812,19 @@ Available Commands:
 Flags:
   -h, --help   help for webhook
 ```
+
+Every attempt to send an event is recorded as a delivery, which `repo webhook
+deliveries` lists and can redeliver. Each webhook keeps its 100 most recent
+deliveries: recording one deletes the older ones. While deliveries are being
+recorded concurrently, or if a cleanup fails, a webhook can briefly hold a few
+more until its next delivery is recorded. Upgrading trims existing deliveries
+to the same limit. The trim frees space inside the database but does not shrink
+its files. On SQLite, stop the server and run `sqlite3 <database file> VACUUM`
+to shrink the file; VACUUM writes a full copy, so it needs free disk space up
+to about the size of the file. On Postgres, autovacuum makes the space
+reusable, and `VACUUM FULL webhook_deliveries` returns it to the system.
+
+A repository can have at most 20 webhooks.
 
 ## The Soft Serve Plus TUI
 

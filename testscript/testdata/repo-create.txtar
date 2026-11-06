@@ -34,7 +34,8 @@ git -C repo1 tag v0.1.0
 git -C repo1 push origin HEAD
 git -C repo1 push origin HEAD --tags
 
-# create lfs files, use ssh git-lfs-transfer
+# create lfs files; SOFT_SERVE_LFS_SSH_ENABLED is not set (pure SSH LFS is
+# off by default), so the push uses git-lfs-authenticate and HTTP
 git -C repo1 lfs install --local
 git -C repo1 lfs track '*.png'
 git -C repo1 lfs track '*.mp4'

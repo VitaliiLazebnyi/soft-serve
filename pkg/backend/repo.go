@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,11 +26,18 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/storage"
 	"github.com/charmbracelet/soft-serve/pkg/utils"
 	"github.com/charmbracelet/soft-serve/pkg/webhook"
+	gitcfg "github.com/go-git/go-git/v5/plumbing/format/config"
 )
 
 // RemotePolicy returns the policy for git remotes supplied on behalf of user:
 // the operator's ssh allowlist, and, for server admins, leave to pick any ssh
 // host when no allowlist is configured. A nil user gets neither.
+//
+// Only the user's stored admin flag counts. It is meant for callers with no
+// live session, such as the mirror job acting for a repository's owner. A
+// caller acting for a live session must also honour an admin key on the
+// session context (see isServerAdmin); ImportRepository does so through
+// importRemotePolicy.
 func RemotePolicy(cfg *config.Config, user proto.User) ssrf.GitRemotePolicy {
 	return ssrf.GitRemotePolicy{
 		AllowedSSHHosts: cfg.SSH.AllowedHosts(),
@@ -37,12 +45,47 @@ func RemotePolicy(cfg *config.Config, user proto.User) ssrf.GitRemotePolicy {
 	}
 }
 
+// errMirrorOwnerNotAdmin explains a refused ssh mirror, at import or when
+// mirroring is switched on later. It wraps proto.ErrUnauthorized, so callers
+// that test for that still match. The allowlist is offered with its caveat:
+// once ssh.client_allowed_hosts is non-empty it binds admins too, so adding
+// one host narrows every admin's ssh reach to the list.
+var errMirrorOwnerNotAdmin = fmt.Errorf("%w: an ssh mirror is synced with its owner's privileges, and the owner is not an admin; make the owner an admin, or list the host in ssh.client_allowed_hosts (a non-empty list also limits admins to the hosts it names)", proto.ErrUnauthorized)
+
+// errMirrorImportOwnerNotAdmin is errMirrorOwnerNotAdmin at import time,
+// where a plain import is a third way out.
+var errMirrorImportOwnerNotAdmin = fmt.Errorf("%w, or import without --mirror", errMirrorOwnerNotAdmin)
+
+// importRemotePolicy returns the policy for the remote and LFS endpoint that
+// user, acting live on ctx, supplies to ImportRepository.
+//
+// The caller's own privilege counts: the stored admin flag or an admin key
+// on the session (see isServerAdmin). A mirror is also synced later by the
+// mirror job, which has no session and re-validates every remote with
+// RemotePolicy for the repository's owner. So for a mirror the leave to use
+// any ssh host is granted only when that later check will grant it too:
+// the owner is the user when there is one, and the default admin otherwise
+// (see CreateRepository). Without this, a non-admin account holding an
+// admin key could create a mirror that the job then skips on every run.
+// mirrorRestricted reports whether the mirror rule withdrew a leave the
+// caller would otherwise have had.
+func (d *Backend) importRemotePolicy(ctx context.Context, user proto.User, mirror bool) (policy ssrf.GitRemotePolicy, mirrorRestricted bool) {
+	policy = RemotePolicy(d.cfg, user)
+	live := d.isServerAdmin(ctx, user)
+	policy.AllowAnySSHHost = live
+	if mirror && user != nil && !user.IsAdmin() {
+		policy.AllowAnySSHHost = false
+		mirrorRestricted = live
+	}
+	return policy, mirrorRestricted
+}
+
 // validateImportRemote validates a user-supplied remote and maps the outcome
 // to the errors the user sees: refused for want of privilege, or not a
 // usable remote. Render the result with RemoteGitEnv and apply it to the
 // clone subprocess, or the validation does not hold.
-func validateImportRemote(remote string, policy ssrf.GitRemotePolicy) (ssrf.ValidatedGitRemote, error) {
-	v, err := ssrf.ValidateGitRemote(remote, policy)
+func validateImportRemote(ctx context.Context, remote string, policy ssrf.GitRemotePolicy) (ssrf.ValidatedGitRemote, error) {
+	v, err := validateGitRemote(ctx, remote, policy)
 	switch {
 	case errors.Is(err, ssrf.ErrSSHRequiresAdmin):
 		return ssrf.ValidatedGitRemote{}, proto.ErrUnauthorized
@@ -51,6 +94,10 @@ func validateImportRemote(remote string, policy ssrf.GitRemotePolicy) (ssrf.Vali
 	}
 	return v, nil
 }
+
+// validateGitRemote is ssrf.ValidateGitRemoteContext. Tests replace it to
+// stand in for a slow resolver.
+var validateGitRemote = ssrf.ValidateGitRemoteContext
 
 // redactRemote strips any password from a remote URL so it can be logged.
 // scp-style remotes have no userinfo to leak and pass through unchanged.
@@ -239,8 +286,19 @@ func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.
 	}
 
 	remote = utils.Sanitize(remote)
-	policy := RemotePolicy(d.cfg, user)
-	v, err := validateImportRemote(remote, policy)
+	policy, mirrorRestricted := d.importRemotePolicy(ctx, user, opts.Mirror)
+	// checkRemote validates one user-supplied remote, explaining a refusal
+	// that only the mirror rule caused.
+	checkRemote := func(r string) (ssrf.ValidatedGitRemote, error) {
+		v, err := validateImportRemote(ctx, r, policy)
+		if mirrorRestricted && errors.Is(err, proto.ErrUnauthorized) {
+			d.logger.Warn("refusing ssh mirror import: owner is not an admin, so the mirror job could not sync it",
+				"name", name, "remote", redactRemote(r), "user", user.Username())
+			return v, errMirrorImportOwnerNotAdmin
+		}
+		return v, err
+	}
+	v, err := checkRemote(remote)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +322,7 @@ func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.
 		// A user-supplied endpoint is persisted to the repo config, where
 		// the mirror job later reads it, so it obeys the same validation
 		// and ssh policy as the remote itself.
-		if _, err := validateImportRemote(opts.LFSEndpoint, policy); err != nil {
+		if _, err := checkRemote(opts.LFSEndpoint); err != nil {
 			return nil, err
 		}
 		imp.lfs, err = lfs.NewEndpoint(opts.LFSEndpoint)
@@ -728,6 +786,14 @@ func (d *Backend) SetHidden(ctx context.Context, name string, hidden bool) error
 	}))
 }
 
+// mirrorCheckTimeout bounds the hostname lookups SetMirror makes when it
+// validates a repository's remotes before switching mirroring on.
+const mirrorCheckTimeout = 10 * time.Second
+
+// errRepoChangedDuringMirror is returned when the repository was replaced,
+// re-owned or re-pointed while SetMirror was validating its remotes.
+var errRepoChangedDuringMirror = errors.New("repository changed while switching mirroring; try again")
+
 // SetMirror sets the mirror flag of a repository.
 // Note: enabling mirror mode requires the repository to have been imported
 // with a remote URL. Use ImportRepository to create a new mirror.
@@ -735,63 +801,151 @@ func (d *Backend) SetMirror(ctx context.Context, name string, mirror bool) error
 	name = utils.SanitizeRepo(name)
 	rp := d.repoPath(name)
 
+	// The remotes are validated before the transaction opens. Validation
+	// may resolve hostnames, and on SQLite a read inside a transaction holds
+	// the database lock until it ends, so a slow resolver would otherwise
+	// stall every writer on the server.
+	m, err := d.store.GetRepoByName(ctx, d.db, name)
+	if err != nil {
+		return wrapRepoError(err)
+	}
+	_, rcfg, err := d.openRepoConfig(rp)
+	if err != nil {
+		return err
+	}
+	urls := remoteURLs(rcfg)
+	lfsURL := rcfg.Section("lfs").Option("url")
+	if mirror && len(urls) == 0 {
+		return errors.New("cannot enable mirror mode: repository has no remote URL configured")
+	}
+	if mirror {
+		cctx, cancel := context.WithTimeout(ctx, mirrorCheckTimeout)
+		err := d.checkMirrorRemotes(cctx, m, rcfg)
+		cancel()
+		if err != nil {
+			return wrapRepoError(err)
+		}
+	}
+
 	return wrapRepoError(d.db.TransactionContext(ctx, func(tx *db.Tx) error {
-		if _, err := d.store.GetRepoByName(ctx, tx, name); err != nil {
+		// Re-read both, so what is written is what was validated.
+		cur, err := d.store.GetRepoByName(ctx, tx, name)
+		if err != nil {
 			return err
 		}
-
-		// Update git config
-		r, err := git.Open(rp)
+		r, rcfg, err := d.openRepoConfig(rp)
 		if err != nil {
-			d.logger.Error("failed to open repository", "err", err, "path", rp)
-			return errRepoUpdate
+			return err
+		}
+		if cur.ID != m.ID || cur.UserID != m.UserID ||
+			!slices.Equal(remoteURLs(rcfg), urls) || rcfg.Section("lfs").Option("url") != lfsURL {
+			return errRepoChangedDuringMirror
 		}
 
-		rcfg, err := r.Config()
-		if err != nil {
-			d.logger.Error("failed to read repository config", "err", err, "path", rp)
-			return errRepoUpdate
-		}
+		setRemotesMirror(rcfg, mirror)
 
-		// Update mirror option for all remotes
-		remoteSection := rcfg.Section("remote")
-		hasRemote := false
-		for _, sub := range remoteSection.Subsections {
-			// Check if this remote has a URL
-			for _, opt := range sub.Options {
-				if opt.Key == "url" && opt.Value != "" {
-					hasRemote = true
-					found := false
-					for i, opt := range sub.Options {
-						if opt.Key == "mirror" {
-							found = true
-							if mirror {
-								sub.Options[i].Value = "true"
-							} else {
-								sub.Options = append(sub.Options[:i], sub.Options[i+1:]...)
-							}
-							break
-						}
-					}
-					if !found && mirror {
-						sub.SetOption("mirror", "true")
-					}
-					break
-				}
-			}
+		// The flag is written first and the git config last, so a failure
+		// writing the config rolls the flag back and the two stay in step.
+		if err := d.store.SetRepoIsMirrorByName(ctx, tx, name, mirror); err != nil {
+			return err
 		}
-
-		if mirror && !hasRemote {
-			return errors.New("cannot enable mirror mode: repository has no remote URL configured")
-		}
-
 		if err := r.SetConfig(rcfg); err != nil {
 			d.logger.Error("failed to set repository config", "err", err, "path", rp)
 			return errRepoUpdate
 		}
-
-		return d.store.SetRepoIsMirrorByName(ctx, tx, name, mirror)
+		return nil
 	}))
+}
+
+// openRepoConfig opens the repository at rp and reads its git config. The
+// raw errors carry the server data path, so they are logged and a generic
+// one is returned.
+func (d *Backend) openRepoConfig(rp string) (*git.Repository, *gitcfg.Config, error) {
+	r, err := git.Open(rp)
+	if err != nil {
+		d.logger.Error("failed to open repository", "err", err, "path", rp)
+		return nil, nil, errRepoUpdate
+	}
+	rcfg, err := r.Config()
+	if err != nil {
+		d.logger.Error("failed to read repository config", "err", err, "path", rp)
+		return nil, nil, errRepoUpdate
+	}
+	return r, rcfg, nil
+}
+
+// remoteURLs returns the URL of every remote in rcfg that has one, in
+// config order.
+func remoteURLs(rcfg *gitcfg.Config) []string {
+	var urls []string
+	for _, sub := range rcfg.Section("remote").Subsections {
+		if u := sub.Option("url"); u != "" {
+			urls = append(urls, u)
+		}
+	}
+	return urls
+}
+
+// setRemotesMirror sets, or with mirror false removes, the mirror option on
+// every remote in rcfg that has a URL.
+func setRemotesMirror(rcfg *gitcfg.Config, mirror bool) {
+	for _, sub := range rcfg.Section("remote").Subsections {
+		if sub.Option("url") == "" {
+			continue
+		}
+		if mirror {
+			sub.SetOption("mirror", "true")
+		} else {
+			sub.RemoveOption("mirror")
+		}
+	}
+}
+
+// checkMirrorRemotes refuses to switch on mirroring for repo m, whose git
+// config is rcfg, when the mirror job would skip it on every run. The job
+// validates every remote with RemotePolicy for the repository's owner (see
+// pkg/jobs), so the same check is made here. It matters for a repository
+// imported without --mirror by a caller whose admin key let it reach an ssh
+// host its non-admin owner account may not.
+//
+// Like the job, the stored LFS endpoint is checked only when LFS is enabled,
+// and a failure there is not a refusal: the job still syncs the git data and
+// skips only the LFS objects, so it is logged as a warning.
+//
+// ctx bounds the hostname lookups validation makes. No transaction may be
+// open across this call, for the same reason.
+func (d *Backend) checkMirrorRemotes(ctx context.Context, m models.Repo, rcfg *gitcfg.Config) error {
+	// As in the job, an owner that cannot be looked up is nobody.
+	var owner proto.User
+	if m.UserID.Valid {
+		um, err := d.store.GetUserByID(ctx, d.db, m.UserID.Int64)
+		if err == nil {
+			owner = &user{user: um}
+		} else if !errors.Is(db.WrapError(err), db.ErrRecordNotFound) {
+			return err
+		}
+	}
+	policy := RemotePolicy(d.cfg, owner)
+
+	for _, u := range remoteURLs(rcfg) {
+		_, err := validateImportRemote(ctx, u, policy)
+		if errors.Is(err, proto.ErrUnauthorized) {
+			d.logger.Warn("refusing to enable mirror: owner is not an admin, so the mirror job could not sync it",
+				"repo", m.Name, "remote", redactRemote(u))
+			return errMirrorOwnerNotAdmin
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	if u := rcfg.Section("lfs").Option("url"); d.cfg.LFS.Enabled && u != "" {
+		if _, err := validateImportRemote(ctx, u, policy); err != nil {
+			d.logger.Warn("enabling mirror, but the mirror job will skip LFS objects: endpoint failed validation",
+				"repo", m.Name, "endpoint", redactRemote(u), "err", err)
+		}
+	}
+	return nil
 }
 
 // SetDescription sets the description of a repository.

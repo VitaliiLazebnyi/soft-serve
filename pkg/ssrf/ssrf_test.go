@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -275,13 +276,21 @@ func TestIsLocalhost(t *testing.T) {
 }
 
 // TestValidateURLErrorsHideResolver mirrors the import check for webhook
-// URLs, whose validation error is shown to the repository admin.
+// URLs, whose validation error is shown to the repository admin. The fake
+// resolver fails the way the system one does, naming the DNS server, so the
+// test runs offline and still proves that detail is dropped.
 func TestValidateURLErrorsHideResolver(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires DNS")
-	}
+	t.Parallel()
 
-	err := ValidateURL("https://does-not-exist.invalid/hook")
+	var lookups atomic.Int32
+	lookup := func(_ context.Context, host string) ([]net.IPAddr, error) {
+		lookups.Add(1)
+		return nil, &net.DNSError{Err: "no such host", Name: host, Server: "10.0.0.53:53", IsNotFound: true}
+	}
+	err := validateURL("https://does-not-exist.invalid/hook", lookup)
+	if n := lookups.Load(); n != 1 {
+		t.Fatalf("fake resolver called %d times, want 1", n)
+	}
 	if !errors.Is(err, ErrInvalidURL) {
 		t.Fatalf("ValidateURL() error = %v, want ErrInvalidURL", err)
 	}
@@ -289,5 +298,77 @@ func TestValidateURLErrorsHideResolver(t *testing.T) {
 		if strings.Contains(err.Error(), leak) {
 			t.Errorf("ValidateURL() error %q leaks resolver detail %q", err, leak)
 		}
+	}
+}
+
+// TestValidateURLErrorsHideSystemResolver is the test above against the
+// system resolver, through the exported ValidateURL. The .invalid TLD never
+// resolves (RFC 6761), but the lookup still needs a working resolver
+// configuration, so it is skipped in -short runs.
+func TestValidateURLErrorsHideSystemResolver(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires DNS")
+	}
+	t.Parallel()
+
+	err := ValidateURL("https://does-not-exist.invalid/hook")
+	if !errors.Is(err, ErrInvalidURL) {
+		t.Fatalf("ValidateURL() error = %v, want ErrInvalidURL", err)
+	}
+	if !strings.Contains(err.Error(), "cannot resolve hostname") {
+		t.Errorf("ValidateURL() error = %q, want it to mention %q", err, "cannot resolve hostname")
+	}
+	for _, leak := range []string{"lookup", " on ", ":53", "no such host"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("ValidateURL() error %q leaks resolver detail %q", err, leak)
+		}
+	}
+}
+
+// TestValidateURLResolvesHostnames covers the DNS path of ValidateURL with a
+// fake resolver, so it runs offline.
+func TestValidateURLResolvesHostnames(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		ips     []string
+		wantErr error
+		// wantMsg, when set, must appear in the error; it tells apart the
+		// lookup-failure and empty-answer branches, which share ErrInvalidURL.
+		wantMsg string
+	}{
+		{"public", []string{"140.82.112.3"}, nil, ""},
+		{"private", []string{"10.0.0.1"}, ErrPrivateIP, ""},
+		{"public and private", []string{"140.82.112.3", "169.254.169.254"}, ErrPrivateIP, ""},
+		{"does not resolve", nil, ErrInvalidURL, "cannot resolve hostname"},
+		{"empty answer", []string{}, ErrInvalidURL, "no addresses for hostname"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			table := map[string][]string{}
+			if tt.ips != nil {
+				table["hooks.example"] = tt.ips
+			}
+			var lookups atomic.Int32
+			fake := fakeLookup(table)
+			err := validateURL("https://hooks.example/hook", func(ctx context.Context, host string) ([]net.IPAddr, error) {
+				lookups.Add(1)
+				return fake(ctx, host)
+			})
+			if n := lookups.Load(); n != 1 {
+				t.Fatalf("fake resolver called %d times, want 1", n)
+			}
+			if tt.wantErr == nil && err != nil {
+				t.Fatalf("validateURL() = %v, want nil", err)
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("validateURL() = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantMsg != "" && !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Fatalf("validateURL() error = %q, want it to mention %q", err, tt.wantMsg)
+			}
+		})
 	}
 }

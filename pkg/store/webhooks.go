@@ -14,7 +14,15 @@ type WebhookStore interface {
 	GetWebhookByID(ctx context.Context, h db.Handler, repoID int64, id int64) (models.Webhook, error)
 	// GetWebhooksByRepoID returns all webhooks for a repository.
 	GetWebhooksByRepoID(ctx context.Context, h db.Handler, repoID int64) ([]models.Webhook, error)
-	// GetWebhooksByRepoIDWhereEvent returns all webhooks for a repository where event is in the events.
+	// LockAndCountWebhooks returns how many webhooks a repository has. On
+	// Postgres it first locks the repository's row until the transaction
+	// ends, so that concurrent callers that insert and then count in one
+	// transaction take turns. On SQLite callers take turns because the
+	// insert already holds the write lock; counting before the insert would
+	// make concurrent callers fail with SQLITE_BUSY instead of waiting.
+	LockAndCountWebhooks(ctx context.Context, h db.Handler, repoID int64) (int, error)
+	// GetWebhooksByRepoIDWhereEvent returns the active webhooks for a repository where event is in the events.
+	// Inactive webhooks are left out, since events are not sent to them.
 	GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Handler, repoID int64, events []int) ([]models.Webhook, error)
 	// CreateWebhook creates a webhook.
 	CreateWebhook(ctx context.Context, h db.Handler, repoID int64, url string, secret string, contentType int, active bool) (int64, error)
@@ -40,14 +48,19 @@ type WebhookStore interface {
 
 	// GetWebhookDeliveryByID returns a webhook delivery by its ID.
 	GetWebhookDeliveryByID(ctx context.Context, h db.Handler, webhookID int64, id uuid.UUID) (models.WebhookDelivery, error)
-	// GetWebhookDeliveriesByWebhookID returns all webhook deliveries for a webhook.
+	// GetWebhookDeliveriesByWebhookID returns all webhook deliveries for a
+	// webhook, oldest first.
 	GetWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookDelivery, error)
-	// ListWebhookDeliveriesByWebhookID returns all webhook deliveries for a webhook.
-	// This only returns the delivery ID, response status, and event.
+	// ListWebhookDeliveriesByWebhookID returns all webhook deliveries for a
+	// webhook, oldest first. This only returns the delivery ID, response
+	// status, event, creation time, and sequence number.
 	ListWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookDelivery, error)
 	// CreateWebhookDelivery creates a webhook delivery. It writes nothing if the
 	// webhook no longer exists.
 	CreateWebhookDelivery(ctx context.Context, h db.Handler, id uuid.UUID, webhookID int64, event int, url string, method string, requestError error, requestHeaders string, requestBody string, responseStatus int, responseHeaders string, responseBody string) error
 	// DeleteWebhookDeliveryByID deletes a webhook delivery by its ID.
 	DeleteWebhookDeliveryByID(ctx context.Context, h db.Handler, webhookID int64, id uuid.UUID) error
+	// PruneWebhookDeliveries deletes all but the keep most recent deliveries
+	// of a webhook, in the order they were recorded (by seq).
+	PruneWebhookDeliveries(ctx context.Context, h db.Handler, webhookID int64, keep int) error
 }

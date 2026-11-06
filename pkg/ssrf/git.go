@@ -99,6 +99,13 @@ func GitEnv(remotes ...ValidatedGitRemote) []string {
 // again on every fetch, so a name that changes answers between validation
 // and connect (DNS rebinding) is not caught for that transport.
 func ValidateGitRemote(remote string, policy GitRemotePolicy) (ValidatedGitRemote, error) {
+	return ValidateGitRemoteContext(context.Background(), remote, policy)
+}
+
+// ValidateGitRemoteContext is ValidateGitRemote with the hostname lookups it
+// makes bounded by ctx, so a caller that must not stall on a slow resolver
+// can set a deadline.
+func ValidateGitRemoteContext(ctx context.Context, remote string, policy GitRemotePolicy) (ValidatedGitRemote, error) {
 	if remote == "" {
 		return ValidatedGitRemote{}, ErrInvalidURL
 	}
@@ -111,7 +118,7 @@ func ValidateGitRemote(remote string, policy GitRemotePolicy) (ValidatedGitRemot
 		if err := validateSSHHost(user, host); err != nil {
 			return ValidatedGitRemote{}, err
 		}
-		if err := policy.checkSSH(host, port); err != nil {
+		if err := policy.checkSSH(ctx, host, port); err != nil {
 			return ValidatedGitRemote{}, err
 		}
 		return ValidatedGitRemote{Transport: GitTransportSSH}, nil
@@ -129,7 +136,7 @@ func ValidateGitRemote(remote string, policy GitRemotePolicy) (ValidatedGitRemot
 		if err := validateSSHHost(u.User.Username(), u.Hostname()); err != nil {
 			return ValidatedGitRemote{}, err
 		}
-		if err := policy.checkSSH(u.Hostname(), u.Port()); err != nil {
+		if err := policy.checkSSH(ctx, u.Hostname(), u.Port()); err != nil {
 			return ValidatedGitRemote{}, err
 		}
 		return ValidatedGitRemote{Transport: GitTransportSSH}, nil
@@ -138,13 +145,13 @@ func ValidateGitRemote(remote string, policy GitRemotePolicy) (ValidatedGitRemot
 		// git:// is a plain TCP connect to an arbitrary host:port, so it is
 		// as much an SSRF primitive as http and gets the same validation.
 		// It cannot be pinned, since libcurl is not involved.
-		if _, err := validateRemoteHost(u.Hostname()); err != nil {
+		if _, err := validateRemoteHost(ctx, u.Hostname(), policy.lookup); err != nil {
 			return ValidatedGitRemote{}, err
 		}
 		return ValidatedGitRemote{Transport: GitTransportGit}, nil
 
 	case "http", "https":
-		addr, err := validateRemoteHost(u.Hostname())
+		addr, err := validateRemoteHost(ctx, u.Hostname(), policy.lookup)
 		if err != nil {
 			return ValidatedGitRemote{}, err
 		}
@@ -163,8 +170,9 @@ func ValidateGitRemote(remote string, policy GitRemotePolicy) (ValidatedGitRemot
 }
 
 // validateRemoteHost checks a remote host against private and internal ranges,
-// returning the validated address so callers can pin it.
-func validateRemoteHost(host string) (netip.Addr, error) {
+// returning the validated address so callers can pin it. ctx bounds the
+// lookup; lookup resolves hostnames, nil meaning net.DefaultResolver.
+func validateRemoteHost(ctx context.Context, host string, lookup lookupFunc) (netip.Addr, error) {
 	if host == "" {
 		return netip.Addr{}, fmt.Errorf("%w: missing hostname", ErrInvalidURL)
 	}
@@ -192,7 +200,7 @@ func validateRemoteHost(host string) (netip.Addr, error) {
 	// Telling "cannot resolve" apart from "private address" is kept on
 	// purpose: it is one bit of recon over an authenticated session, and it
 	// is what lets a user notice a typo in the hostname.
-	ips, err := lookupIPAddr(context.Background(), host)
+	ips, err := lookup.resolve(ctx, host)
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("%w: cannot resolve hostname", ErrInvalidURL)
 	}
@@ -208,6 +216,11 @@ func validateRemoteHost(host string) (netip.Addr, error) {
 		}
 	}
 
+	// Every answer was checked above, so pinning any one of them is safe.
+	// Only the first is pinned: libcurl accepts a list in CURLOPT_RESOLVE
+	// only from 7.59, and an older one drops an entry it cannot parse, which
+	// would leave git to resolve the name itself. Losing failover between
+	// records is the better trade than risking an unpinned fetch.
 	addr, ok := netip.AddrFromSlice(ips[0].IP)
 	if !ok {
 		return netip.Addr{}, fmt.Errorf("%w: unusable address for hostname", ErrInvalidURL)
