@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
+	"github.com/charmbracelet/soft-serve/pkg/db/dbtest"
 	"github.com/charmbracelet/soft-serve/pkg/db/migrate"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/google/uuid"
@@ -16,29 +18,41 @@ import (
 	"github.com/matryer/is"
 )
 
-// newWebhookTestDB opens a migrated SQLite database for one test.
+// newWebhookTestDB opens a migrated database for one test: Postgres when
+// SOFT_SERVE_DB_DRIVER is "postgres", SQLite otherwise.
 func newWebhookTestDB(t *testing.T) (context.Context, *db.DB) {
 	t.Helper()
 	is := is.New(t)
 	ctx := context.Background()
-	dp := t.TempDir()
-	cfg := config.DefaultConfig()
-	cfg.DataPath = dp
-	ctx = config.WithContext(ctx, cfg)
-	dbx, err := db.Open(ctx, "sqlite", dp+"/test.db?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	dbx, err := dbtest.Open(ctx, t)
 	is.NoErr(err)
-	t.Cleanup(func() { dbx.Close() }) //nolint:errcheck
+	cfg := config.DefaultConfig()
+	cfg.DataPath = t.TempDir()
+	cfg.DB.Driver = dbx.DriverName()
+	ctx = config.WithContext(ctx, cfg)
+	if isSqlite(dbx) {
+		// Enforce foreign keys, as the server's default data source does.
+		// One connection, so the pragma holds for every statement.
+		dbx.SetMaxOpenConns(1)
+		_, err = dbx.ExecContext(ctx, `PRAGMA foreign_keys = ON;`)
+		is.NoErr(err)
+	}
 	is.NoErr(migrate.Migrate(ctx, dbx))
 
 	// Foreign keys are enforced, so the webhook tables need real parents: one
 	// user and the repos 7 and 8 that the tests use.
-	_, err = dbx.ExecContext(ctx, `INSERT INTO users (id, username, admin, updated_at) VALUES (100, 'owner', 0, CURRENT_TIMESTAMP);`)
+	_, err = dbx.ExecContext(ctx, `INSERT INTO users (id, username, admin, updated_at) VALUES (100, 'owner', false, CURRENT_TIMESTAMP);`)
 	is.NoErr(err)
 	_, err = dbx.ExecContext(ctx, `INSERT INTO repos (id, name, project_name, description, private, mirror, hidden, user_id, updated_at)
-		VALUES (7, 'repo7', 'repo7', '', 0, 0, 0, 100, CURRENT_TIMESTAMP),
-		       (8, 'repo8', 'repo8', '', 0, 0, 0, 100, CURRENT_TIMESTAMP);`)
+		VALUES (7, 'repo7', 'repo7', '', false, false, false, 100, CURRENT_TIMESTAMP),
+		       (8, 'repo8', 'repo8', '', false, false, false, 100, CURRENT_TIMESTAMP);`)
 	is.NoErr(err)
 	return ctx, dbx
+}
+
+func isSqlite(dbx *db.DB) bool {
+	d := dbx.DriverName()
+	return d == "sqlite" || d == "sqlite3"
 }
 
 func TestWebhookStoreRoundTrip(t *testing.T) {
@@ -124,6 +138,15 @@ func TestWebhookStoreEvents(t *testing.T) {
 	// Filter by event: push (4) matches hook only; an event with no match
 	// returns nothing; an empty filter returns nothing and no error.
 	whs, err := s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, []int{4})
+	is.NoErr(err)
+	is.Equal(len(whs), 1)
+	is.Equal(whs[0].ID, hook)
+
+	// An inactive webhook subscribed to the same event is left out.
+	inactive, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.36/c", "", 0, false)
+	is.NoErr(err)
+	is.NoErr(s.CreateWebhookEvents(ctx, dbx, inactive, []int{4}))
+	whs, err = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, []int{4})
 	is.NoErr(err)
 	is.Equal(len(whs), 1)
 	is.Equal(whs[0].ID, hook)
@@ -227,6 +250,7 @@ func TestWebhookStoreErrorsOnClosedDB(t *testing.T) {
 	checks := map[string]error{}
 	_, checks["GetWebhookByID"] = s.GetWebhookByID(ctx, dbx, 7, id)
 	_, checks["GetWebhooksByRepoID"] = s.GetWebhooksByRepoID(ctx, dbx, 7)
+	_, checks["LockAndCountWebhooks"] = s.LockAndCountWebhooks(ctx, dbx, 7)
 	_, checks["GetWebhooksByRepoIDWhereEvent"] = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, []int{4})
 	_, checks["CreateWebhook"] = s.CreateWebhook(ctx, dbx, 7, "u", "", 0, true)
 	checks["UpdateWebhookByID"] = s.UpdateWebhookByID(ctx, dbx, 7, id, "u", "", 0, true)
@@ -243,6 +267,7 @@ func TestWebhookStoreErrorsOnClosedDB(t *testing.T) {
 	_, checks["ListWebhookDeliveriesByWebhookID"] = s.ListWebhookDeliveriesByWebhookID(ctx, dbx, id)
 	checks["CreateWebhookDelivery"] = s.CreateWebhookDelivery(ctx, dbx, uuid.New(), id, 4, "u", "POST", nil, "", "", 0, "", "")
 	checks["DeleteWebhookDeliveryByID"] = s.DeleteWebhookDeliveryByID(ctx, dbx, id, did)
+	checks["PruneWebhookDeliveries"] = s.PruneWebhookDeliveries(ctx, dbx, id, 1)
 
 	for name, err := range checks {
 		if err == nil {
@@ -261,9 +286,20 @@ func TestCreateWebhookDeliveryForeignKeyViolationIsSkipped(t *testing.T) {
 	s := &webhookStore{}
 	id, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 1, true)
 	is.NoErr(err)
-	_, err = dbx.ExecContext(ctx, `CREATE TRIGGER vanish BEFORE INSERT ON webhook_deliveries
-		BEGIN DELETE FROM webhooks WHERE id = NEW.webhook_id; END;`)
-	is.NoErr(err)
+	triggers := []string{`CREATE TRIGGER vanish BEFORE INSERT ON webhook_deliveries
+		BEGIN DELETE FROM webhooks WHERE id = NEW.webhook_id; END;`}
+	if !isSqlite(dbx) {
+		triggers = []string{
+			`CREATE FUNCTION vanish() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN DELETE FROM webhooks WHERE id = NEW.webhook_id; RETURN NEW; END $$;`,
+			`CREATE TRIGGER vanish BEFORE INSERT ON webhook_deliveries
+			FOR EACH ROW EXECUTE FUNCTION vanish();`,
+		}
+	}
+	for _, q := range triggers {
+		_, err = dbx.ExecContext(ctx, q)
+		is.NoErr(err)
+	}
 
 	is.NoErr(s.CreateWebhookDelivery(ctx, dbx, uuid.New(), id, 1, "https://93.184.216.34/a", "POST", nil, "", "{}", 200, "", ""))
 
@@ -281,7 +317,7 @@ func TestIsForeignKeyViolation(t *testing.T) {
 	is.True(!isForeignKeyViolation(errors.New("FOREIGN KEY constraint failed")))
 	is.True(!isForeignKeyViolation(nil))
 
-	// A real SQLite foreign key violation.
+	// A real foreign key violation from the driver under test.
 	ctx, dbx := newWebhookTestDB(t)
 	_, err := dbx.ExecContext(ctx, `INSERT INTO webhook_events (webhook_id, event) VALUES (424242, 1)`)
 	is.True(err != nil)
@@ -318,10 +354,172 @@ func TestWebhookListsAreOrderedByID(t *testing.T) {
 	}
 }
 
+// Deliveries recorded within the same second list in the order they were
+// inserted, oldest first. created_at has one-second resolution and IDs are
+// random UUIDs, so neither can order them.
+func TestWebhookStoreDeliveriesOrder(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+
+	hook, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 0, true)
+	is.NoErr(err)
+	other, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.35/b", "", 0, true)
+	is.NoErr(err)
+
+	insert := func(webhookID int64) uuid.UUID {
+		id := uuid.New()
+		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, id, webhookID, 1, "https://93.184.216.34/a", "POST", nil, "", "{}", 200, "", ""))
+		return id
+	}
+
+	var want []uuid.UUID
+	for range 20 {
+		want = append(want, insert(hook))
+		insert(other) // interleaved deliveries of another webhook
+	}
+	// Pin every row to the same second.
+	_, err = dbx.ExecContext(ctx, `UPDATE webhook_deliveries SET created_at = '2024-01-01 00:00:00';`)
+	is.NoErr(err)
+
+	check := func() {
+		t.Helper()
+		list, err := s.ListWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+		is.NoErr(err)
+		all, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+		is.NoErr(err)
+		for _, got := range [][]models.WebhookDelivery{list, all} {
+			ids := make([]uuid.UUID, len(got))
+			for i, d := range got {
+				ids[i] = d.ID
+			}
+			is.Equal(ids, want)
+		}
+	}
+	check()
+
+	// Deleting the newest delivery does not let a later one sort before
+	// older ones.
+	is.NoErr(s.DeleteWebhookDeliveryByID(ctx, dbx, hook, want[len(want)-1]))
+	want = want[:len(want)-1]
+	want = append(want, insert(hook))
+	check()
+
+	// The listing follows seq, not the physical row order: a row stored last
+	// with the lowest seq lists first.
+	first := uuid.New()
+	_, err = dbx.ExecContext(ctx, dbx.Rebind(`INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_headers, request_body, response_status, response_headers, response_body, seq)
+		VALUES (?, ?, 1, '', 'POST', '', '{}', 200, '', '', 0);`), first, hook)
+	is.NoErr(err)
+	want = append([]uuid.UUID{first}, want...)
+	check()
+}
+
+// Pruning keeps the most recently recorded deliveries of one webhook and
+// leaves the deliveries of other webhooks alone. Recording order is what
+// counts: created_at and the IDs are set to run the other way.
+func TestPruneWebhookDeliveriesKeepsNewest(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+	hook, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 1, true)
+	is.NoErr(err)
+	other, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.35/b", "", 1, true)
+	is.NoErr(err)
+
+	// Eight deliveries, recorded with descending IDs and created_at, and
+	// interleaved with deliveries of another webhook.
+	ids := make([]uuid.UUID, 8)
+	for i := range ids {
+		ids[i] = uuid.MustParse(fmt.Sprintf("%08d-0000-1000-8000-000000000000", 99-i))
+		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, ids[i], hook, 1, "u", "POST", nil, "", "{}", 200, "", ""))
+		_, err := dbx.ExecContext(ctx, dbx.Rebind(`UPDATE webhook_deliveries SET created_at = ? WHERE id = ?;`),
+			fmt.Sprintf("2024-01-01 00:00:%02d", 59-i), ids[i])
+		is.NoErr(err)
+		if i < 3 {
+			is.NoErr(s.CreateWebhookDelivery(ctx, dbx, uuid.New(), other, 1, "u", "POST", nil, "", "{}", 200, "", ""))
+		}
+	}
+
+	keptIDs := func() []uuid.UUID {
+		t.Helper()
+		all, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+		is.NoErr(err)
+		out := []uuid.UUID{}
+		for _, d := range all {
+			out = append(out, d.ID)
+		}
+		return out
+	}
+
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 5))
+	is.Equal(keptIDs(), ids[3:]) // the three recorded first are gone
+
+	others, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, other)
+	is.NoErr(err)
+	is.Equal(len(others), 3)
+
+	// Exactly as many deliveries as the limit, or fewer: nothing is deleted.
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 5))
+	is.Equal(keptIDs(), ids[3:])
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 100))
+	is.Equal(keptIDs(), ids[3:])
+
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 0))
+	is.Equal(keptIDs(), []uuid.UUID{})
+	others, err = s.GetWebhookDeliveriesByWebhookID(ctx, dbx, other)
+	is.NoErr(err)
+	is.Equal(len(others), 3)
+}
+
+// The prune runs on every recorded delivery, so it must not scan the
+// deliveries table. On SQLite both its lookups use the (webhook_id, seq)
+// index. Postgres picks its plan from table statistics, which a small test
+// table does not represent, so its plan is not asserted.
+func TestPruneWebhookDeliveriesUsesIndex(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	if !isSqlite(dbx) {
+		t.Skip("checks an SQLite query plan")
+	}
+	var plan []struct {
+		ID      int    `db:"id"`
+		Parent  int    `db:"parent"`
+		NotUsed int    `db:"notused"`
+		Detail  string `db:"detail"`
+	}
+	is.NoErr(dbx.SelectContext(ctx, &plan, "EXPLAIN QUERY PLAN "+pruneWebhookDeliveriesQuery, 1, 1, 100))
+	is.True(len(plan) > 0)
+	for _, p := range plan {
+		t.Log(p.Detail)
+		is.True(!strings.HasPrefix(p.Detail, "SCAN"))       // no full scan
+		is.True(!strings.Contains(p.Detail, "TEMP B-TREE")) // no sort
+	}
+}
+
 func idsOf(whs []models.Webhook) []int64 {
 	out := make([]int64, len(whs))
 	for i, w := range whs {
 		out[i] = w.ID
 	}
 	return out
+}
+
+// LockAndCountWebhooks counts only the given repository's webhooks.
+func TestLockAndCountWebhooks(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+	n, err := s.LockAndCountWebhooks(ctx, dbx, 7)
+	is.NoErr(err)
+	is.Equal(n, 0)
+	for i := range 3 {
+		_, err := s.CreateWebhook(ctx, dbx, 7, fmt.Sprintf("https://93.184.216.34/%d", i), "", 1, true)
+		is.NoErr(err)
+	}
+	_, err = s.CreateWebhook(ctx, dbx, 8, "https://93.184.216.35/x", "", 1, true)
+	is.NoErr(err)
+	n, err = s.LockAndCountWebhooks(ctx, dbx, 7)
+	is.NoErr(err)
+	is.Equal(n, 3)
 }

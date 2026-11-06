@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/utils"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -48,11 +49,19 @@ func parseUsernamePassword(ctx context.Context, username, password string) (prot
 			return user, nil
 		}
 
-		logger.Error("invalid password or token", "username", username, "err", err)
+		// Clients that follow the GitHub convention send the access token
+		// as the username, so the username is logged only when it is a
+		// valid one: tokens ("ss_...") and JWTs never are. The client
+		// address is already on the request logger.
+		if utils.ValidateUsername(username) == nil {
+			logger = logger.With("username", username)
+		}
+		logger.Error("invalid password or token", "err", err)
 		return nil, ErrInvalidPassword
 	} else if username != "" {
 		// Try to authenticate using access token as the username
-		logger.Debug("trying to authenticate using access token as username", "username", username)
+		// The username is the access token here, so it is not logged.
+		logger.Debug("trying to authenticate using access token as username")
 		user, err := be.UserByAccessToken(ctx, username)
 		if err == nil {
 			return user, nil
@@ -79,14 +88,22 @@ func parseAuthHdr(r *http.Request, repo string) (proto.User, error) {
 	logger := log.FromContext(ctx).WithPrefix("http.auth")
 	be := backend.FromContext(ctx)
 
-	logger.Debug("authorization auth header", "header", header)
-
 	parts := strings.SplitN(header, " ", 2)
 	if len(parts) != 2 {
 		return nil, errors.New("invalid authorization header")
 	}
 
-	switch strings.ToLower(parts[0]) {
+	// Log only a known scheme: the rest of the header is a credential, and
+	// in a malformed header the first word can be one too.
+	scheme := strings.ToLower(parts[0])
+	logged := "other"
+	switch scheme {
+	case "token", "bearer", "basic":
+		logged = scheme
+	}
+	logger.Debug("authorization auth header", "scheme", logged)
+
+	switch scheme {
 	case "token":
 		user, err := be.UserByAccessToken(ctx, parts[1])
 		if err != nil {
