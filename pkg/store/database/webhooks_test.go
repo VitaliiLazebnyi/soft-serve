@@ -415,6 +415,37 @@ func TestWebhookStoreDeliveriesOrder(t *testing.T) {
 	check()
 }
 
+// The delivery listings are bounded: past maxListedWebhookDeliveries rows,
+// as when pruning has fallen behind, they return the most recent ones,
+// oldest first, and leave the older ones out.
+func TestWebhookDeliveryListingsAreLimited(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+	hook, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 1, true)
+	is.NoErr(err)
+
+	var ids []uuid.UUID
+	for range maxListedWebhookDeliveries + 5 {
+		id := uuid.New()
+		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, id, hook, 1, "u", "POST", nil, "", "{}", 200, "", ""))
+		ids = append(ids, id)
+	}
+	want := ids[5:]
+
+	list, err := s.ListWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+	is.NoErr(err)
+	all, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+	is.NoErr(err)
+	for _, got := range [][]models.WebhookDelivery{list, all} {
+		gotIDs := make([]uuid.UUID, len(got))
+		for i, d := range got {
+			gotIDs[i] = d.ID
+		}
+		is.Equal(gotIDs, want)
+	}
+}
+
 // Pruning keeps the most recently recorded deliveries of one webhook and
 // leaves the deliveries of other webhooks alone. Recording order is what
 // counts: created_at and the IDs are set to run the other way.

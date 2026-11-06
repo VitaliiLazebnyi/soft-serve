@@ -480,3 +480,48 @@ func TestShutdownRightAfterStart(t *testing.T) {
 		}
 	}
 }
+
+// A server that fails while serving makes Start return its error at once.
+// Start used to hold the error until every other server had stopped too, so
+// the process kept running with only some of its servers up.
+func TestStartReturnsWhenAServerFails(t *testing.T) {
+	addrs := []string{loopbackAddr(), loopbackAddr(), loopbackAddr(), loopbackAddr()}
+	s := newStartTestServer(t, addrs[0], addrs[1], addrs[2], addrs[3])
+	errc := startAsync(s)
+
+	var httpL *serveListener
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		s.mu.Lock()
+		if s.listeners != nil {
+			httpL = s.listeners[2] // SSH, Git, HTTP, Stats
+		}
+		s.mu.Unlock()
+		if httpL != nil {
+			break
+		}
+		select {
+		case err := <-errc:
+			t.Fatalf("Start returned %v before binding its listeners", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Start did not bind its listeners")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case <-httpL.serving:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the HTTP server did not start serving")
+	}
+
+	// Close the HTTP server's listener behind its back, so that its Serve
+	// fails while the other servers keep running.
+	_ = httpL.Listener.Close()
+
+	err := waitStart(t, errc, "although the HTTP server failed")
+	if err == nil || !strings.Contains(err.Error(), "HTTP server") {
+		t.Fatalf("Start returned %v, want the HTTP server's error", err)
+	}
+}

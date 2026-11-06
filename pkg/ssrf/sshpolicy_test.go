@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 )
 
 // mustAllowedHosts parses entries or fails the test.
@@ -248,5 +249,71 @@ func TestSplitHostPort(t *testing.T) {
 		if host != tt.host || port != tt.port {
 			t.Errorf("splitHostPort(%q) = %q, %q; want %q, %q", tt.in, host, port, tt.host, tt.port)
 		}
+	}
+}
+
+// TestLookupsAreBounded checks that every validation entry point bounds its
+// hostname lookups even when the caller's context has no deadline, so a slow
+// resolver cannot stall an import, a mirror sync, or a webhook save.
+func TestLookupsAreBounded(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		validate func(lookupFunc) error
+	}{
+		{"ValidateURL", func(l lookupFunc) error {
+			return validateURL("https://hooks.example/x", l)
+		}},
+		{"ValidateGitRemote https", func(l lookupFunc) error {
+			_, err := ValidateGitRemote("https://git.example/x.git", GitRemotePolicy{lookup: l})
+			return err
+		}},
+		{"ValidateGitRemote git", func(l lookupFunc) error {
+			_, err := ValidateGitRemote("git://git.example/x.git", GitRemotePolicy{lookup: l})
+			return err
+		}},
+		{"ValidateGitRemote ssh allowlist", func(l lookupFunc) error {
+			_, err := ValidateGitRemote("ssh://git@git.example/x.git", GitRemotePolicy{
+				AllowedSSHHosts: mustAllowedHosts(t, "10.0.0.0/8"), lookup: l,
+			})
+			return err
+		}},
+		{"AllowedHosts.Match", func(l lookupFunc) error {
+			return mustAllowedHosts(t, "10.0.0.0/8").match(context.Background(), "git.example", "", l)
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var (
+				called   bool
+				deadline time.Time
+				bounded  bool
+			)
+			// A resolver that never answers: it gives up only when the
+			// context does. Rather than wait, report the deadline it got.
+			stalled := func(ctx context.Context, _ string) ([]net.IPAddr, error) {
+				called = true
+				deadline, bounded = ctx.Deadline()
+				return nil, context.DeadlineExceeded
+			}
+
+			if err := tt.validate(stalled); err == nil {
+				t.Fatal("validation passed with a resolver that never answers")
+			}
+			if !called {
+				t.Fatal("resolver was not consulted")
+			}
+			if !bounded {
+				t.Fatal("hostname lookup has no deadline, so a stalled resolver blocks forever")
+			}
+			// The lookup began before now, so its deadline is no later.
+			if limit := time.Now().Add(lookupTimeout); deadline.After(limit) {
+				t.Errorf("lookup deadline %v is later than %v", deadline, limit)
+			}
+		})
 	}
 }

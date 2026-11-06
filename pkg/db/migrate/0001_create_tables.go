@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/access"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -138,7 +139,24 @@ var createTables = Migration{
 			return err
 		}
 
-		for _, k := range cfg.AdminKeys() {
+		// Seed the keys to the admin named "admin", not to whatever account
+		// has id 1: with imported legacy users that may be anyone. When there
+		// is no such admin, the keys are left out (with a warning) and stay
+		// admin keys through the config.
+		adminKeys := cfg.AdminKeys()
+		var adminID int64
+		if len(adminKeys) > 0 {
+			var ok bool
+			var err error
+			adminID, ok, err = adminUserID(ctx, tx, log.FromContext(ctx).WithPrefix("migrate"))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				adminKeys = nil
+			}
+		}
+		for _, k := range adminKeys {
 			query := insert + "INTO public_keys (user_id, public_key, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)"
 			if tx.DriverName() == "postgres" {
 				query += " ON CONFLICT DO NOTHING"
@@ -146,7 +164,7 @@ var createTables = Migration{
 
 			query = tx.Rebind(query)
 			ak := sshutils.MarshalAuthorizedKey(k)
-			if _, err := tx.ExecContext(ctx, query, 1, ak); err != nil {
+			if _, err := tx.ExecContext(ctx, query, adminID, ak); err != nil {
 				if errors.Is(db.WrapError(err), db.ErrDuplicateKey) {
 					continue
 				}

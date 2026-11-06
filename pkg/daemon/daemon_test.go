@@ -44,7 +44,7 @@ func TestMain(m *testing.M) {
 	cfg.Git.MaxConnections = 10
 	cfg.Git.MaxTimeout = 100
 	cfg.Git.IdleTimeout = 1
-	cfg.Git.ListenAddr = fmt.Sprintf(":%d", test.RandomPort())
+	cfg.Git.ListenAddr = fmt.Sprintf("127.0.0.1:%d", test.RandomPort()) // RandomPort checks only loopback
 	if err := cfg.Validate(); err != nil {
 		log.Fatal(err)
 	}
@@ -197,5 +197,18 @@ func TestServeRacingShutdown(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("run %d: Serve did not return after Shutdown", i)
 		}
+	}
+}
+
+// TestListensOnLoopback checks that the test daemon binds only loopback.
+// RandomPort checks that a port is free on loopback alone, so a daemon bound
+// to every interface could collide with a listener on another one.
+func TestListensOnLoopback(t *testing.T) {
+	host, _, err := net.SplitHostPort(testDaemon.addr)
+	if err != nil {
+		t.Fatalf("invalid daemon address %q: %v", testDaemon.addr, err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		t.Fatalf("daemon listens on %q, want a loopback address", testDaemon.addr)
 	}
 }

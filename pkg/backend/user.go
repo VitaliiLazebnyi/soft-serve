@@ -41,6 +41,12 @@ func (d *Backend) adminKeyList() []ssh.PublicKey {
 	return d.adminKeys
 }
 
+// IsAdminKey reports whether pk is one of the configured admin keys
+// (initial_admin_keys). It uses the cached key list; see adminKeyList.
+func (d *Backend) IsAdminKey(pk ssh.PublicKey) bool {
+	return d.isAdminKey(pk)
+}
+
 // isAdminKey reports whether pk is one of the configured admin keys.
 func (d *Backend) isAdminKey(pk ssh.PublicKey) bool {
 	if pk == nil {
@@ -367,6 +373,10 @@ func (d *Backend) UserByAccessToken(ctx context.Context, token string) (proto.Us
 		err = db.WrapError(err)
 		if errors.Is(err, db.ErrRecordNotFound) {
 			return nil, proto.ErrUserNotFound
+		}
+		// An expired token is a failed login, not a server error.
+		if errors.Is(err, proto.ErrTokenExpired) {
+			return nil, err
 		}
 		d.logger.Error("failed to find user by access token", "err", err)
 		return nil, err
