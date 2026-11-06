@@ -63,10 +63,14 @@ git -C repo1 push origin HEAD
 git -C repo1 push origin HEAD --tags
 
 # clone repo with ssh lfs-transfer
-git clone ssh://localhost:$SSH_PORT/repo1 repo1c
+# System and global git config are not read in tests, so the LFS filter is
+# configured on the clone itself; without it checkout leaves pointer files
+# and nothing is downloaded over lfs-transfer.
+git clone -c filter.lfs.process='git-lfs filter-process' -c filter.lfs.required=true ssh://localhost:$SSH_PORT/repo1 repo1c
 exists repo1c/README.md
-exists repo1c/foo.png
-exists repo1c/bar.png
+grep '^foo$' repo1c/foo.png
+grep '^bar$' repo1c/bar.png
+exists repo1c/.git/lfs/objects
 
 # stop the server
 [windows] stopserver
