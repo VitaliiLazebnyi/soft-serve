@@ -31,10 +31,12 @@ var stallTimeout = ssrf.ClientTimeout
 // client, so they all draw from one connection pool instead of each keeping
 // its own idle connections. Its transfer timeouts are set once here, as
 // setTransferTimeouts wraps the shared transport's dialer.
-var secureHTTPClient = newSecureHTTPClient()
+var secureHTTPClient = newTransferClient(ssrf.NewSecureClient())
 
-func newSecureHTTPClient() *http.Client {
-	client := ssrf.NewSecureClient()
+// newTransferClient sets up client for LFS transfers and returns it. Tests
+// pass a client that may reach loopback, so the stall tests run through the
+// same setup as secureHTTPClient.
+func newTransferClient(client *http.Client) *http.Client {
 	setTransferTimeouts(client)
 	return client
 }
@@ -55,18 +57,22 @@ func newHTTPClient(endpoint Endpoint) *httpClient {
 // covers reading the response body and so cuts off any object that takes
 // longer than it to transfer, with an idle timeout on each connection: a
 // transfer may take as long as it needs while data keeps moving, and a stalled
-// one still fails.
+// one still fails. It panics if the client's transport is not an
+// *http.Transport with a DialContext, since it could not add the stall limit
+// and transfers would then have no bound at all.
 func setTransferTimeouts(client *http.Client) {
+	t, ok := client.Transport.(*http.Transport)
+	if !ok || t.DialContext == nil {
+		panic(fmt.Sprintf("lfs: cannot add a stall timeout to transport %T", client.Transport))
+	}
 	client.Timeout = 0
-	if t, ok := client.Transport.(*http.Transport); ok {
-		dial := t.DialContext
-		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			conn, err := dial(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			return &stallTimeoutConn{Conn: conn, timeout: stallTimeout}, nil
+	dial := t.DialContext
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dial(ctx, network, addr)
+		if err != nil {
+			return nil, err
 		}
+		return &stallTimeoutConn{Conn: conn, timeout: stallTimeout}, nil
 	}
 }
 

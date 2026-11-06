@@ -2,12 +2,14 @@ package lfs
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,9 +23,9 @@ const (
 )
 
 // newLoopbackAdapter returns a basic transfer adapter whose client is set up
-// like the shared secureHTTPClient, with the same whole-request timeout as
-// ssrf.NewSecureClient, but whose transport may reach the loopback test
-// server, which the SSRF-safe dialer would refuse.
+// by newTransferClient like the shared secureHTTPClient, starting from the
+// same whole-request timeout as ssrf.NewSecureClient, but whose transport may
+// reach the loopback test server, which the SSRF-safe dialer would refuse.
 func newLoopbackAdapter(t *testing.T) *BasicTransferAdapter {
 	t.Helper()
 	old := stallTimeout
@@ -32,8 +34,7 @@ func newLoopbackAdapter(t *testing.T) *BasicTransferAdapter {
 
 	tr := &http.Transport{DialContext: (&net.Dialer{}).DialContext}
 	t.Cleanup(tr.CloseIdleConnections)
-	client := &http.Client{Timeout: ssrf.ClientTimeout, Transport: tr}
-	setTransferTimeouts(client)
+	client := newTransferClient(&http.Client{Timeout: ssrf.ClientTimeout, Transport: tr})
 	return &BasicTransferAdapter{client}
 }
 
@@ -145,9 +146,21 @@ func TestHTTPClientStalledTransferFails(t *testing.T) {
 // TestNewHTTPClientSharesTransport checks that LFS clients share one HTTP
 // client, and so one connection pool, instead of each building its own
 // transport with its own idle connections.
+// The clients are built from two goroutines, as concurrent mirror jobs do, so
+// that -race catches newHTTPClient changing the shared client.
 func TestNewHTTPClientSharesTransport(t *testing.T) {
-	a := newHTTPClient(&url.URL{Scheme: "https", Host: "a.example.com"})
-	b := newHTTPClient(&url.URL{Scheme: "https", Host: "b.example.com"})
+	var a, b *httpClient
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		a = newHTTPClient(&url.URL{Scheme: "https", Host: "a.example.com"})
+	}()
+	go func() {
+		defer wg.Done()
+		b = newHTTPClient(&url.URL{Scheme: "https", Host: "b.example.com"})
+	}()
+	wg.Wait()
 
 	if a.client != b.client {
 		t.Fatal("LFS clients use separate HTTP clients; want one shared client")
@@ -161,5 +174,36 @@ func TestNewHTTPClientSharesTransport(t *testing.T) {
 	}
 	if basic.client != a.client {
 		t.Fatal("basic transfer adapter does not use the shared HTTP client")
+	}
+}
+
+// setTransferTimeouts must refuse a transport it cannot add the stall limit
+// to, rather than leave transfers with no bound at all.
+func TestSetTransferTimeoutsPanicsOnUnknownTransport(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("setTransferTimeouts accepted a transport it cannot wrap")
+		}
+	}()
+	setTransferTimeouts(&http.Client{Transport: http.NewFileTransport(http.Dir("."))})
+}
+
+// The shared client must still be the SSRF-protected one: it refuses to
+// connect to loopback and does not follow redirects.
+func TestSecureHTTPClientIsSSRFProtected(t *testing.T) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1:1/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := secureHTTPClient.Do(req)
+	if err == nil {
+		res.Body.Close() //nolint:errcheck,gosec
+	}
+	if !errors.Is(err, ssrf.ErrPrivateIP) {
+		t.Fatalf("request to loopback: err = %v, want %v", err, ssrf.ErrPrivateIP)
+	}
+
+	if cr := secureHTTPClient.CheckRedirect; cr == nil || !errors.Is(cr(req, []*http.Request{req}), http.ErrUseLastResponse) {
+		t.Fatal("shared client follows redirects; want it to return the redirect response")
 	}
 }
