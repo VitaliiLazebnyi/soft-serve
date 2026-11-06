@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,25 +38,30 @@ func newPostgresWebhookEnv(t *testing.T) whEnv {
 	}
 	admin, err := db.Open(ctx, "postgres", dsn)
 	is.NoErr(err)
+	t.Cleanup(func() { admin.Close() })                    //nolint:errcheck
 	name := fmt.Sprintf("softserve_test_%d", rand.Int64()) //nolint:gosec
 	_, err = admin.ExecContext(ctx, "CREATE DATABASE "+name)
 	is.NoErr(err)
-	u, err := url.Parse(dsn)
-	is.NoErr(err)
-	u.Path = "/" + name
+	t.Cleanup(func() { admin.ExecContext(context.Background(), "DROP DATABASE "+name) }) //nolint:errcheck
+
+	// The data source is a URL or a key=value string, as in
+	// pkg/db/internal/test, which this package cannot import.
+	testDSN := strings.TrimSpace(dsn) + " dbname=" + name
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		is.NoErr(err)
+		u.Path = "/" + name
+		testDSN = u.String()
+	}
 
 	cfg := config.DefaultConfig()
 	cfg.DataPath = t.TempDir()
 	cfg.DB.Driver = "postgres"
-	cfg.DB.DataSource = u.String()
+	cfg.DB.DataSource = testDSN
 	ctx = config.WithContext(ctx, cfg)
 	dbx, err := db.Open(ctx, cfg.DB.Driver, cfg.DB.DataSource)
 	is.NoErr(err)
-	t.Cleanup(func() {
-		dbx.Close()                                                    //nolint:errcheck
-		admin.ExecContext(context.Background(), "DROP DATABASE "+name) //nolint:errcheck
-		admin.Close()                                                  //nolint:errcheck
-	})
+	t.Cleanup(func() { dbx.Close() }) //nolint:errcheck
 
 	is.NoErr(migrate.Migrate(ctx, dbx))
 	dbstore := database.New(ctx, dbx)
