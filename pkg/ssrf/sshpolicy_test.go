@@ -22,7 +22,11 @@ func mustAllowedHosts(t *testing.T, entries ...string) AllowedHosts {
 func fakeResolver(t *testing.T, table map[string][]string) {
 	t.Helper()
 	orig := lookupIPAddr
-	lookupIPAddr = func(_ context.Context, host string) ([]net.IPAddr, error) {
+	lookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		// Like the real resolver, fail once the context is done.
+		if err := ctx.Err(); err != nil {
+			return nil, &net.DNSError{Err: err.Error(), Name: host}
+		}
 		ips, ok := table[host]
 		if !ok {
 			return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}

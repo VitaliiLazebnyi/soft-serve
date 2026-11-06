@@ -3,18 +3,27 @@ package ssrf
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
+// slack absorbs the time between a test noting its start and secureDial
+// setting its deadline, so deadline checks stay stable on a loaded machine.
+const slack = time.Second
+
 // fakeDialer records every address the secure client dials and connects
 // only to the addresses in up, so failover runs without a network.
 type fakeDialer struct {
 	mu        sync.Mutex
 	up        map[string]bool
+	route     map[string]string // address -> real listener to connect to
 	dialed    []string
 	deadlines []time.Time
 }
@@ -32,6 +41,9 @@ func newFakeDialer(t *testing.T, up ...string) *fakeDialer {
 		f.dialed = append(f.dialed, addr)
 		d, _ := ctx.Deadline()
 		f.deadlines = append(f.deadlines, d)
+		if real, ok := f.route[addr]; ok {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", real)
+		}
 		if !f.up[addr] {
 			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused: " + addr)}
 		}
@@ -91,7 +103,7 @@ func TestSecureDialFailsOverToNextAddress(t *testing.T) {
 }
 
 // TestSecureDialAllAddressesFail checks that every address is tried and the
-// error names each failure.
+// error reports the count and the first failure only.
 func TestSecureDialAllAddressesFail(t *testing.T) {
 	fakeResolver(t, map[string][]string{
 		"down.example": {"140.82.112.3", "140.82.112.4"},
@@ -105,14 +117,50 @@ func TestSecureDialAllAddressesFail(t *testing.T) {
 	if len(f.dialed) != 2 {
 		t.Errorf("dialed %v, want both addresses", f.dialed)
 	}
-	for _, addr := range []string{"140.82.112.3:443", "140.82.112.4:443", "all 2 addresses failed"} {
-		if !strings.Contains(err.Error(), addr) {
-			t.Errorf("error %q does not mention %q", err, addr)
-		}
+	if want := "2 addresses failed; first:"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not mention %q", err, want)
+	}
+	if !strings.Contains(err.Error(), "140.82.112.3:443") || strings.Contains(err.Error(), "140.82.112.4") {
+		t.Errorf("error %q should name only the first failure", err)
 	}
 	var opErr *net.OpError
 	if !errors.As(err, &opErr) {
-		t.Errorf("error %v does not wrap the dial errors", err)
+		t.Errorf("error %v does not wrap the dial error", err)
+	}
+}
+
+// TestSecureDialCapsAddresses checks that a long answer list is validated in
+// full but only maxDialAddrs addresses are dialed, and that the error stays
+// short.
+func TestSecureDialCapsAddresses(t *testing.T) {
+	var many []string
+	for i := 1; i <= 200; i++ {
+		many = append(many, fmt.Sprintf("140.82.%d.%d", i/250, i%250))
+	}
+	fakeResolver(t, map[string][]string{
+		"many.example":    many,
+		"manybad.example": append(slices.Clone(many), "10.0.0.1"),
+	})
+	f := newFakeDialer(t)
+
+	_, err := secureDial(context.Background(), "tcp", "many.example:443")
+	if len(f.dialed) != maxDialAddrs {
+		t.Errorf("dialed %d addresses, want %d", len(f.dialed), maxDialAddrs)
+	}
+	if want := fmt.Sprintf("%d addresses failed, %d more not tried", maxDialAddrs, len(many)-maxDialAddrs); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %v, want it to mention %q", err, want)
+	}
+	if err != nil && len(err.Error()) > 300 {
+		t.Errorf("error is %d bytes, want it bounded", len(err.Error()))
+	}
+
+	// The private answer past the cap still refuses the host.
+	f.dialed = nil
+	if _, err := secureDial(context.Background(), "tcp", "manybad.example:443"); !errors.Is(err, ErrPrivateIP) {
+		t.Errorf("error = %v, want ErrPrivateIP", err)
+	}
+	if len(f.dialed) != 0 {
+		t.Errorf("dialed %v for a refused host", f.dialed)
 	}
 }
 
@@ -146,42 +194,54 @@ func TestSecureDialAddressFamily(t *testing.T) {
 	}
 }
 
-// TestSecureDialDeadlines checks that attempts share the caller's deadline
-// rather than each getting a full timeout, and that a dial without a
-// deadline is still bounded.
+// TestSecureDialDeadlines checks that attempts share one fixed budget rather
+// than each getting a full timeout, that a shorter caller deadline still
+// applies, and that cancellation is reported as such.
 func TestSecureDialDeadlines(t *testing.T) {
 	fakeResolver(t, map[string][]string{
 		"down.example": {"140.82.112.1", "140.82.112.2", "140.82.112.3", "140.82.112.4"},
-	})
-
-	t.Run("caller deadline", func(t *testing.T) {
-		f := newFakeDialer(t)
-		parent := time.Now().Add(20 * time.Second)
-		ctx, cancel := context.WithDeadline(context.Background(), parent)
-		defer cancel()
-
-		_, _ = secureDial(ctx, "tcp", "down.example:443")
-		if len(f.deadlines) != 4 {
-			t.Fatalf("made %d attempts, want 4", len(f.deadlines))
-		}
-		for i, d := range f.deadlines {
-			if d.IsZero() || d.After(parent) {
-				t.Errorf("attempt %d deadline %v, want set and not after %v", i, d, parent)
-			}
-		}
-		// Four attempts out of 20s: the first gets a share, not all of it.
-		if first := time.Until(f.deadlines[0]); first > 6*time.Second {
-			t.Errorf("first attempt given %v of 20s across 4 addresses", first)
-		}
 	})
 
 	t.Run("no caller deadline", func(t *testing.T) {
 		f := newFakeDialer(t)
 		start := time.Now()
 		_, _ = secureDial(context.Background(), "tcp", "down.example:443")
+		if len(f.deadlines) != 4 {
+			t.Fatalf("made %d attempts, want 4", len(f.deadlines))
+		}
 		for i, d := range f.deadlines {
-			if d.IsZero() || d.Sub(start) > dialTimeout+time.Second {
+			if d.IsZero() || d.Sub(start) > dialTimeout+slack {
 				t.Errorf("attempt %d deadline %v, want within %v of start", i, d, dialTimeout)
+			}
+		}
+		// Four attempts out of 10s: the first gets a share, not all of it.
+		if first := f.deadlines[0].Sub(start); first > dialTimeout/4+time.Second {
+			t.Errorf("first attempt given %v of %v across 4 addresses", first, dialTimeout)
+		}
+	})
+
+	t.Run("longer caller deadline", func(t *testing.T) {
+		f := newFakeDialer(t)
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		_, _ = secureDial(ctx, "tcp", "down.example:443")
+		for i, d := range f.deadlines {
+			if d.Sub(start) > dialTimeout+slack {
+				t.Errorf("attempt %d deadline %v past the %v budget", i, d.Sub(start), dialTimeout)
+			}
+		}
+	})
+
+	t.Run("shorter caller deadline", func(t *testing.T) {
+		f := newFakeDialer(t)
+		parent := time.Now().Add(3 * time.Second)
+		ctx, cancel := context.WithDeadline(context.Background(), parent)
+		defer cancel()
+		_, _ = secureDial(ctx, "tcp", "down.example:443")
+		for i, d := range f.deadlines {
+			if d.IsZero() || d.After(parent) {
+				t.Errorf("attempt %d deadline %v, want set and not after %v", i, d, parent)
 			}
 		}
 	})
@@ -198,6 +258,86 @@ func TestSecureDialDeadlines(t *testing.T) {
 			t.Errorf("dialed %v after cancellation", f.dialed)
 		}
 	})
+
+	t.Run("resolution is bounded", func(t *testing.T) {
+		var lookupDeadline time.Time
+		orig := lookupIPAddr
+		lookupIPAddr = func(ctx context.Context, _ string) ([]net.IPAddr, error) {
+			lookupDeadline, _ = ctx.Deadline()
+			return []net.IPAddr{{IP: net.ParseIP("140.82.112.1")}}, nil
+		}
+		t.Cleanup(func() { lookupIPAddr = orig })
+		newFakeDialer(t)
+		start := time.Now()
+		_, _ = secureDial(context.Background(), "tcp", "slow.example:443")
+		if lookupDeadline.IsZero() || lookupDeadline.Sub(start) > dialTimeout+slack {
+			t.Errorf("lookup deadline %v, want within %v of start", lookupDeadline, dialTimeout)
+		}
+	})
+}
+
+// TestSecureClientFailover drives secureDial through NewSecureClient, the
+// way webhooks use it: the first address refuses, the second serves.
+func TestSecureClientFailover(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	fakeResolver(t, map[string][]string{
+		"multi.example": {"140.82.112.3", "140.82.112.4"},
+	})
+	f := newFakeDialer(t)
+	f.route = map[string]string{"140.82.112.4:80": srv.Listener.Addr().String()}
+
+	resp, err := NewSecureClient().Get("http://multi.example/hook")
+	if err != nil {
+		t.Fatalf("Get() error = %v, want failover to the second address", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if want := "140.82.112.3:80 140.82.112.4:80"; strings.Join(f.dialed, " ") != want {
+		t.Errorf("dialed %v, want %s", f.dialed, want)
+	}
+}
+
+// TestSecureClientDialBudget checks the budget as the real client sees it:
+// net/http does not pass the request deadline to the dial, so attempts fit
+// in dialTimeout whatever the request allows, and the address cap holds.
+func TestSecureClientDialBudget(t *testing.T) {
+	fakeResolver(t, map[string][]string{
+		"down.example": {
+			"140.82.112.1", "140.82.112.2", "140.82.112.3", "140.82.112.4",
+			"140.82.112.5", "140.82.112.6", "140.82.112.7", "140.82.112.8",
+		},
+	})
+	f := newFakeDialer(t)
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://down.example/hook", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := NewSecureClient().Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("Do() succeeded with every address down")
+	}
+	if len(f.dialed) != maxDialAddrs {
+		t.Errorf("dialed %d addresses, want %d", len(f.dialed), maxDialAddrs)
+	}
+	for i, d := range f.deadlines {
+		if d.IsZero() || d.Sub(start) > dialTimeout+slack {
+			t.Errorf("attempt %d deadline %v after start, want within %v", i, d.Sub(start), dialTimeout)
+		}
+	}
+	if !strings.Contains(err.Error(), "4 more not tried") {
+		t.Errorf("error %q does not report the skipped addresses", err)
+	}
 }
 
 // TestSecureDialResolverErrorsHidden checks that DNS failures do not reach

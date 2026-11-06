@@ -26,13 +26,23 @@ var (
 // including reading the response body.
 const ClientTimeout = 30 * time.Second
 
-// dialTimeout caps a dial made by the secure client when the caller's context
-// has no deadline of its own, and caps any single attempt when it does.
+// dialTimeout bounds one dial made by the secure client, from DNS resolution
+// through the last connection attempt. It is a fixed budget: net/http dials
+// with a context detached from the request (context.WithoutCancel), so the
+// request deadline and ClientTimeout never reach secureDial. A shorter
+// deadline already on the dial context still applies.
 const dialTimeout = 10 * time.Second
 
-// minDialAttempt is the least time an attempt is given when the overall
-// deadline is split between several addresses, so a long answer list cannot
-// shrink every attempt to nothing. It mirrors the standard library's choice.
+// maxDialAddrs caps how many of a name's validated addresses one dial tries.
+// Every answer is still validated; the cap only stops a name with a long
+// answer list from turning one request into many outbound connection
+// attempts to addresses its owner picked. Four matches common client
+// practice and leaves each attempt a useful share of dialTimeout.
+const maxDialAddrs = 4
+
+// minDialAttempt is the least time an attempt is given when the budget is
+// split between several addresses, so later attempts are not squeezed to
+// nothing. It mirrors the standard library's choice.
 const minDialAttempt = 2 * time.Second
 
 // dialContext dials a single, already validated address. Tests replace it so
@@ -60,7 +70,8 @@ func NewSecureClient() *http.Client {
 }
 
 // secureDial resolves addr's host once, validates every address it resolves
-// to, and dials the validated addresses in order until one connects.
+// to, and dials up to maxDialAddrs of them in resolver order until one
+// connects, all within dialTimeout.
 //
 // A host is refused outright if any of its addresses is private or internal,
 // even when others are public. A name that answers with a mix is a DNS
@@ -77,20 +88,23 @@ func secureDial(ctx context.Context, network, addr string) (net.Conn, error) {
 		return nil, err //nolint:wrapcheck
 	}
 
+	// Bound the whole dial, resolution included, so neither a slow resolver
+	// nor a long answer list can stretch it past dialTimeout.
+	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+
 	ips, err := resolveDialTargets(ctx, network, host)
 	if err != nil {
 		return nil, err
 	}
-
-	// Bound the whole sequence, not each attempt, so a long answer list
-	// cannot multiply the time a dial may take.
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, dialTimeout)
-		defer cancel()
+	skipped := 0
+	if len(ips) > maxDialAddrs {
+		skipped = len(ips) - maxDialAddrs
+		ips = ips[:maxDialAddrs]
 	}
 
-	var errs []error
+	var firstErr error
+	failed := 0
 	for i, ip := range ips {
 		if ctx.Err() != nil {
 			break
@@ -101,15 +115,23 @@ func secureDial(ctx context.Context, network, addr string) (net.Conn, error) {
 		if err == nil {
 			return conn, nil
 		}
-		errs = append(errs, err)
+		if firstErr == nil {
+			firstErr = err
+		}
+		failed++
 	}
-	switch len(errs) {
-	case 0:
+
+	// Only the first failure is kept: the message is stored with every
+	// webhook delivery, so it must not grow with the number of addresses.
+	switch {
+	case failed == 0:
 		return nil, fmt.Errorf("connect to %s: %w", host, ctx.Err())
-	case 1:
-		return nil, errs[0]
+	case failed == 1 && skipped == 0:
+		return nil, firstErr
+	case skipped == 0:
+		return nil, fmt.Errorf("connect to %s: %d addresses failed; first: %w", host, failed, firstErr)
 	default:
-		return nil, fmt.Errorf("connect to %s: all %d addresses failed: %w", host, len(errs), errors.Join(errs...))
+		return nil, fmt.Errorf("connect to %s: %d addresses failed, %d more not tried; first: %w", host, failed, skipped, firstErr)
 	}
 }
 
@@ -126,6 +148,10 @@ func resolveDialTargets(ctx context.Context, network, host string) ([]net.IPAddr
 
 	ips, err := lookupIPAddr(ctx, host)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Cancelled or out of time; say so rather than blame DNS.
+			return nil, fmt.Errorf("resolve %s: %w", host, ctxErr)
+		}
 		// Not wrapped: the resolver error names the server's DNS resolver,
 		// and this message is stored with the webhook delivery where the
 		// repo admin reads it.
@@ -141,7 +167,9 @@ func resolveDialTargets(ctx context.Context, network, host string) ([]net.IPAddr
 	}
 
 	// Every answer is validated above; only the dial is limited to the
-	// address family the transport asked for.
+	// address family asked for. http.Transport always asks for "tcp", so
+	// this only matters to a caller that names a family, but dialing a
+	// literal of the wrong family would fail anyway.
 	var targets []net.IPAddr
 	for _, ip := range ips {
 		is4 := ip.IP.To4() != nil
@@ -157,12 +185,12 @@ func resolveDialTargets(ctx context.Context, network, host string) ([]net.IPAddr
 }
 
 // attemptDeadline gives the next of the remaining attempts an equal share of
-// the time left on ctx, at least minDialAttempt and at most dialTimeout, but
-// never past ctx's own deadline.
+// the time left on ctx, at least minDialAttempt, but never past ctx's own
+// deadline.
 func attemptDeadline(ctx context.Context, remaining int) time.Time {
 	now := time.Now()
 	deadline, _ := ctx.Deadline() // secureDial always sets one
-	share := min(max(deadline.Sub(now)/time.Duration(remaining), minDialAttempt), dialTimeout)
+	share := max(deadline.Sub(now)/time.Duration(remaining), minDialAttempt)
 	if d := now.Add(share); d.Before(deadline) {
 		return d
 	}
