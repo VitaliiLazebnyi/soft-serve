@@ -230,8 +230,9 @@ func RecordUndelivered(ctx context.Context, hooks []models.Webhook, payload Even
 }
 
 // Subscribers returns the active webhooks of the payload's repository that
-// subscribe to its event. Inactive webhooks are not sent events. Call it before a change that removes those webhooks, since
-// they cannot be found afterwards.
+// subscribe to its event. Inactive webhooks are not sent events. Call it
+// before a change that removes those webhooks, since they cannot be found
+// afterwards.
 func Subscribers(ctx context.Context, payload EventPayload) ([]models.Webhook, error) {
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
@@ -280,9 +281,9 @@ func deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload, 
 // currentHook re-reads w right before it is sent, since a delivery can wait in
 // the background queue while its webhook is changed. It returns the webhook as
 // stored now, so a rotated secret or changed URL is used, and false when the
-// webhook was deleted, deactivated, or no longer subscribes to event. If the webhook cannot
-// be read, w is returned unchanged and the send goes ahead as before, with its
-// outcome recorded as usual.
+// webhook was deleted, deactivated, or no longer subscribes to event. If the
+// webhook cannot be read, w is returned unchanged and the send goes ahead as
+// before, with its outcome recorded as usual.
 func currentHook(ctx context.Context, w models.Webhook, event Event) (models.Webhook, bool) {
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
