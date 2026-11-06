@@ -82,17 +82,27 @@ func redactURL(rawURL string) string {
 	return redacted
 }
 
+// errInvalidURL replaces the parser's message when a webhook URL cannot be
+// parsed.
+var errInvalidURL = errors.New("invalid URL")
+
 // redactURLError redacts the URL of a *url.Error, which the HTTP client
 // returns for every failed request and which prints the whole URL except for
 // a password. The returned error keeps the operation and the underlying
-// error, so errors.Is and errors.As (context.DeadlineExceeded, net.Error
+// error (except for a parse error, whose message is replaced), so errors.Is and errors.As (context.DeadlineExceeded, net.Error
 // timeouts and so on) still work. Any other error is returned unchanged.
 func redactURLError(err error) error {
 	uerr, ok := err.(*neturl.Error) //nolint:errorlint // only the top-level error is replaced
 	if !ok {
 		return err
 	}
-	return &neturl.Error{Op: uerr.Op, URL: redactURL(uerr.URL), Err: uerr.Err}
+	inner := uerr.Err
+	if uerr.Op == "parse" {
+		// A parse error's message can quote part of the URL, such as an
+		// invalid escape or port.
+		inner = errInvalidURL
+	}
+	return &neturl.Error{Op: uerr.Op, URL: redactURL(uerr.URL), Err: inner}
 }
 
 // SendWebhook sends a webhook event and records the attempt.
@@ -203,7 +213,12 @@ func sendWebhook(ctx context.Context, w models.Webhook, event Event, payload int
 		if reqErr == nil && (resStatus < 200 || resStatus > 299) {
 			return fmt.Errorf("webhook %d: receiver responded with status %d", w.ID, resStatus)
 		}
-		return reqErr
+		if reqErr != nil {
+			// The URL in reqErr is redacted, so name the webhook: several
+			// hooks on one host would otherwise log the same line.
+			return fmt.Errorf("webhook %d: %w", w.ID, reqErr)
+		}
+		return nil
 	}
 
 	return recordDelivery(ctx, w, event, req, reqErr, resStatus, resHeaders, resBody)

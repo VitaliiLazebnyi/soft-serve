@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"strings"
@@ -50,6 +51,17 @@ func TestRedactURLErrorKeepsChain(t *testing.T) {
 	is.True(uerr.Timeout())
 	is.Equal(in.URL, "https://hooks.slack.com/services/T000/B000/XXXX") // the original is not changed
 
+	// A parse error's own message can quote part of the URL.
+	_, perr := url.Parse("https://example.com:SECRETPORT/x")
+	is.True(perr != nil)
+	is.True(strings.Contains(perr.Error(), "SECRETPORT"))
+	rerr := redactURLError(perr)
+	is.True(!strings.Contains(rerr.Error(), "SECRETPORT"))
+	is.True(errors.Is(rerr, errInvalidURL))
+	_, perr = url.Parse("https://example.com/%zzSECRET")
+	is.True(perr != nil)
+	is.True(!strings.Contains(redactURLError(perr).Error(), "zz"))
+
 	other := errors.New("other")
 	is.Equal(redactURLError(other), other)
 	is.Equal(redactURLError(nil), nil)
@@ -84,6 +96,10 @@ func TestDeliverUnrecordedTransportErrorRedactsURL(t *testing.T) {
 	is.True(err != nil)
 	assertNoSecret(t, err.Error())
 	is.True(strings.Contains(err.Error(), "[redacted]"))
+	// With the URL redacted, the error names the webhook instead.
+	is.True(strings.Contains(err.Error(), fmt.Sprintf("webhook %d: ", w.ID)))
+	var uerr *url.Error
+	is.True(errors.As(err, &uerr))
 }
 
 // A send that runs out of time still reports a deadline error through the
