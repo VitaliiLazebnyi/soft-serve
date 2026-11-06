@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"time"
 
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/ssrf"
@@ -21,9 +23,14 @@ type httpClient struct {
 
 var _ Client = (*httpClient)(nil)
 
+// stallTimeout is how long an LFS connection may go without sending or
+// receiving any data before it is closed. Tests lower it.
+var stallTimeout = ssrf.ClientTimeout
+
 // newHTTPClient returns a new Git LFS client.
 func newHTTPClient(endpoint Endpoint) *httpClient {
 	client := ssrf.NewSecureClient()
+	setTransferTimeouts(client)
 	return &httpClient{
 		client:   client,
 		endpoint: endpoint,
@@ -31,6 +38,49 @@ func newHTTPClient(endpoint Endpoint) *httpClient {
 			TransferBasic: &BasicTransferAdapter{client},
 		},
 	}
+}
+
+// setTransferTimeouts replaces the client's whole-request timeout, which also
+// covers reading the response body and so cuts off any object that takes
+// longer than it to transfer, with an idle timeout on each connection: a
+// transfer may take as long as it needs while data keeps moving, and a stalled
+// one still fails.
+func setTransferTimeouts(client *http.Client) {
+	client.Timeout = 0
+	if t, ok := client.Transport.(*http.Transport); ok {
+		dial := t.DialContext
+		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := dial(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return &stallTimeoutConn{Conn: conn, timeout: stallTimeout}, nil
+		}
+	}
+}
+
+// stallTimeoutConn pushes the connection's deadline forward on every read and
+// write, so it only expires once neither direction has made progress for the
+// timeout. Setting the deadline from either side also extends a read already
+// waiting, such as the transport's wait for a response while a large upload
+// is still being written.
+type stallTimeoutConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *stallTimeoutConn) Read(b []byte) (int, error) {
+	if err := c.Conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err //nolint:wrapcheck
+	}
+	return c.Conn.Read(b) //nolint:wrapcheck
+}
+
+func (c *stallTimeoutConn) Write(b []byte) (int, error) {
+	if err := c.Conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err //nolint:wrapcheck
+	}
+	return c.Conn.Write(b) //nolint:wrapcheck
 }
 
 // Download implements Client.
