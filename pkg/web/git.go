@@ -205,7 +205,7 @@ func identify(r *http.Request) (*http.Request, error) {
 	user, err := authenticate(r, mux.Vars(r)["repo"])
 	if err != nil {
 		switch {
-		case errors.Is(err, ErrInvalidToken):
+		case badCredentials(err):
 		case errors.Is(err, proto.ErrUserNotFound):
 		default:
 			logger.Error("failed to authenticate", "err", err)

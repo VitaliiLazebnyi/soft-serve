@@ -172,12 +172,21 @@ func (*webhookStore) GetWebhookByID(ctx context.Context, h db.Handler, repoID in
 	return wh, err
 }
 
+// maxListedWebhookDeliveries is how many deliveries the delivery listings
+// return: the most recent ones of the webhook. Recording a delivery keeps this
+// many per webhook (maxDeliveries in pkg/webhook), so normally nothing is left
+// out; the limit bounds a listing when pruning has fallen behind.
+const maxListedWebhookDeliveries = 100
+
 // GetWebhookDeliveriesByWebhookID implements store.WebhookStore.
-// Deliveries are returned oldest first, in the order they were recorded.
+// Deliveries are returned oldest first, in the order they were recorded,
+// limited to the most recent maxListedWebhookDeliveries.
 func (*webhookStore) GetWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookDelivery, error) {
-	query := h.Rebind(`SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY seq;`)
+	query := h.Rebind(`SELECT * FROM (
+		SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY seq DESC LIMIT ?
+	) AS d ORDER BY seq;`)
 	var whds []models.WebhookDelivery
-	err := h.SelectContext(ctx, &whds, query, webhookID)
+	err := h.SelectContext(ctx, &whds, query, webhookID, maxListedWebhookDeliveries)
 	return whds, err
 }
 
@@ -269,11 +278,14 @@ func (*webhookStore) GetWebhooksByRepoIDWhereEvent(ctx context.Context, h db.Han
 }
 
 // ListWebhookDeliveriesByWebhookID implements store.WebhookStore.
-// Deliveries are returned oldest first, in the order they were recorded.
+// Deliveries are returned oldest first, in the order they were recorded,
+// limited to the most recent maxListedWebhookDeliveries.
 func (*webhookStore) ListWebhookDeliveriesByWebhookID(ctx context.Context, h db.Handler, webhookID int64) ([]models.WebhookDelivery, error) {
-	query := h.Rebind(`SELECT id, response_status, event, created_at, seq FROM webhook_deliveries WHERE webhook_id = ? ORDER BY seq;`)
+	query := h.Rebind(`SELECT * FROM (
+		SELECT id, response_status, event, created_at, seq FROM webhook_deliveries WHERE webhook_id = ? ORDER BY seq DESC LIMIT ?
+	) AS d ORDER BY seq;`)
 	var whds []models.WebhookDelivery
-	err := h.SelectContext(ctx, &whds, query, webhookID)
+	err := h.SelectContext(ctx, &whds, query, webhookID, maxListedWebhookDeliveries)
 	return whds, err
 }
 
