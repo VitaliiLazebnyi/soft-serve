@@ -20,26 +20,29 @@ git -C repo-ret add -A
 git -C repo-ret commit -m 'first'
 
 # five events, each recorded by a separate hook process, in this order:
-# create main, create v1, create v2, create v3, delete v1
+# create main, create v1, delete v1, create v2, create v3
 git -C repo-ret push origin HEAD
 git -C repo-ret tag v1
 git -C repo-ret push origin v1
+git -C repo-ret push origin --delete v1
 git -C repo-ret tag v2
 git -C repo-ret push origin v2
 git -C repo-ret tag v3
 git -C repo-ret push origin v3
-git -C repo-ret push origin --delete v1
 
 # all five were sent
 webhook-received
 stdout -count=4 '^branch_tag_create '
 stdout -count=1 '^branch_tag_delete '
 
-# only the three most recent are kept: create v2, create v3, delete v1
+# only the three most recent are kept, oldest first: delete v1, create v2,
+# create v3. The list is in recording order, and the only three of the five
+# events that read delete, create, create in that order are the last three.
 soft repo webhook deliver list repo-ret 1
 stdout -count=3 '✅'
 stdout -count=2 'branch_tag_create'
 stdout -count=1 'branch_tag_delete'
+stdout '(?s)branch_tag_delete.*branch_tag_create.*branch_tag_create'
 
 # stop the server
 [windows] stopserver
