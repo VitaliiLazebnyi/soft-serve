@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"testing"
@@ -37,5 +38,23 @@ func TestRandomPortUnique(t *testing.T) {
 			t.Fatalf("port %d outside [%d, %d)", p, minPort, maxPort)
 		}
 		seen[p] = true
+	}
+}
+
+func TestInUse(t *testing.T) {
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close() //nolint:errcheck
+	_, err = (&net.ListenConfig{}).Listen(context.Background(), "tcp", l.Addr().String())
+	if err == nil {
+		t.Fatal("binding a port in use succeeded")
+	}
+	if !inUse(err) {
+		t.Errorf("inUse(%v) = false, want true", err)
+	}
+	if inUse(errors.New("some other error")) {
+		t.Error("inUse is true for an error that is not about the port")
 	}
 }
