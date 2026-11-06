@@ -237,6 +237,12 @@ type Config struct {
 
 	// DataPath is the path to the directory where Soft Serve will store its data.
 	DataPath string `env:"DATA_PATH" yaml:"-"`
+
+	// invalidAdminKeys holds the positions of the InitialAdminKeys entries
+	// that Validate dropped because they could not be read or parsed.
+	// Validate rewrites InitialAdminKeys to the valid keys only, so this is
+	// the only record that some were dropped.
+	invalidAdminKeys []int
 }
 
 // Environ returns the config as a list of environment variables.
@@ -547,10 +553,15 @@ func (c *Config) Validate() error {
 
 	// Validate keys
 	pks := make([]string, 0)
-	for _, key := range parseAuthKeys(c.InitialAdminKeys) {
+	keys, invalid := parseAuthKeys(c.InitialAdminKeys)
+	for _, key := range keys {
 		ak := sshutils.MarshalAuthorizedKey(key)
 		pks = append(pks, ak)
 	}
+	// Validate runs once per config source (file, then environment), each
+	// time on a list whose earlier entries are already valid, so the
+	// positions are kept across runs.
+	c.invalidAdminKeys = append(c.invalidAdminKeys, invalid...)
 
 	c.InitialAdminKeys = pks
 
@@ -559,29 +570,49 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// parseAuthKeys parses authorized keys from either file paths or string authorized_keys.
-func parseAuthKeys(aks []string) []ssh.PublicKey {
+// parseAuthKeys parses authorized keys from either file paths or string
+// authorized_keys. invalid holds the positions of the entries that could not
+// be read or parsed, such as a key file that is missing or unreadable. Blank
+// entries are skipped and are not invalid.
+func parseAuthKeys(aks []string) (pks []ssh.PublicKey, invalid []int) {
 	exist := make(map[string]struct{}, 0)
-	pks := make([]ssh.PublicKey, 0)
-	for _, key := range aks {
+	pks = make([]ssh.PublicKey, 0)
+	for i, key := range aks {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
 		if bts, err := os.ReadFile(key); err == nil {
 			// key is a file
 			key = strings.TrimSpace(string(bts))
 		}
 
-		if pk, _, err := sshutils.ParseAuthorizedKey(key); err == nil {
-			if _, ok := exist[key]; !ok {
-				pks = append(pks, pk)
-				exist[key] = struct{}{}
-			}
+		pk, _, err := sshutils.ParseAuthorizedKey(key)
+		if err != nil {
+			invalid = append(invalid, i)
+			continue
+		}
+		if _, ok := exist[key]; !ok {
+			pks = append(pks, pk)
+			exist[key] = struct{}{}
 		}
 	}
-	return pks
+	return pks, invalid
 }
 
 // AdminKeys returns the server admin keys.
 func (c *Config) AdminKeys() []ssh.PublicKey {
-	return parseAuthKeys(c.InitialAdminKeys)
+	pks, _ := parseAuthKeys(c.InitialAdminKeys)
+	return pks
+}
+
+// InvalidAdminKeys returns the positions of the initial_admin_keys entries
+// that could not be read or parsed, such as a key file that is not mounted
+// yet. A position counts from 0 within the source the entry came from: the
+// config file's list or the lines of SOFT_SERVE_INITIAL_ADMIN_KEYS. The
+// entries themselves are not returned, as they may hold key material.
+func (c *Config) InvalidAdminKeys() []int {
+	_, invalid := parseAuthKeys(c.InitialAdminKeys)
+	return append(slices.Clone(c.invalidAdminKeys), invalid...)
 }
 
 func init() {

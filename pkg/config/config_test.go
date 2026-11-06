@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -57,6 +58,32 @@ func TestValidateInitAdminKeys(t *testing.T) {
 	is.Equal(cfg.InitialAdminKeys, []string{
 		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINMwLvyV3ouVrTysUYGoJdl5Vgn5BACKov+n9PlzfPwH",
 	})
+	// "abc" was dropped; the blank entry is not an error.
+	is.Equal(cfg.InvalidAdminKeys(), []int{1})
+}
+
+func TestInvalidAdminKeys(t *testing.T) {
+	is := is.New(t)
+	cfg := &Config{
+		DataPath: t.TempDir(),
+		InitialAdminKeys: []string{
+			"testdata/k1.pub",
+			"  ",
+			filepath.Join(t.TempDir(), "not-mounted-yet.pub"),
+			"not a key",
+		},
+	}
+	// Before Validate the entries are checked as they are.
+	is.Equal(cfg.InvalidAdminKeys(), []int{2, 3})
+
+	// Validate drops them from the list but remembers them.
+	is.NoErr(cfg.Validate())
+	is.Equal(len(cfg.InitialAdminKeys), 1)
+	is.Equal(cfg.InvalidAdminKeys(), []int{2, 3})
+	is.Equal(len(cfg.AdminKeys()), 1)
+
+	// A config whose entries all parse has none.
+	is.Equal((&Config{InitialAdminKeys: []string{"testdata/k1.pub", ""}}).InvalidAdminKeys(), []int(nil))
 }
 
 func TestCustomConfigLocation(t *testing.T) {
