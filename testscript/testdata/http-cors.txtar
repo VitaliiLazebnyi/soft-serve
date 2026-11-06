@@ -96,6 +96,12 @@ curl -v --request OPTIONS http://localhost:$HTTP_PORT/repo2/git-upload-pack -H '
 stderr '> 405 Method Not Allowed'
 ! stderr 'Access-Control-Allow-Origin'
 
+# Access-Control-Request-Method is not allowed by default but is in the
+# configured headers
+curl -v --request OPTIONS http://localhost:$HTTP_PORT/repo2.git/info/refs -H 'Origin: https://example.com' -H 'Access-Control-Request-Method: GET' -H 'Access-Control-Request-Headers: Access-Control-Request-Method'
+stderr '> 200 OK'
+stderr '> Access-Control-Allow-Origin: https://example.com'
+
 # Authorization is allowed by default but not by the configured headers
 curl -v --request OPTIONS http://localhost:$HTTP_PORT/repo2.git/info/refs -H 'Origin: https://example.com' -H 'Access-Control-Request-Method: GET' -H 'Access-Control-Request-Headers: Authorization'
 stderr '> 403 Forbidden'
