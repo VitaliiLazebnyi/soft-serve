@@ -31,7 +31,7 @@ var (
 		Args:               cobra.NoArgs,
 		PersistentPreRunE:  cmd.InitBackendContext,
 		PersistentPostRunE: cmd.CloseDBContext,
-		RunE: func(c *cobra.Command, _ []string) error {
+		RunE: cmd.CloseDBOnError(func(c *cobra.Command, _ []string) error {
 			ctx := c.Context()
 			cfg := config.DefaultConfig()
 			if cfg.Exist() {
@@ -85,6 +85,7 @@ var (
 			if syncHooks {
 				be := backend.FromContext(ctx)
 				if err := cmd.InitializeHooks(ctx, cfg, be); err != nil {
+					_ = s.Close()
 					return fmt.Errorf("initialize hooks: %w", err)
 				}
 			}
@@ -147,15 +148,8 @@ var (
 			defer stopWaiting()
 			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			if err := errors.Join(serverErr, s.Shutdown(ctx, abort)); err != nil {
-				// Cobra does not run PersistentPostRunE when RunE fails, so
-				// close the database here.
-				_ = cmd.CloseDBContext(c, nil)
-				return err
-			}
-
-			return nil
-		},
+			return errors.Join(serverErr, s.Shutdown(ctx, abort))
+		}),
 	}
 )
 

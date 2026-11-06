@@ -54,6 +54,19 @@ func CloseDBContext(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// CloseDBOnError wraps a command's RunE so that the database is closed when
+// it fails: cobra does not run PersistentPostRunE, which closes it
+// otherwise, when RunE returns an error.
+func CloseDBOnError(run func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {
+	return func(c *cobra.Command, args []string) error {
+		err := run(c, args)
+		if err != nil {
+			_ = CloseDBContext(c, args)
+		}
+		return err
+	}
+}
+
 // InitializeHooks initializes the hooks.
 func InitializeHooks(ctx context.Context, cfg *config.Config, be *backend.Backend) error {
 	repos, err := be.Repositories(ctx)

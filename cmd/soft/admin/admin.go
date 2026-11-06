@@ -23,7 +23,7 @@ var (
 		Short:              "Migrate the database to the latest version",
 		PersistentPreRunE:  cmd.InitBackendContext,
 		PersistentPostRunE: cmd.CloseDBContext,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: cmd.CloseDBOnError(func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			db := db.FromContext(ctx)
 			if err := migrate.Migrate(ctx, db); err != nil {
@@ -31,7 +31,7 @@ var (
 			}
 
 			return nil
-		},
+		}),
 	}
 
 	rollbackCmd = &cobra.Command{
@@ -39,7 +39,7 @@ var (
 		Short:              "Rollback the database to the previous version",
 		PersistentPreRunE:  cmd.InitBackendContext,
 		PersistentPostRunE: cmd.CloseDBContext,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: cmd.CloseDBOnError(func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			db := db.FromContext(ctx)
 			if err := migrate.Rollback(ctx, db); err != nil {
@@ -47,7 +47,7 @@ var (
 			}
 
 			return nil
-		},
+		}),
 	}
 
 	syncHooksCmd = &cobra.Command{
@@ -55,7 +55,7 @@ var (
 		Short:              "Update repository hooks",
 		PersistentPreRunE:  cmd.InitBackendContext,
 		PersistentPostRunE: cmd.CloseDBContext,
-		RunE: func(c *cobra.Command, _ []string) error {
+		RunE: cmd.CloseDBOnError(func(c *cobra.Command, _ []string) error {
 			ctx := c.Context()
 			cfg := config.FromContext(ctx)
 			be := backend.FromContext(ctx)
@@ -64,7 +64,7 @@ var (
 			}
 
 			return nil
-		},
+		}),
 	}
 )
 
