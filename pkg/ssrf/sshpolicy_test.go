@@ -17,12 +17,12 @@ func mustAllowedHosts(t *testing.T, entries ...string) AllowedHosts {
 	return a
 }
 
-// fakeResolver answers from a fixed table and reports anything else as not
-// found, so CIDR matching can be tested without DNS.
-func fakeResolver(t *testing.T, table map[string][]string) {
-	t.Helper()
-	orig := lookupIPAddr
-	lookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+// fakeLookup answers from a fixed table and reports anything else as not
+// found. It never touches the network, so tests using it run offline. It is
+// handed to the code under test explicitly rather than swapped into package
+// state, so tests using it are safe to run in parallel.
+func fakeLookup(table map[string][]string) lookupFunc {
+	return func(ctx context.Context, host string) ([]net.IPAddr, error) {
 		// Like the real resolver, fail once the context is done.
 		if err := ctx.Err(); err != nil {
 			return nil, &net.DNSError{Err: err.Error(), Name: host}
@@ -37,11 +37,28 @@ func fakeResolver(t *testing.T, table map[string][]string) {
 		}
 		return out, nil
 	}
-	t.Cleanup(func() { lookupIPAddr = orig })
+}
+
+// fakeResolver points the secure dialer's resolver at a fixed table for the
+// rest of the test. It swaps package state, so tests using it must not run in
+// parallel.
+func fakeResolver(t *testing.T, table map[string][]string) {
+	t.Helper()
+	setDialLookup(t, fakeLookup(table))
+}
+
+// setDialLookup replaces the secure dialer's resolver for the rest of the
+// test. It swaps package state, so tests using it must not run in parallel.
+func setDialLookup(t *testing.T, f lookupFunc) {
+	t.Helper()
+	orig := dialLookup
+	dialLookup = f
+	t.Cleanup(func() { dialLookup = orig })
 }
 
 func TestAllowedHostsMatch(t *testing.T) {
-	fakeResolver(t, map[string][]string{
+	t.Parallel()
+	lookup := fakeLookup(map[string][]string{
 		"inside.example":  {"10.1.2.3"},
 		"split.example":   {"10.1.2.3", "203.0.113.9"},
 		"outside.example": {"203.0.113.9"},
@@ -96,7 +113,8 @@ func TestAllowedHostsMatch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := mustAllowedHosts(t, tt.allow...).Match(tt.host, tt.port)
+			t.Parallel()
+			err := mustAllowedHosts(t, tt.allow...).match(tt.host, tt.port, lookup)
 			if tt.wantErr == nil && err != nil {
 				t.Fatalf("Match(%q, %q) = %v, want nil", tt.host, tt.port, err)
 			}
@@ -144,13 +162,15 @@ func TestParseAllowedHostsRejectsBadEntries(t *testing.T) {
 // TestValidateGitRemotePolicy covers the ssh policy as applied through
 // ValidateGitRemote, for both URL and scp-style remotes.
 func TestValidateGitRemotePolicy(t *testing.T) {
-	fakeResolver(t, nil)
+	t.Parallel()
+	// No name resolves, so CIDR entries never match a hostname.
+	offline := fakeLookup(nil)
 
-	listed := GitRemotePolicy{AllowedSSHHosts: mustAllowedHosts(t, "git.internal.example", "10.0.0.0/8", "gitlab.corp:2222")}
+	listed := GitRemotePolicy{AllowedSSHHosts: mustAllowedHosts(t, "git.internal.example", "10.0.0.0/8", "gitlab.corp:2222"), lookup: offline}
 	// A non-empty allowlist binds admins too.
-	listedAdmin := GitRemotePolicy{AllowedSSHHosts: listed.AllowedSSHHosts, AllowAnySSHHost: true}
-	nobody := GitRemotePolicy{}
-	admin := GitRemotePolicy{AllowAnySSHHost: true}
+	listedAdmin := GitRemotePolicy{AllowedSSHHosts: listed.AllowedSSHHosts, AllowAnySSHHost: true, lookup: offline}
+	nobody := GitRemotePolicy{lookup: offline}
+	admin := GitRemotePolicy{AllowAnySSHHost: true, lookup: offline}
 
 	tests := []struct {
 		name    string
@@ -170,7 +190,7 @@ func TestValidateGitRemotePolicy(t *testing.T) {
 		{"ssh url denied for admin too", "ssh://git@evil.example/x.git", listedAdmin, ErrSSHHostNotAllowed},
 		{"ssh url wrong port", "ssh://git@gitlab.corp/x.git", listed, ErrSSHHostNotAllowed},
 		{"ssh url right port", "ssh://git@gitlab.corp:2222/x.git", listed, nil},
-		{"ssh url ipv6 port", "ssh://git@[fd00::1]:2222/x.git", GitRemotePolicy{AllowedSSHHosts: mustAllowedHosts(t, "[fd00::/8]:2222")}, nil},
+		{"ssh url ipv6 port", "ssh://git@[fd00::1]:2222/x.git", GitRemotePolicy{AllowedSSHHosts: mustAllowedHosts(t, "[fd00::/8]:2222"), lookup: offline}, nil},
 		{"git+ssh denied", "git+ssh://git@evil.example/x.git", listed, ErrSSHHostNotAllowed},
 		{"ssh+git allowed", "ssh+git://git@git.internal.example/x.git", listed, nil},
 		{"scp allowed", "git@git.internal.example:x.git", listed, nil},
@@ -178,7 +198,7 @@ func TestValidateGitRemotePolicy(t *testing.T) {
 		{"scp bracketed port right", "[git@gitlab.corp:2222]:x.git", listed, nil},
 		{"scp bracketed port wrong", "[git@gitlab.corp:22]:x.git", listed, ErrSSHHostNotAllowed},
 		{"scp cidr", "git@10.9.9.9:x.git", listed, nil},
-		{"scp ipv6 literal", "git@[fd00::1]:x.git", GitRemotePolicy{AllowedSSHHosts: mustAllowedHosts(t, "fd00::/8")}, nil},
+		{"scp ipv6 literal", "git@[fd00::1]:x.git", GitRemotePolicy{AllowedSSHHosts: mustAllowedHosts(t, "fd00::/8"), lookup: offline}, nil},
 
 		// With no allowlist, only a policy that allows any host passes.
 		{"no allowlist, admin", "ssh://git@10.0.0.1/x.git", admin, nil},
@@ -190,6 +210,7 @@ func TestValidateGitRemotePolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			v, err := ValidateGitRemote(tt.remote, tt.policy)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {

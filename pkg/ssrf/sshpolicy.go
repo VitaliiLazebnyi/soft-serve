@@ -31,13 +31,18 @@ type GitRemotePolicy struct {
 	// empty. It is set for server admins, who may make that call themselves;
 	// everyone else gets ErrSSHRequiresAdmin.
 	AllowAnySSHHost bool
+
+	// lookup resolves hostnames during validation. Nil means
+	// net.DefaultResolver. Tests set it so they run without DNS; it is a
+	// field rather than package state so parallel tests cannot race on it.
+	lookup lookupFunc
 }
 
 // checkSSH applies the policy to an ssh host and port ("" meaning the ssh
 // default).
 func (p GitRemotePolicy) checkSSH(host, port string) error {
 	if len(p.AllowedSSHHosts) > 0 {
-		return p.AllowedSSHHosts.Match(host, port)
+		return p.AllowedSSHHosts.match(host, port, p.lookup)
 	}
 	if p.AllowAnySSHHost {
 		return nil
@@ -107,9 +112,17 @@ func parseAllowedHost(raw string) (allowedHost, error) {
 	return allowedHost{name: canonicalHostname(host), port: port}, nil
 }
 
-// lookupIPAddr resolves hostnames for CIDR matching and git remote
-// validation. Tests replace it so they run without DNS.
-var lookupIPAddr = net.DefaultResolver.LookupIPAddr
+// lookupFunc resolves a hostname to its addresses, with the signature of
+// net.Resolver.LookupIPAddr.
+type lookupFunc func(ctx context.Context, host string) ([]net.IPAddr, error)
+
+// resolve looks host up with f, or with net.DefaultResolver when f is nil.
+func (f lookupFunc) resolve(ctx context.Context, host string) ([]net.IPAddr, error) {
+	if f == nil {
+		return net.DefaultResolver.LookupIPAddr(ctx, host)
+	}
+	return f(ctx, host)
+}
 
 // Match reports whether host (and port, "" meaning the ssh default) is
 // covered by the allowlist. Hostnames match entries by name; otherwise the
@@ -119,6 +132,12 @@ var lookupIPAddr = net.DefaultResolver.LookupIPAddr
 // ssh resolves the name again itself, so a CIDR match only says where the
 // name pointed at validation time. Hostname entries are the robust form.
 func (a AllowedHosts) Match(host, port string) error {
+	return a.match(host, port, nil)
+}
+
+// match is Match with the resolver used for CIDR entries; nil means
+// net.DefaultResolver.
+func (a AllowedHosts) match(host, port string, lookup lookupFunc) error {
 	if port == "" {
 		port = "22"
 	}
@@ -153,7 +172,7 @@ func (a AllowedHosts) Match(host, port string) error {
 		return notAllowed
 	}
 
-	ips, err := lookupIPAddr(context.Background(), host)
+	ips, err := lookup.resolve(context.Background(), host)
 	if err != nil || len(ips) == 0 {
 		return fmt.Errorf("%w: %q does not resolve", ErrSSHHostNotAllowed, host)
 	}

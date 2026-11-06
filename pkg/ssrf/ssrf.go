@@ -175,6 +175,10 @@ func plural(n int, one, many string) string {
 	return fmt.Sprintf("%d %s", n, many)
 }
 
+// dialLookup resolves hostnames for secureDial. nil means
+// net.DefaultResolver; tests replace it to run without DNS.
+var dialLookup lookupFunc
+
 // resolveDialTargets returns the addresses secureDial may dial for host, in
 // the order the resolver returned them. Every address the name resolves to
 // is checked, and any private or internal one refuses the host as a whole.
@@ -186,7 +190,7 @@ func resolveDialTargets(ctx context.Context, network, host string) ([]net.IPAddr
 		return []net.IPAddr{{IP: ip}}, nil
 	}
 
-	ips, err := lookupIPAddr(ctx, host)
+	ips, err := dialLookup.resolve(ctx, host)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// Cancelled or out of time; say so rather than blame DNS.
@@ -342,6 +346,12 @@ func isPrivateOrInternal(ip net.IP) bool {
 // It checks that the scheme is http/https, the hostname is not localhost,
 // and all resolved IPs are public.
 func ValidateURL(rawURL string) error {
+	return validateURL(rawURL, nil)
+}
+
+// validateURL is ValidateURL with the resolver used for hostnames; nil means
+// net.DefaultResolver.
+func validateURL(rawURL string, lookup lookupFunc) error {
 	if rawURL == "" {
 		return ErrInvalidURL
 	}
@@ -371,10 +381,13 @@ func ValidateURL(rawURL string) error {
 		return nil
 	}
 
-	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), hostname)
+	ips, err := lookup.resolve(context.Background(), hostname)
 	if err != nil {
 		// See validateRemoteHost: the resolver error names the resolver.
 		return fmt.Errorf("%w: cannot resolve hostname", ErrInvalidURL)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("%w: no addresses for hostname", ErrInvalidURL)
 	}
 
 	if slices.ContainsFunc(ips, func(addr net.IPAddr) bool {

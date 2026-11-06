@@ -346,12 +346,10 @@ func TestSecureDialDeadlines(t *testing.T) {
 
 	t.Run("resolution is bounded", func(t *testing.T) {
 		var lookupDeadline time.Time
-		orig := lookupIPAddr
-		lookupIPAddr = func(ctx context.Context, _ string) ([]net.IPAddr, error) {
+		setDialLookup(t, func(ctx context.Context, _ string) ([]net.IPAddr, error) {
 			lookupDeadline, _ = ctx.Deadline()
 			return []net.IPAddr{{IP: net.ParseIP("140.82.112.1")}}, nil
-		}
-		t.Cleanup(func() { lookupIPAddr = orig })
+		})
 		newFakeDialer(t)
 		start := time.Now()
 		_, _ = secureDial(context.Background(), "tcp", "slow.example:443")
@@ -485,11 +483,12 @@ func TestSecureDialResolverErrorsHidden(t *testing.T) {
 // TestValidateGitRemoteRefusesMixedAnswers is the import-side counterpart of
 // TestSecureDialRefusesMixedAnswers.
 func TestValidateGitRemoteRefusesMixedAnswers(t *testing.T) {
-	fakeResolver(t, map[string][]string{
+	t.Parallel()
+	policy := GitRemotePolicy{AllowAnySSHHost: true, lookup: fakeLookup(map[string][]string{
 		"mixed.example": {"140.82.112.3", "10.0.0.1"},
-	})
+	})}
 	for _, remote := range []string{"https://mixed.example/x.git", "git://mixed.example/x.git"} {
-		if _, err := ValidateGitRemote(remote, anySSH); !errors.Is(err, ErrPrivateIP) {
+		if _, err := ValidateGitRemote(remote, policy); !errors.Is(err, ErrPrivateIP) {
 			t.Errorf("ValidateGitRemote(%q) error = %v, want ErrPrivateIP", remote, err)
 		}
 	}
