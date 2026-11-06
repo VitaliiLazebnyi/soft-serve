@@ -3,6 +3,8 @@ package testscript
 import (
 	"context"
 	"net"
+	"os"
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -32,5 +34,32 @@ func TestWaitClosed(t *testing.T) {
 	_ = l.Close()
 	if err := waitClosed(addr, 30*time.Second); err != nil {
 		t.Fatalf("waitClosed after the listener closed: %v", err)
+	}
+}
+
+// waitExit returns once a process has exited and keeps waiting while it runs,
+// without taking the exit status from the code that waits on it.
+func TestWaitExit(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec,noctx
+	cmd.Env = append(os.Environ(), "WAITEXIT_CHILD=1")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+
+	if err := waitExit(cmd.Process, 300*time.Millisecond); err == nil {
+		t.Fatal("waitExit returned nil while the process was running")
+	}
+	_ = stdin.Close() // the child exits when its stdin closes
+	if err := waitExit(cmd.Process, 30*time.Second); err != nil {
+		t.Fatalf("waitExit after the process exited: %v", err)
+	}
+	if err := <-waited; err != nil {
+		t.Fatalf("exit status lost: %v", err)
 	}
 }

@@ -49,6 +49,12 @@ func PrepareBuildCommand(binPath string) *exec.Cmd {
 }
 
 func TestMain(m *testing.M) {
+	if os.Getenv("WAITEXIT_CHILD") == "1" {
+		// A process for TestWaitExit that runs until its stdin closes.
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	}
+
 	tmp, err := os.MkdirTemp("", "soft-serve*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create temporary directory: %s", err)
@@ -666,13 +672,28 @@ func cmdStopserver(ts *testscript.TestScript, neg bool, args []string) {
 	check(ts, err, neg)
 	resp.Body.Close()
 
-	// Wait until every listener is closed, so a server started next can bind
-	// the same ports. A fixed sleep was not always long enough under load.
-	// Only a refused connection counts as closed: a dial that times out on a
-	// loaded machine says nothing. The ports are checked at once because on
-	// Windows a refusal takes about two seconds to arrive. The process
-	// itself may still be finishing its shutdown; testscript waits for it at
-	// the end of the script.
+	// Wait for the server process to exit. A fixed sleep was not always long
+	// enough under load, and a server that is still shutting down when the
+	// script goes on to skip or end is killed, which fails the script.
+	var procs []*os.Process
+	for _, c := range ts.BackgroundCmds() {
+		if len(c.Args) > 1 && c.Args[1] == "serve" && c.Process != nil {
+			procs = append(procs, c.Process)
+		}
+	}
+	if len(procs) > 0 {
+		for _, p := range procs {
+			if err := waitExit(p, 30*time.Second); err != nil {
+				ts.Fatalf("server did not stop: %v", err)
+			}
+		}
+		return
+	}
+
+	// No server process to wait for, so wait until every listener is
+	// closed. Only a refused connection counts as closed: a dial that times
+	// out on a loaded machine says nothing. The ports are checked at once
+	// because on Windows a refusal takes about two seconds to arrive.
 	var wg sync.WaitGroup
 	errs := make([]error, 4)
 	for i, env := range []string{"SSH_PORT", "GIT_PORT", "HTTP_PORT", "STATS_PORT"} {
