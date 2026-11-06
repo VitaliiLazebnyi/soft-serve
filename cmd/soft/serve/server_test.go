@@ -435,3 +435,48 @@ func TestStartRejectsEmptyListenAddr(t *testing.T) {
 	}
 	requireBindable(t, sshAddr)
 }
+
+// A Shutdown that comes right after Start bound its listeners, while the
+// servers are only starting to serve on them, still stops them all within
+// its deadline. The SSH server used to wait for a listener it started serving
+// on after its Shutdown ran, and that listener was closed only after every
+// server's Shutdown returned, so Shutdown ran into its deadline.
+func TestShutdownRightAfterStart(t *testing.T) {
+	for i := range 50 {
+		addrs := []string{loopbackAddr(), loopbackAddr(), loopbackAddr(), loopbackAddr()}
+		s := newStartTestServer(t, addrs[0], addrs[1], addrs[2], addrs[3])
+		errc := startAsync(s)
+
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			s.mu.Lock()
+			bound := s.listeners != nil
+			s.mu.Unlock()
+			if bound {
+				break
+			}
+			select {
+			case err := <-errc:
+				t.Fatalf("run %d: Start returned %v before binding its listeners", i, err)
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("run %d: Start did not bind its listeners", i)
+			}
+			runtime.Gosched()
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := s.Shutdown(ctx, ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("run %d: Shutdown: %v", i, err)
+		}
+		if err := waitStart(t, errc, "after Shutdown"); err != nil {
+			t.Fatalf("run %d: Start returned %v after Shutdown, want nil", i, err)
+		}
+		for _, addr := range addrs {
+			requireBindable(t, addr)
+		}
+	}
+}
