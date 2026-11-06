@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
@@ -76,6 +77,21 @@ var sendTimeout = ssrf.ClientTimeout
 
 // recordTimeout bounds writing one delivery row.
 const recordTimeout = 5 * time.Second
+
+// rereadTimeout bounds each try at re-reading a webhook before its send, so a
+// database that does not answer cannot hold a background sender. It is a
+// variable so tests can shorten it.
+var rereadTimeout = recordTimeout
+
+// rereadRetryDelay is the wait before the one retry of a failed re-read. It is
+// a variable so tests can shorten it.
+var rereadRetryDelay = 200 * time.Millisecond
+
+// errRereadFailed is the reason stored on a delivery that was not sent because
+// its webhook could not be re-read. The database error itself is only logged:
+// the stored reason is shown to repository admins, who need not see database
+// details.
+var errRereadFailed = errors.New("not sent: could not re-read webhook (database error)")
 
 // request is a webhook request ready to send or record.
 type request struct {
@@ -251,7 +267,8 @@ func Subscribers(ctx context.Context, payload EventPayload) ([]models.Webhook, e
 // webhook is re-read just before its send: one deleted or unsubscribed since
 // hooks was read is skipped, as is one deactivated since, and a changed URL or
 // secret is used. A webhook that cannot be re-read is not sent to: the event
-// is recorded for it as undelivered, so it can be redelivered later.
+// is recorded for it as undelivered, so it can be redelivered later, and a
+// warning with the error is logged.
 func Deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload) error {
 	return deliver(ctx, hooks, payload, true)
 }
@@ -274,12 +291,14 @@ func deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload, 
 			cur, ok, err := currentHook(ctx, w, payload.Event())
 			if err != nil {
 				// Whether w may still be sent to is unknown, so it is not
-				// sent to. The event is recorded as undelivered instead, with
-				// the error, so it can be redelivered once the webhook can be
-				// read. As with a failed send, only a failure to record it is
-				// returned.
-				err = fmt.Errorf("webhook %d not sent: re-reading it failed: %w", w.ID, err)
-				if err := RecordUndelivered(ctx, []models.Webhook{w}, payload, err); err != nil {
+				// sent to. The event is recorded as undelivered instead, so
+				// it can be redelivered once the webhook can be read. The
+				// error is logged here, since a recorded delivery is not
+				// returned as an error; the stored reason leaves out the
+				// database details. Only a failure to record is returned.
+				log.FromContext(ctx).WithPrefix("webhook").Warn("webhook not sent: re-reading it failed; recorded as undelivered",
+					"webhook_id", w.ID, "repo_id", w.RepoID, "event", payload.Event(), "err", err)
+				if err := RecordUndelivered(ctx, []models.Webhook{w}, payload, errRereadFailed); err != nil {
 					errs = append(errs, err)
 				}
 				continue
@@ -302,12 +321,21 @@ func deliver(ctx context.Context, hooks []models.Webhook, payload EventPayload, 
 // webhook was deleted, deactivated, or no longer subscribes to event. It
 // returns an error when the webhook cannot be read; the caller then does not
 // send, since the webhook may have been deactivated.
+//
+// Each try is bounded by rereadTimeout, and a failed try is retried once after
+// rereadRetryDelay unless ctx is done, so a short database hiccup does not
+// leave the event undelivered.
 func currentHook(ctx context.Context, w models.Webhook, event Event) (models.Webhook, bool, error) {
-	dbx := db.FromContext(ctx)
-	datastore := store.FromContext(ctx)
-	hooks, err := datastore.GetWebhooksByRepoIDWhereEvent(ctx, dbx, w.RepoID, []int{int(event)})
+	hooks, err := lookupSubscribers(ctx, w.RepoID, event)
+	if err != nil && ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+		case <-time.After(rereadRetryDelay):
+			hooks, err = lookupSubscribers(ctx, w.RepoID, event)
+		}
+	}
 	if err != nil {
-		return models.Webhook{}, false, db.WrapError(err)
+		return models.Webhook{}, false, err
 	}
 	for _, h := range hooks {
 		if h.ID == w.ID {
@@ -315,6 +343,18 @@ func currentHook(ctx context.Context, w models.Webhook, event Event) (models.Web
 		}
 	}
 	return models.Webhook{}, false, nil
+}
+
+// lookupSubscribers reads the active webhooks of a repository that subscribe
+// to event, giving up after rereadTimeout.
+func lookupSubscribers(ctx context.Context, repoID int64, event Event) ([]models.Webhook, error) {
+	lctx, cancel := context.WithTimeout(ctx, rereadTimeout)
+	defer cancel()
+	hooks, err := store.FromContext(ctx).GetWebhooksByRepoIDWhereEvent(lctx, db.FromContext(ctx), repoID, []int{int(event)})
+	if err != nil {
+		return nil, db.WrapError(err)
+	}
+	return hooks, nil
 }
 
 // SendEvent sends a webhook event to the repository's subscribers.
