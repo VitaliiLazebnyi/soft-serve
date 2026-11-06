@@ -31,6 +31,10 @@ type lfsTransfer struct {
 	logger  *log.Logger
 	storage storage.Storage
 	repo    proto.Repository
+	// op is the session operation (download or upload). The SSH command
+	// authorizes only the operation, and the transfer processor accepts
+	// put-object and lock in either, so write commands check it here.
+	op string
 }
 
 var _ transfer.Backend = &lfsTransfer{}
@@ -43,6 +47,10 @@ var _ transfer.Backend = &lfsTransfer{}
 // of falling through to a generic internal error, and lfs.ErrInvalidOIDFormat
 // so callers can still test for the cause.
 var errInvalidOid = fmt.Errorf("%w: %w", transfer.ErrParseError, lfs.ErrInvalidOIDFormat)
+
+// errReadOnlySession is returned for a write command (put-object, lock,
+// unlock) sent in a download session, which needs only read access.
+var errReadOnlySession = fmt.Errorf("%w: not allowed in a download session", transfer.ErrForbidden)
 
 // LFSTransfer is a Git LFS transfer service handler.
 // ctx is expected to have proto.User, *backend.Backend, *log.Logger,
@@ -90,6 +98,7 @@ func LFSTransfer(ctx context.Context, cmd ServiceCommand) error {
 		logger:  logger,
 		storage: storage.NewLocalStorage(filepath.Join(cfg.DataPath, "lfs", repoID)),
 		repo:    repo,
+		op:      op,
 	}, &lfsLogger{logger})
 
 	return processor.ProcessCommands(op)
@@ -152,6 +161,15 @@ func (t *lfsTransfer) Upload(oid string, size int64, r io.Reader, _ transfer.Arg
 	p := transfer.Pointer{Oid: oid}
 	if !p.IsValid() {
 		return errInvalidOid
+	}
+
+	if t.op == lfs.OperationDownload {
+		// Consume the object data so the next command is read from the
+		// right place in the stream; nothing is stored.
+		if r != nil {
+			_, _ = io.Copy(io.Discard, r)
+		}
+		return errReadOnlySession
 	}
 
 	if r == nil {
@@ -281,6 +299,10 @@ var errNoUserLocks = fmt.Errorf("%w: locks need a user account", transfer.ErrFor
 
 // Create implements transfer.LockBackend.
 func (l *lfsLockBackend) Create(path string, refname string) (transfer.Lock, error) {
+	if l.op == lfs.OperationDownload {
+		return nil, errReadOnlySession
+	}
+
 	var lock LFSLock
 	if err := l.dbx.TransactionContext(l.ctx, func(tx *db.Tx) error {
 		if err := l.store.CreateLFSLockForUser(l.ctx, tx, l.repo.ID(), l.user.ID(), path, refname); err != nil {
@@ -423,6 +445,10 @@ func (l *lfsLockBackend) Range(cursor string, limit int, fn func(transfer.Lock) 
 
 // Unlock implements transfer.LockBackend.
 func (l *lfsLockBackend) Unlock(lock transfer.Lock) error {
+	if l.op == lfs.OperationDownload {
+		return errReadOnlySession
+	}
+
 	id, err := strconv.ParseInt(lock.ID(), 10, 64)
 	if err != nil {
 		return err

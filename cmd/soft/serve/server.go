@@ -203,6 +203,10 @@ func (s *Server) ReloadCertificates() error {
 // error would surface only once all the others had stopped. It also means
 // that once any of the servers accepts connections, all of them do.
 //
+// Likewise, if a server fails while serving, Start returns its error at once,
+// without waiting for the others to stop. The caller should then shut the
+// server down.
+//
 // Start returns nil without serving if Shutdown or Close has been called.
 func (s *Server) Start() error {
 	type service struct {
@@ -257,10 +261,14 @@ func (s *Server) Start() error {
 	s.listeners = listeners
 	s.mu.Unlock()
 
-	errg, _ := errgroup.WithContext(s.ctx)
+	// Each server reports here when it stops. The first one to fail ends
+	// Start at once, rather than once every other server has stopped too,
+	// so that the process does not keep running with only some of its
+	// servers up.
+	errc := make(chan error, len(services))
 	for i, svc := range services {
 		l := listeners[i]
-		errg.Go(func() error {
+		go func() {
 			defer l.markServing()
 			s.logger.Print("Starting "+svc.name, "addr", l.Addr().String())
 			err := svc.serve(l)
@@ -269,17 +277,22 @@ func (s *Server) Start() error {
 				// or before its own Shutdown or Close ran, reports the
 				// listener closeListeners closed rather than its
 				// ErrServerClosed.
-				return nil
+				err = nil
+			} else if err != nil {
+				err = fmt.Errorf("%s: %w", svc.name, err)
 			}
-			return err
-		})
+			errc <- err
+		}()
 	}
 
-	errg.Go(func() error {
-		s.Cron.Start()
-		return nil
-	})
-	return errg.Wait()
+	s.Cron.Start()
+	for range services {
+		if err := <-errc; err != nil {
+			s.logger.Error("server stopped", "err", err)
+			return err
+		}
+	}
+	return nil
 }
 
 // Shutdown lets the server gracefully shutdown. The servers drain within ctx.

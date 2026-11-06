@@ -598,11 +598,34 @@ func parseAuthKeys(aks []string) authKeys {
 		if key == "" || strings.HasPrefix(key, "#") {
 			continue
 		}
-		isFile := false
 		if bts, err := os.ReadFile(key); err == nil {
-			// key is a file
-			key = strings.TrimSpace(string(bts))
-			isFile = true
+			// key is a file in authorized_keys format: one key per line.
+			var found bool
+			var bad []string
+			for _, line := range strings.Split(string(bts), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				pk, _, err := sshutils.ParseAuthorizedKey(line)
+				if err != nil {
+					bad = append(bad, line)
+					continue
+				}
+				found = true
+				if _, ok := exist[line]; !ok {
+					r.pks = append(r.pks, pk)
+					exist[line] = struct{}{}
+				}
+			}
+			if !found {
+				r.unreadable = append(r.unreadable, key)
+				continue
+			}
+			// A file that holds keys was read; its other lines are
+			// mistyped keys.
+			r.ignored = append(r.ignored, bad...)
+			continue
 		}
 
 		pk, _, err := sshutils.ParseAuthorizedKey(key)
@@ -612,7 +635,7 @@ func parseAuthKeys(aks []string) authKeys {
 				r.pks = append(r.pks, pk)
 				exist[key] = struct{}{}
 			}
-		case isFile || looksLikePath(key):
+		case looksLikePath(key):
 			r.unreadable = append(r.unreadable, strings.TrimSpace(entry))
 		default:
 			r.ignored = append(r.ignored, key)
