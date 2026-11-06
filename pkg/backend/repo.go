@@ -25,6 +25,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/storage"
 	"github.com/charmbracelet/soft-serve/pkg/utils"
 	"github.com/charmbracelet/soft-serve/pkg/webhook"
+	gitcfg "github.com/go-git/go-git/v5/plumbing/format/config"
 )
 
 // RemotePolicy returns the policy for git remotes supplied on behalf of user:
@@ -43,9 +44,16 @@ func RemotePolicy(cfg *config.Config, user proto.User) ssrf.GitRemotePolicy {
 	}
 }
 
-// errMirrorOwnerNotAdmin explains a refused ssh mirror import. It wraps
-// proto.ErrUnauthorized, so callers that test for that still match.
-var errMirrorOwnerNotAdmin = fmt.Errorf("%w: an ssh mirror is synced with its owner's privileges, and the owner is not an admin; add an ssh.client_allowed_hosts entry for the host or import without --mirror", proto.ErrUnauthorized)
+// errMirrorOwnerNotAdmin explains a refused ssh mirror, at import or when
+// mirroring is switched on later. It wraps proto.ErrUnauthorized, so callers
+// that test for that still match. The allowlist is offered with its caveat:
+// once ssh.client_allowed_hosts is non-empty it binds admins too, so adding
+// one host narrows every admin's ssh reach to the list.
+var errMirrorOwnerNotAdmin = fmt.Errorf("%w: an ssh mirror is synced with its owner's privileges, and the owner is not an admin; make the owner an admin, or list the host in ssh.client_allowed_hosts (a non-empty list also limits admins to the hosts it names)", proto.ErrUnauthorized)
+
+// errMirrorImportOwnerNotAdmin is errMirrorOwnerNotAdmin at import time,
+// where a plain import is a third way out.
+var errMirrorImportOwnerNotAdmin = fmt.Errorf("%w, or import without --mirror", errMirrorOwnerNotAdmin)
 
 // importRemotePolicy returns the policy for the remote and LFS endpoint that
 // user, acting live on ctx, supplies to ImportRepository.
@@ -281,7 +289,7 @@ func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.
 		if mirrorRestricted && errors.Is(err, proto.ErrUnauthorized) {
 			d.logger.Warn("refusing ssh mirror import: owner is not an admin, so the mirror job could not sync it",
 				"name", name, "remote", redactRemote(r), "user", user.Username())
-			return v, errMirrorOwnerNotAdmin
+			return v, errMirrorImportOwnerNotAdmin
 		}
 		return v, err
 	}
@@ -781,7 +789,8 @@ func (d *Backend) SetMirror(ctx context.Context, name string, mirror bool) error
 	rp := d.repoPath(name)
 
 	return wrapRepoError(d.db.TransactionContext(ctx, func(tx *db.Tx) error {
-		if _, err := d.store.GetRepoByName(ctx, tx, name); err != nil {
+		m, err := d.store.GetRepoByName(ctx, tx, name)
+		if err != nil {
 			return err
 		}
 
@@ -830,6 +839,12 @@ func (d *Backend) SetMirror(ctx context.Context, name string, mirror bool) error
 			return errors.New("cannot enable mirror mode: repository has no remote URL configured")
 		}
 
+		if mirror {
+			if err := d.checkMirrorRemotes(ctx, tx, m, rcfg); err != nil {
+				return err
+			}
+		}
+
 		if err := r.SetConfig(rcfg); err != nil {
 			d.logger.Error("failed to set repository config", "err", err, "path", rp)
 			return errRepoUpdate
@@ -837,6 +852,48 @@ func (d *Backend) SetMirror(ctx context.Context, name string, mirror bool) error
 
 		return d.store.SetRepoIsMirrorByName(ctx, tx, name, mirror)
 	}))
+}
+
+// checkMirrorRemotes refuses to switch on mirroring for repo m, whose git
+// config is rcfg, when the mirror job would skip it on every run. The job
+// validates every remote, and the stored LFS endpoint, with RemotePolicy for
+// the repository's owner (see pkg/jobs), so the same check is made here. It
+// matters for a repository imported without --mirror by a caller whose admin
+// key let it reach an ssh host its non-admin owner account may not.
+func (d *Backend) checkMirrorRemotes(ctx context.Context, tx *db.Tx, m models.Repo, rcfg *gitcfg.Config) error {
+	// As in the job, an owner that cannot be looked up is nobody.
+	var owner proto.User
+	if m.UserID.Valid {
+		um, err := d.store.GetUserByID(ctx, tx, m.UserID.Int64)
+		if err == nil {
+			owner = &user{user: um}
+		} else if !errors.Is(db.WrapError(err), db.ErrRecordNotFound) {
+			return err
+		}
+	}
+	policy := RemotePolicy(d.cfg, owner)
+
+	urls := []string{}
+	for _, sub := range rcfg.Section("remote").Subsections {
+		if u := sub.Option("url"); u != "" {
+			urls = append(urls, u)
+		}
+	}
+	if u := rcfg.Section("lfs").Option("url"); u != "" {
+		urls = append(urls, u)
+	}
+	for _, u := range urls {
+		_, err := validateImportRemote(u, policy)
+		if errors.Is(err, proto.ErrUnauthorized) {
+			d.logger.Warn("refusing to enable mirror: owner is not an admin, so the mirror job could not sync it",
+				"repo", m.Name, "remote", redactRemote(u))
+			return errMirrorOwnerNotAdmin
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SetDescription sets the description of a repository.

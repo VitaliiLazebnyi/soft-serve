@@ -292,6 +292,7 @@ func TestImportRepositorySSHAdminKey(t *testing.T) {
 			_, err = be.ImportRepository(keyCtx, "adminkey-mirror", user, remote, mirrorOpts)
 			if registered {
 				is.True(errors.Is(err, proto.ErrUnauthorized))
+				is.True(errors.Is(err, errMirrorImportOwnerNotAdmin))
 				is.True(errors.Is(err, errMirrorOwnerNotAdmin))
 			} else {
 				is.True(errors.Is(err, proto.ErrImportFailed))
@@ -318,6 +319,98 @@ func TestImportRepositorySSHAdminKey(t *testing.T) {
 			is.True(errors.Is(err, proto.ErrImportFailed))
 		})
 	}
+}
+
+// TestSetMirrorChecksOwnerPolicy verifies that switching mirroring on is
+// refused when the mirror job, which validates every remote and the stored
+// LFS endpoint with RemotePolicy for the owner, would skip the repository on
+// every run. Such a repository arises when a non-admin account holding an
+// admin key imports from ssh without --mirror.
+func TestSetMirrorChecksOwnerPolicy(t *testing.T) {
+	is := is.New(t)
+	be, cfg := newTestBackend(t)
+	ctx := backendTestContext(be, cfg)
+	is.Equal(len(cfg.SSH.AllowedHosts()), 0)
+
+	alice, err := be.CreateUser(ctx, "alice", proto.UserOptions{})
+	is.NoErr(err)
+	is.True(!alice.IsAdmin())
+	admin, err := be.User(ctx, "admin")
+	is.NoErr(err)
+
+	// newRepo creates a repository owned by owner whose git config holds
+	// the given remote and, if non-empty, LFS endpoint, as an import does.
+	newRepo := func(name string, owner proto.User, remote, lfsURL string) {
+		t.Helper()
+		_, err := seedCreate(be, ctx, name, owner, proto.RepositoryOptions{})
+		is.NoErr(err)
+		r, err := git.Open(be.repoPath(name))
+		is.NoErr(err)
+		rcfg, err := r.Config()
+		is.NoErr(err)
+		rcfg.Section("remote").Subsection("origin").SetOption("url", remote)
+		if lfsURL != "" {
+			rcfg.Section("lfs").SetOption("url", lfsURL)
+		}
+		is.NoErr(r.SetConfig(rcfg))
+	}
+	isMirror := func(name string) bool {
+		t.Helper()
+		m, err := be.IsMirror(ctx, name)
+		is.NoErr(err)
+		return m
+	}
+
+	const sshRemote = "ssh://git@127.0.0.1:1/x.git"
+	const httpsRemote = "https://1.1.1.1/x.git"
+
+	// A non-admin owner's ssh remote would never sync, so it is refused,
+	// and the flag and git config are left alone.
+	newRepo("alice-ssh", alice, sshRemote, "")
+	err = be.SetMirror(ctx, "alice-ssh", true)
+	is.True(errors.Is(err, proto.ErrUnauthorized))
+	is.True(errors.Is(err, errMirrorOwnerNotAdmin))
+	is.True(!isMirror("alice-ssh"))
+	r, err := git.Open(be.repoPath("alice-ssh"))
+	is.NoErr(err)
+	rcfg, err := r.Config()
+	is.NoErr(err)
+	is.Equal(rcfg.Section("remote").Subsection("origin").Option("mirror"), "")
+
+	// The stored LFS endpoint is checked the same way.
+	newRepo("alice-lfs", alice, httpsRemote, sshRemote)
+	err = be.SetMirror(ctx, "alice-lfs", true)
+	is.True(errors.Is(err, errMirrorOwnerNotAdmin))
+	is.True(!isMirror("alice-lfs"))
+
+	// Switching mirroring off is never refused.
+	is.NoErr(be.SetMirror(ctx, "alice-ssh", false))
+
+	// A public https remote, and an admin owner's ssh remote, pass.
+	newRepo("alice-https", alice, httpsRemote, "")
+	is.NoErr(be.SetMirror(ctx, "alice-https", true))
+	is.True(isMirror("alice-https"))
+	newRepo("admin-ssh", admin, sshRemote, sshRemote)
+	is.NoErr(be.SetMirror(ctx, "admin-ssh", true))
+	is.True(isMirror("admin-ssh"))
+
+	// An allowlist that names the host opens it to the job, and so to the
+	// flag, for a non-admin owner. One that does not is refused with the
+	// remote error, for an admin owner too.
+	cfg.SSH.ClientAllowedHosts = []string{"127.0.0.1:1"}
+	is.NoErr(cfg.Validate())
+	is.NoErr(be.SetMirror(ctx, "alice-ssh", true))
+	is.True(isMirror("alice-ssh"))
+	newRepo("alice-lfs-other", alice, sshRemote, "ssh://git@10.0.0.1/x.git")
+	err = be.SetMirror(ctx, "alice-lfs-other", true)
+	is.True(errors.Is(err, proto.ErrInvalidRemote))
+	is.True(errors.Is(err, ssrf.ErrSSHHostNotAllowed))
+	is.NoErr(be.SetMirror(ctx, "admin-ssh", false))
+	cfg.SSH.ClientAllowedHosts = []string{"git.internal.example"}
+	is.NoErr(cfg.Validate())
+	err = be.SetMirror(ctx, "admin-ssh", true)
+	is.True(errors.Is(err, ssrf.ErrSSHHostNotAllowed))
+	is.True(!isMirror("admin-ssh"))
 }
 
 // TestImportRepositoryDisabled verifies that when the installed git is too
