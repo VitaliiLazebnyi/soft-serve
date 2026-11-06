@@ -284,8 +284,58 @@ func recordDelivery(ctx context.Context, w models.Webhook, event Event, req requ
 
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	return db.WrapError(datastore.CreateWebhookDelivery(rctx, dbx, req.id, w.ID, int(event), w.URL, http.MethodPost, reqErr, reqHeaders, req.body, resStatus, resHeaders, resBody))
+	create := func(h db.Handler) error {
+		return datastore.CreateWebhookDelivery(rctx, h, req.id, w.ID, int(event), w.URL, http.MethodPost, reqErr, reqHeaders, req.body, resStatus, resHeaders, resBody)
+	}
+
+	// The delivery is recorded and the older ones pruned in one transaction,
+	// so SQLite takes its write lock and syncs once. Recording comes first:
+	// a SQLite transaction that writes first waits for other writers rather
+	// than failing with SQLITE_BUSY.
+	//
+	// On Postgres seq is taken from its sequence when a row is inserted, not
+	// when it commits. Deliveries of one webhook are recorded by separate
+	// processes (the server and each git hook), so a delivery whose
+	// transaction commits late can already be older, by seq, than the
+	// newest maxDeliveries rows and be pruned by the next record. That needs
+	// maxDeliveries deliveries of the same webhook recorded while its insert
+	// is in flight; the cost is one delivery missing from the history, which
+	// pruning by seq accepts rather than ordering commits.
+	var pruneErr error
+	err := dbx.TransactionContext(rctx, func(tx *db.Tx) error {
+		if err := create(tx); err != nil {
+			return err
+		}
+		pruneErr = datastore.PruneWebhookDeliveries(rctx, tx, w.ID, maxDeliveries)
+		return pruneErr
+	})
+	if err != nil && pruneErr != nil {
+		// A failed prune only leaves extra rows for the next delivery's
+		// prune, so it must not lose the delivery: the transaction was
+		// rolled back, and the delivery is recorded again without pruning.
+		log.FromContext(ctx).Warn("pruning webhook deliveries", "webhook", w.ID, "err", pruneErr)
+		err = create(dbx)
+	}
+	return db.WrapError(err)
 }
+
+// maxDeliveries is how many deliveries are kept per webhook. Every recorded
+// delivery deletes the older ones, so events, including ones recorded without
+// sending when the queue is full, cannot grow the deliveries table without
+// limit. Migration 5 (pkg/db/migrate/0005_webhook_delivery_retention_*.up.sql)
+// trimmed existing tables once to the then value, 100; it is a snapshot and
+// does not follow later changes here. It is a variable so tests can lower it.
+var maxDeliveries = 100
+
+// MaxWebhooksPerRepo is how many webhooks a repository can have. Each event
+// is sent to, recorded for and pruned for every subscribed webhook, and each
+// webhook keeps maxDeliveries deliveries, so this bounds both the work one
+// event causes and the deliveries a repository stores.
+const MaxWebhooksPerRepo = 20
+
+// ErrTooManyWebhooks is returned when creating a webhook for a repository
+// that already has MaxWebhooksPerRepo webhooks.
+var ErrTooManyWebhooks = fmt.Errorf("a repository can have at most %d webhooks", MaxWebhooksPerRepo)
 
 // RecordUndelivered records a delivery of payload to each webhook without
 // sending it, with reason as the request error. Use it when an event cannot

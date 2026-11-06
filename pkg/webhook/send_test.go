@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -25,6 +26,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/charmbracelet/soft-serve/pkg/store"
+	"github.com/google/uuid"
 	"github.com/matryer/is"
 )
 
@@ -578,6 +580,102 @@ func TestRecordUndeliveredStoresRequestWithoutSending(t *testing.T) {
 	is.NoErr(err)
 	is.Equal(strings.TrimSpace(ds[0].RequestBody), string(want))
 	is.True(strings.Contains(ds[0].RequestHeaders, "X-Softserve-Signature: sha256="))
+}
+
+// useRetention sets how many deliveries each webhook keeps for the test. It
+// swaps a package variable, so tests using it must not call t.Parallel.
+func useRetention(t *testing.T, keep int) {
+	t.Helper()
+	orig := maxDeliveries
+	maxDeliveries = keep
+	t.Cleanup(func() { maxDeliveries = orig })
+}
+
+// Undelivered events cost no network time, so they are the quickest way to
+// grow the deliveries table. Every record prunes, so a webhook never holds
+// more than the limit, and pruning one webhook leaves the others' deliveries
+// alone.
+func TestRecordedDeliveriesAreBoundedPerWebhook(t *testing.T) {
+	is := is.New(t)
+	useRetention(t, 5)
+	e := newTestEnv(t)
+	a := e.newWebhook(t, "https://93.184.216.34/a", "", ContentTypeJSON, EventPush)
+	b := e.newWebhook(t, "https://93.184.216.34/b", "", ContentTypeJSON, EventPush)
+	payload := samplePayloadFor(e)
+
+	var recorded []uuid.UUID
+	for i := range 12 {
+		is.NoErr(RecordUndelivered(e.ctx, []models.Webhook{a}, payload, errors.New("queue full")))
+		ds := e.deliveries(t, a.ID)
+		is.Equal(len(ds), min(i+1, 5))
+		// The delivery just recorded is always kept.
+		recorded = append(recorded, ds[len(ds)-1].ID)
+	}
+	for range 3 {
+		is.NoErr(RecordUndelivered(e.ctx, []models.Webhook{b}, payload, errors.New("queue full")))
+	}
+
+	// The five kept are the five most recent, oldest first.
+	var kept []uuid.UUID
+	for _, d := range e.deliveries(t, a.ID) {
+		kept = append(kept, d.ID)
+	}
+	is.Equal(kept, recorded[len(recorded)-5:])
+	is.Equal(len(e.deliveries(t, b.ID)), 3)
+}
+
+// Production delivery IDs are time-based (version 1) UUIDs, whose text does
+// not sort by time, so retention must not depend on them. Deliveries with
+// IDs in descending order are still pruned oldest first.
+func TestRecordedDeliveriesPruneIgnoresIDOrder(t *testing.T) {
+	is := is.New(t)
+	useRetention(t, 2)
+	e := newTestEnv(t)
+	w := e.newWebhook(t, "https://93.184.216.34/a", "", ContentTypeJSON, EventPush)
+	ids := []uuid.UUID{
+		uuid.MustParse("ffffffff-0000-1000-8000-000000000000"),
+		uuid.MustParse("88888888-0000-1000-8000-000000000000"),
+		uuid.MustParse("00000000-0000-1000-8000-000000000000"),
+	}
+	for _, id := range ids {
+		req, err := newRequest(w, EventPush, samplePayloadFor(e))
+		is.NoErr(err)
+		req.id = id
+		is.NoErr(recordDelivery(e.ctx, w, EventPush, req, nil, 200, "", ""))
+	}
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 2)
+	is.Equal(ds[0].ID, ids[1])
+	is.Equal(ds[1].ID, ids[2])
+}
+
+// failingPruneStore is a store whose prune always fails.
+type failingPruneStore struct{ store.Store }
+
+func (failingPruneStore) PruneWebhookDeliveries(context.Context, db.Handler, int64, int) error {
+	return errors.New("prune failed")
+}
+
+// A failed prune rolls back the transaction it shares with the insert, but
+// must not lose the delivery: it is recorded again without pruning, and the
+// failure is logged through the context's logger.
+func TestRecordDeliveryKeepsDeliveryWhenPruneFails(t *testing.T) {
+	is := is.New(t)
+	e := newTestEnv(t)
+	w := e.newWebhook(t, "https://93.184.216.34/a", "", ContentTypeJSON, EventPush)
+	var logs bytes.Buffer
+	ctx := store.WithContext(e.ctx, failingPruneStore{e.ds})
+	ctx = log.WithContext(ctx, log.New(&logs))
+
+	req, err := newRequest(w, EventPush, samplePayloadFor(e))
+	is.NoErr(err)
+	is.NoErr(recordDelivery(ctx, w, EventPush, req, nil, 200, "", ""))
+
+	ds := e.deliveries(t, w.ID)
+	is.Equal(len(ds), 1)
+	is.Equal(ds[0].ID, req.id)
+	is.True(strings.Contains(logs.String(), "pruning webhook deliveries"))
+	is.True(strings.Contains(logs.String(), "prune failed"))
 }
 
 // Deliver re-reads each webhook before sending, so an event that waited while

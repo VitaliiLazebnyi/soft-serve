@@ -36,6 +36,21 @@ func (b *Backend) CreateWebhook(ctx context.Context, repo proto.Repository, url 
 			return db.WrapError(err)
 		}
 
+		// The cap is checked after the insert, in the same transaction, which
+		// rolls the insert back if the repository is over it. Inserting first
+		// matters on SQLite: a transaction that reads before its first write
+		// cannot wait for another writer and fails with SQLITE_BUSY, while
+		// one that writes first waits (busy_timeout) and then holds the write
+		// lock through the count. On Postgres the count locks the repository
+		// first, so creates racing at the cap take turns.
+		total, err := datastore.LockAndCountWebhooks(ctx, tx, repo.ID())
+		if err != nil {
+			return db.WrapError(err)
+		}
+		if total > webhook.MaxWebhooksPerRepo {
+			return webhook.ErrTooManyWebhooks
+		}
+
 		evs := make([]int, len(events))
 		for i, e := range events {
 			evs[i] = int(e)

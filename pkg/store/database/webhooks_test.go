@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/soft-serve/pkg/config"
@@ -249,6 +250,7 @@ func TestWebhookStoreErrorsOnClosedDB(t *testing.T) {
 	checks := map[string]error{}
 	_, checks["GetWebhookByID"] = s.GetWebhookByID(ctx, dbx, 7, id)
 	_, checks["GetWebhooksByRepoID"] = s.GetWebhooksByRepoID(ctx, dbx, 7)
+	_, checks["LockAndCountWebhooks"] = s.LockAndCountWebhooks(ctx, dbx, 7)
 	_, checks["GetWebhooksByRepoIDWhereEvent"] = s.GetWebhooksByRepoIDWhereEvent(ctx, dbx, 7, []int{4})
 	_, checks["CreateWebhook"] = s.CreateWebhook(ctx, dbx, 7, "u", "", 0, true)
 	checks["UpdateWebhookByID"] = s.UpdateWebhookByID(ctx, dbx, 7, id, "u", "", 0, true)
@@ -265,6 +267,7 @@ func TestWebhookStoreErrorsOnClosedDB(t *testing.T) {
 	_, checks["ListWebhookDeliveriesByWebhookID"] = s.ListWebhookDeliveriesByWebhookID(ctx, dbx, id)
 	checks["CreateWebhookDelivery"] = s.CreateWebhookDelivery(ctx, dbx, uuid.New(), id, 4, "u", "POST", nil, "", "", 0, "", "")
 	checks["DeleteWebhookDeliveryByID"] = s.DeleteWebhookDeliveryByID(ctx, dbx, id, did)
+	checks["PruneWebhookDeliveries"] = s.PruneWebhookDeliveries(ctx, dbx, id, 1)
 
 	for name, err := range checks {
 		if err == nil {
@@ -412,10 +415,111 @@ func TestWebhookStoreDeliveriesOrder(t *testing.T) {
 	check()
 }
 
+// Pruning keeps the most recently recorded deliveries of one webhook and
+// leaves the deliveries of other webhooks alone. Recording order is what
+// counts: created_at and the IDs are set to run the other way.
+func TestPruneWebhookDeliveriesKeepsNewest(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+	hook, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 1, true)
+	is.NoErr(err)
+	other, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.35/b", "", 1, true)
+	is.NoErr(err)
+
+	// Eight deliveries, recorded with descending IDs and created_at, and
+	// interleaved with deliveries of another webhook.
+	ids := make([]uuid.UUID, 8)
+	for i := range ids {
+		ids[i] = uuid.MustParse(fmt.Sprintf("%08d-0000-1000-8000-000000000000", 99-i))
+		is.NoErr(s.CreateWebhookDelivery(ctx, dbx, ids[i], hook, 1, "u", "POST", nil, "", "{}", 200, "", ""))
+		_, err := dbx.ExecContext(ctx, dbx.Rebind(`UPDATE webhook_deliveries SET created_at = ? WHERE id = ?;`),
+			fmt.Sprintf("2024-01-01 00:00:%02d", 59-i), ids[i])
+		is.NoErr(err)
+		if i < 3 {
+			is.NoErr(s.CreateWebhookDelivery(ctx, dbx, uuid.New(), other, 1, "u", "POST", nil, "", "{}", 200, "", ""))
+		}
+	}
+
+	keptIDs := func() []uuid.UUID {
+		t.Helper()
+		all, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, hook)
+		is.NoErr(err)
+		out := []uuid.UUID{}
+		for _, d := range all {
+			out = append(out, d.ID)
+		}
+		return out
+	}
+
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 5))
+	is.Equal(keptIDs(), ids[3:]) // the three recorded first are gone
+
+	others, err := s.GetWebhookDeliveriesByWebhookID(ctx, dbx, other)
+	is.NoErr(err)
+	is.Equal(len(others), 3)
+
+	// Exactly as many deliveries as the limit, or fewer: nothing is deleted.
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 5))
+	is.Equal(keptIDs(), ids[3:])
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 100))
+	is.Equal(keptIDs(), ids[3:])
+
+	is.NoErr(s.PruneWebhookDeliveries(ctx, dbx, hook, 0))
+	is.Equal(keptIDs(), []uuid.UUID{})
+	others, err = s.GetWebhookDeliveriesByWebhookID(ctx, dbx, other)
+	is.NoErr(err)
+	is.Equal(len(others), 3)
+}
+
+// The prune runs on every recorded delivery, so it must not scan the
+// deliveries table. On SQLite both its lookups use the (webhook_id, seq)
+// index. Postgres picks its plan from table statistics, which a small test
+// table does not represent, so its plan is not asserted.
+func TestPruneWebhookDeliveriesUsesIndex(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	if !isSqlite(dbx) {
+		t.Skip("checks an SQLite query plan")
+	}
+	var plan []struct {
+		ID      int    `db:"id"`
+		Parent  int    `db:"parent"`
+		NotUsed int    `db:"notused"`
+		Detail  string `db:"detail"`
+	}
+	is.NoErr(dbx.SelectContext(ctx, &plan, "EXPLAIN QUERY PLAN "+pruneWebhookDeliveriesQuery, 1, 1, 100))
+	is.True(len(plan) > 0)
+	for _, p := range plan {
+		t.Log(p.Detail)
+		is.True(!strings.HasPrefix(p.Detail, "SCAN"))       // no full scan
+		is.True(!strings.Contains(p.Detail, "TEMP B-TREE")) // no sort
+	}
+}
+
 func idsOf(whs []models.Webhook) []int64 {
 	out := make([]int64, len(whs))
 	for i, w := range whs {
 		out[i] = w.ID
 	}
 	return out
+}
+
+// LockAndCountWebhooks counts only the given repository's webhooks.
+func TestLockAndCountWebhooks(t *testing.T) {
+	is := is.New(t)
+	ctx, dbx := newWebhookTestDB(t)
+	s := &webhookStore{}
+	n, err := s.LockAndCountWebhooks(ctx, dbx, 7)
+	is.NoErr(err)
+	is.Equal(n, 0)
+	for i := range 3 {
+		_, err := s.CreateWebhook(ctx, dbx, 7, fmt.Sprintf("https://93.184.216.34/%d", i), "", 1, true)
+		is.NoErr(err)
+	}
+	_, err = s.CreateWebhook(ctx, dbx, 8, "https://93.184.216.35/x", "", 1, true)
+	is.NoErr(err)
+	n, err = s.LockAndCountWebhooks(ctx, dbx, 7)
+	is.NoErr(err)
+	is.Equal(n, 3)
 }

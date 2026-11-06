@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -119,6 +120,33 @@ func (*webhookStore) DeleteWebhookDeliveryByID(ctx context.Context, h db.Handler
 	return err
 }
 
+// PruneWebhookDeliveries implements store.WebhookStore.
+//
+// Deliveries are ordered by seq, which increases with every delivery
+// recorded. The subquery finds the seq of the newest delivery past the keep
+// most recent, and everything up to it is deleted. Both steps walk the
+// (webhook_id, seq) index, so the cost depends on keep and on the rows
+// deleted, not on the size of the table. With keep or fewer deliveries the
+// subquery is NULL and nothing is deleted. The same statement works on SQLite
+// and Postgres.
+func (*webhookStore) PruneWebhookDeliveries(ctx context.Context, h db.Handler, webhookID int64, keep int) error {
+	if keep < 0 {
+		keep = 0
+	}
+	_, err := h.ExecContext(ctx, h.Rebind(pruneWebhookDeliveriesQuery), webhookID, webhookID, keep)
+	return err
+}
+
+// pruneWebhookDeliveriesQuery takes the webhook ID twice and then keep.
+const pruneWebhookDeliveriesQuery = `DELETE FROM webhook_deliveries
+	WHERE webhook_id = ?
+	AND seq <= (
+		SELECT seq FROM webhook_deliveries
+		WHERE webhook_id = ?
+		ORDER BY seq DESC
+		LIMIT 1 OFFSET ?
+	);`
+
 // DeleteWebhookEventsByID implements store.WebhookStore.
 func (*webhookStore) DeleteWebhookEventsByID(ctx context.Context, h db.Handler, ids []int64) error {
 	// sqlx rejects an empty IN clause, and there is nothing to delete.
@@ -183,6 +211,39 @@ func (*webhookStore) GetWebhooksByRepoID(ctx context.Context, h db.Handler, repo
 	var whs []models.Webhook
 	err := h.SelectContext(ctx, &whs, query, repoID)
 	return whs, err
+}
+
+// LockAndCountWebhooks implements store.WebhookStore.
+//
+// Postgres runs transactions in READ COMMITTED, where two transactions can
+// each insert a webhook and count without seeing the other's. Locking the
+// repository row before the COUNT makes the second wait until the first
+// commits; its COUNT then runs with a fresh snapshot and sees the first one's
+// webhook. FOR NO KEY UPDATE conflicts only with itself and FOR UPDATE, so
+// unlike FOR UPDATE it does not block the key-share locks that inserts into
+// tables referencing the repository take, including the caller's own insert
+// in another transaction.
+//
+// SQLite has no row locks and needs none here: a transaction that has
+// already written holds the database's write lock until it ends, so callers
+// that insert before they count take turns.
+func (*webhookStore) LockAndCountWebhooks(ctx context.Context, h db.Handler, repoID int64) (int, error) {
+	d, ok := h.(interface{ DriverName() string })
+	if !ok {
+		return 0, fmt.Errorf("lock and count webhooks: handler %T does not report its driver", h)
+	}
+	switch driver := d.DriverName(); driver {
+	case "postgres":
+		if _, err := h.ExecContext(ctx, `SELECT 1 FROM repos WHERE id = $1 FOR NO KEY UPDATE;`, repoID); err != nil {
+			return 0, err
+		}
+	case "sqlite", "sqlite3":
+	default:
+		return 0, fmt.Errorf("lock and count webhooks: unsupported database driver %q", driver)
+	}
+	var n int
+	err := h.GetContext(ctx, &n, h.Rebind(`SELECT COUNT(*) FROM webhooks WHERE repo_id = ?;`), repoID)
+	return n, err
 }
 
 // GetWebhooksByRepoIDWhereEvent implements store.WebhookStore. Only active
