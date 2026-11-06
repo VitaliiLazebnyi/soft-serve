@@ -105,10 +105,14 @@ func Migrate(ctx context.Context, dbx *db.DB) error {
 func Rollback(ctx context.Context, dbx *db.DB) error {
 	logger := log.FromContext(ctx).WithPrefix("migrate")
 	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
+		if !hasTable(tx, "migrations") {
+			return fmt.Errorf("there are no migrations to rollback")
+		}
+
 		var migrs Migrations
 		if err := tx.Get(&migrs, tx.Rebind("SELECT * FROM migrations ORDER BY version DESC LIMIT 1")); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("there are no migrations to rollback: %w", err)
+				return fmt.Errorf("get latest migration: %w", err)
 			}
 		}
 
