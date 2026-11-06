@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -53,7 +54,7 @@ func setup(tb testing.TB) (*gossh.Session, func() error) {
 	dp := tb.TempDir()
 	is.NoErr(os.Setenv("SOFT_SERVE_DATA_PATH", dp))
 	is.NoErr(os.Setenv("SOFT_SERVE_GIT_LISTEN_ADDR", ":9418"))
-	is.NoErr(os.Setenv("SOFT_SERVE_SSH_LISTEN_ADDR", fmt.Sprintf(":%d", test.RandomPort())))
+	is.NoErr(os.Setenv("SOFT_SERVE_SSH_LISTEN_ADDR", fmt.Sprintf("127.0.0.1:%d", test.RandomPort()))) // RandomPort checks only loopback
 	tb.Cleanup(func() {
 		is.NoErr(os.Unsetenv("SOFT_SERVE_DATA_PATH"))
 		is.NoErr(os.Unsetenv("SOFT_SERVE_GIT_LISTEN_ADDR"))
@@ -85,4 +86,21 @@ func setup(tb testing.TB) (*gossh.Session, func() error) {
 			s.Exit(0)
 		})),
 	}, nil), dbx.Close
+}
+
+// TestSetupListensOnLoopback checks that setup configures the SSH server to
+// bind only loopback. RandomPort checks that a port is free on loopback
+// alone, so a server bound to every interface could collide with a listener
+// on another one.
+func TestSetupListensOnLoopback(t *testing.T) {
+	_, closeDB := setup(t)
+	t.Cleanup(func() { _ = closeDB() })
+	addr := os.Getenv("SOFT_SERVE_SSH_LISTEN_ADDR")
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("invalid SSH listen address %q: %v", addr, err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		t.Fatalf("SSH listens on %q, want a loopback address", addr)
+	}
 }

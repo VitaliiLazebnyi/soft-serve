@@ -188,14 +188,12 @@ func repoFromContext(ctx context.Context) (proto.Repository, access.AccessLevel,
 }
 
 // IsPublicKeyAdmin returns true if the given public key is an admin key from
-// the initial_admin_keys config or environment field.
-func IsPublicKeyAdmin(cfg *config.Config, pk ssh.PublicKey) bool {
-	for _, k := range cfg.AdminKeys() {
-		if sshutils.KeysEqual(pk, k) {
-			return true
-		}
-	}
-	return false
+// the initial_admin_keys config or environment field. It asks the backend,
+// which caches the parsed keys, rather than config.AdminKeys, which parses
+// every entry on every call.
+func IsPublicKeyAdmin(ctx context.Context, pk ssh.PublicKey) bool {
+	be := backend.FromContext(ctx)
+	return be != nil && be.IsAdminKey(pk)
 }
 
 // isServerAdmin reports whether the caller is a server administrator: either
@@ -205,9 +203,8 @@ func IsPublicKeyAdmin(cfg *config.Config, pk ssh.PublicKey) bool {
 // This is the single source of truth for "is this caller a server admin".
 // Every authorization gate defers to it so the definition cannot drift.
 func isServerAdmin(ctx context.Context) bool {
-	cfg := config.FromContext(ctx)
 	pk := sshutils.PublicKeyFromContext(ctx)
-	if IsPublicKeyAdmin(cfg, pk) {
+	if IsPublicKeyAdmin(ctx, pk) {
 		return true
 	}
 
