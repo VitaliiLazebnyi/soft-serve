@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
+	"github.com/charmbracelet/soft-serve/pkg/db/dbtest"
 	"github.com/charmbracelet/soft-serve/pkg/db/migrate"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/google/uuid"
@@ -16,29 +17,41 @@ import (
 	"github.com/matryer/is"
 )
 
-// newWebhookTestDB opens a migrated SQLite database for one test.
+// newWebhookTestDB opens a migrated database for one test: Postgres when
+// SOFT_SERVE_DB_DRIVER is "postgres", SQLite otherwise.
 func newWebhookTestDB(t *testing.T) (context.Context, *db.DB) {
 	t.Helper()
 	is := is.New(t)
 	ctx := context.Background()
-	dp := t.TempDir()
-	cfg := config.DefaultConfig()
-	cfg.DataPath = dp
-	ctx = config.WithContext(ctx, cfg)
-	dbx, err := db.Open(ctx, "sqlite", dp+"/test.db?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	dbx, err := dbtest.Open(ctx, t)
 	is.NoErr(err)
-	t.Cleanup(func() { dbx.Close() }) //nolint:errcheck
+	cfg := config.DefaultConfig()
+	cfg.DataPath = t.TempDir()
+	cfg.DB.Driver = dbx.DriverName()
+	ctx = config.WithContext(ctx, cfg)
+	if isSqlite(dbx) {
+		// Enforce foreign keys, as the server's default data source does.
+		// One connection, so the pragma holds for every statement.
+		dbx.SetMaxOpenConns(1)
+		_, err = dbx.ExecContext(ctx, `PRAGMA foreign_keys = ON;`)
+		is.NoErr(err)
+	}
 	is.NoErr(migrate.Migrate(ctx, dbx))
 
 	// Foreign keys are enforced, so the webhook tables need real parents: one
 	// user and the repos 7 and 8 that the tests use.
-	_, err = dbx.ExecContext(ctx, `INSERT INTO users (id, username, admin, updated_at) VALUES (100, 'owner', 0, CURRENT_TIMESTAMP);`)
+	_, err = dbx.ExecContext(ctx, `INSERT INTO users (id, username, admin, updated_at) VALUES (100, 'owner', false, CURRENT_TIMESTAMP);`)
 	is.NoErr(err)
 	_, err = dbx.ExecContext(ctx, `INSERT INTO repos (id, name, project_name, description, private, mirror, hidden, user_id, updated_at)
-		VALUES (7, 'repo7', 'repo7', '', 0, 0, 0, 100, CURRENT_TIMESTAMP),
-		       (8, 'repo8', 'repo8', '', 0, 0, 0, 100, CURRENT_TIMESTAMP);`)
+		VALUES (7, 'repo7', 'repo7', '', false, false, false, 100, CURRENT_TIMESTAMP),
+		       (8, 'repo8', 'repo8', '', false, false, false, 100, CURRENT_TIMESTAMP);`)
 	is.NoErr(err)
 	return ctx, dbx
+}
+
+func isSqlite(dbx *db.DB) bool {
+	d := dbx.DriverName()
+	return d == "sqlite" || d == "sqlite3"
 }
 
 func TestWebhookStoreRoundTrip(t *testing.T) {
@@ -261,9 +274,20 @@ func TestCreateWebhookDeliveryForeignKeyViolationIsSkipped(t *testing.T) {
 	s := &webhookStore{}
 	id, err := s.CreateWebhook(ctx, dbx, 7, "https://93.184.216.34/a", "", 1, true)
 	is.NoErr(err)
-	_, err = dbx.ExecContext(ctx, `CREATE TRIGGER vanish BEFORE INSERT ON webhook_deliveries
-		BEGIN DELETE FROM webhooks WHERE id = NEW.webhook_id; END;`)
-	is.NoErr(err)
+	triggers := []string{`CREATE TRIGGER vanish BEFORE INSERT ON webhook_deliveries
+		BEGIN DELETE FROM webhooks WHERE id = NEW.webhook_id; END;`}
+	if !isSqlite(dbx) {
+		triggers = []string{
+			`CREATE FUNCTION vanish() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN DELETE FROM webhooks WHERE id = NEW.webhook_id; RETURN NEW; END $$;`,
+			`CREATE TRIGGER vanish BEFORE INSERT ON webhook_deliveries
+			FOR EACH ROW EXECUTE FUNCTION vanish();`,
+		}
+	}
+	for _, q := range triggers {
+		_, err = dbx.ExecContext(ctx, q)
+		is.NoErr(err)
+	}
 
 	is.NoErr(s.CreateWebhookDelivery(ctx, dbx, uuid.New(), id, 1, "https://93.184.216.34/a", "POST", nil, "", "{}", 200, "", ""))
 
@@ -281,7 +305,7 @@ func TestIsForeignKeyViolation(t *testing.T) {
 	is.True(!isForeignKeyViolation(errors.New("FOREIGN KEY constraint failed")))
 	is.True(!isForeignKeyViolation(nil))
 
-	// A real SQLite foreign key violation.
+	// A real foreign key violation from the driver under test.
 	ctx, dbx := newWebhookTestDB(t)
 	_, err := dbx.ExecContext(ctx, `INSERT INTO webhook_events (webhook_id, event) VALUES (424242, 1)`)
 	is.True(err != nil)
@@ -372,8 +396,8 @@ func TestWebhookStoreDeliveriesOrder(t *testing.T) {
 	// The listing follows seq, not the physical row order: a row stored last
 	// with the lowest seq lists first.
 	first := uuid.New()
-	_, err = dbx.ExecContext(ctx, `INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_headers, request_body, response_status, response_headers, response_body, seq)
-		VALUES (?, ?, 1, '', 'POST', '', '{}', 200, '', '', 0);`, first, hook)
+	_, err = dbx.ExecContext(ctx, dbx.Rebind(`INSERT INTO webhook_deliveries (id, webhook_id, event, request_url, request_method, request_headers, request_body, response_status, response_headers, response_body, seq)
+		VALUES (?, ?, 1, '', 'POST', '', '{}', 200, '', '', 0);`), first, hook)
 	is.NoErr(err)
 	want = append([]uuid.UUID{first}, want...)
 	check()
