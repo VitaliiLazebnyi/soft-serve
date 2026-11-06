@@ -112,11 +112,26 @@ func Rollback(ctx context.Context, dbx *db.DB) error {
 			}
 		}
 
-		if migrs.Version == 0 || len(migrations) < int(migrs.Version) {
+		if migrs.Version == 0 {
 			return fmt.Errorf("there are no migrations to rollback")
 		}
 
-		m := migrations[migrs.Version-1]
+		// Look the migration up by version rather than by position, and
+		// refuse to roll back one this binary does not know.
+		var m *Migration
+		for i := range migrations {
+			if migrations[i].Version == migrs.Version {
+				m = &migrations[i]
+				break
+			}
+		}
+		if m == nil {
+			if n := len(migrations); n > 0 && migrs.Version > migrations[n-1].Version {
+				return fmt.Errorf("database is at migration version %d, newer than the latest version %d known to this binary; upgrade soft-serve", migrs.Version, migrations[n-1].Version)
+			}
+			return fmt.Errorf("database is at migration version %d, which is unknown to this binary", migrs.Version)
+		}
+
 		logger.Infof("rolling back migration %d. %s", m.Version, m.Name)
 		if err := m.Rollback(ctx, tx); err != nil {
 			return err
@@ -140,7 +155,8 @@ func hasTable(tx *db.Tx, tableName string) bool {
 		// which follows search_path and is not necessarily "public".
 		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?"
 	case "mysql":
-		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?"
+		// A MySQL schema is a database; look in the connection's current one.
+		query = "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
 	}
 
 	query = tx.Rebind(query)
