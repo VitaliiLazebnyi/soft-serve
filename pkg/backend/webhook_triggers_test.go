@@ -329,7 +329,10 @@ func TestCollaboratorChangesKeepWhenEventFails(t *testing.T) {
 	is.NoErr(e.be.RemoveCollaborator(e.ctx, "repo", "bob"))
 	// The repository is public, so a non-collaborator gets read-only.
 	is.Equal(e.be.AccessLevelForUser(e.ctx, "repo", bob), access.ReadOnlyAccess)
-	e.awaitLog(t, "webhook event not delivered")
+	// Wait for both events, so neither is still writing under the test's
+	// temporary directory when it is removed.
+	e.be.WaitForDeliveries(e.ctx)
+	is.Equal(strings.Count(e.logs.String(), "webhook event not delivered"), 2)
 }
 
 func TestRemoveCollaboratorNotFound(t *testing.T) {
