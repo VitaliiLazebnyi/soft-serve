@@ -46,9 +46,14 @@ type httpClient struct {
 
 var _ Client = (*httpClient)(nil)
 
+// secureHTTPClient is the SSRF-protected HTTP client shared by every LFS
+// client, so they all draw from one connection pool instead of each keeping
+// its own idle connections.
+var secureHTTPClient = ssrf.NewSecureClient()
+
 // newHTTPClient returns a new Git LFS client.
 func newHTTPClient(endpoint Endpoint) *httpClient {
-	client := ssrf.NewSecureClient()
+	client := secureHTTPClient
 	return &httpClient{
 		client:   client,
 		endpoint: endpoint,
