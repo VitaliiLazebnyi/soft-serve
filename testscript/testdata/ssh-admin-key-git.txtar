@@ -110,6 +110,11 @@ soft user add-pubkey holder "$ADMIN1_AUTHORIZED_KEY"
 stderr 'attached to non-admin account'
 ! exists hpriv/README.md
 
+# other keys are unaffected (this also leaves stderr empty for the windows
+# check below)
+usoft repo info upriv
+stdout 'Repository: upriv'
+
 # stop the server
 [windows] stopserver
 [windows] ! stderr .
