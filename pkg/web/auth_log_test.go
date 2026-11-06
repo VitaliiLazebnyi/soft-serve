@@ -149,6 +149,14 @@ func TestFailedAuthNotLoggedAsError(t *testing.T) {
 			if out := logs.String(); strings.Contains(out, "ERRO") {
 				t.Errorf("failed login logged at error level:\n%s", out)
 			}
+
+			// The same login through the router, which also logs the
+			// authentication result.
+			logs.Reset()
+			f.do(http.MethodGet, "/secret.git/info/refs?service=git-upload-pack", header)
+			if out := logs.String(); strings.Contains(out, "ERRO") {
+				t.Errorf("failed login logged at error level by the router:\n%s", out)
+			}
 		})
 	}
 }
