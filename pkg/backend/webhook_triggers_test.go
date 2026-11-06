@@ -481,6 +481,24 @@ func TestUpdateHookUnknownPublicKey(t *testing.T) {
 	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventBranchTagCreate})
 }
 
+// A push with neither a public key nor a username, such as an anonymous HTTP
+// or keyless SSH push with anon-access read-write, still sends its events:
+// the server authorized the push.
+func TestUpdateHookAnonymousPush(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	t.Setenv("SOFT_SERVE_USERNAME", "")
+	t.Setenv("SOFT_SERVE_PUBLIC_KEY", "")
+	id := e.seedHook(t, webhook.EventBranchTagCreate, webhook.EventPush)
+	commit := makeCommit(t, e.be.repoPath("repo"))
+
+	e.be.Update(e.ctx, io.Discard, io.Discard, "repo", hooks.HookArg{
+		OldSha: zeroSha, NewSha: commit, RefName: "refs/heads/main",
+	})
+
+	is.Equal(e.deliveredEvents(t, id), []webhook.Event{webhook.EventBranchTagCreate, webhook.EventPush})
+}
+
 // Collaborator changes validate the username before anything is written.
 func TestAddCollaboratorRejectsInvalidUsername(t *testing.T) {
 	is := is.New(t)
