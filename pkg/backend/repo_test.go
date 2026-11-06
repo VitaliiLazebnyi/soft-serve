@@ -102,7 +102,7 @@ func TestValidateImportRemote(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			is := is.New(t)
-			v, err := validateImportRemote(tt.remote, tt.policy)
+			v, err := validateImportRemote(context.Background(), tt.remote, tt.policy)
 
 			if tt.wantErr != nil {
 				is.True(errors.Is(err, tt.wantErr))
@@ -322,9 +322,9 @@ func TestImportRepositorySSHAdminKey(t *testing.T) {
 }
 
 // TestSetMirrorChecksOwnerPolicy verifies that switching mirroring on is
-// refused when the mirror job, which validates every remote and the stored
-// LFS endpoint with RemotePolicy for the owner, would skip the repository on
-// every run. Such a repository arises when a non-admin account holding an
+// refused when the mirror job, which validates every remote with
+// RemotePolicy for the owner, would skip the repository on every run, and
+// that an LFS endpoint the job would skip is not a refusal. Such a repository arises when a non-admin account holding an
 // admin key imports from ssh without --mirror.
 func TestSetMirrorChecksOwnerPolicy(t *testing.T) {
 	is := is.New(t)
@@ -377,11 +377,18 @@ func TestSetMirrorChecksOwnerPolicy(t *testing.T) {
 	is.NoErr(err)
 	is.Equal(rcfg.Section("remote").Subsection("origin").Option("mirror"), "")
 
-	// The stored LFS endpoint is checked the same way.
+	// An LFS endpoint that fails validation does not refuse the switch,
+	// with LFS on or off: the job syncs the git data regardless and skips
+	// only the LFS objects.
 	newRepo("alice-lfs", alice, httpsRemote, sshRemote)
-	err = be.SetMirror(ctx, "alice-lfs", true)
-	is.True(errors.Is(err, errMirrorOwnerNotAdmin))
-	is.True(!isMirror("alice-lfs"))
+	is.True(cfg.LFS.Enabled)
+	is.NoErr(be.SetMirror(ctx, "alice-lfs", true))
+	is.True(isMirror("alice-lfs"))
+	is.NoErr(be.SetMirror(ctx, "alice-lfs", false))
+	cfg.LFS.Enabled = false
+	is.NoErr(be.SetMirror(ctx, "alice-lfs", true))
+	is.True(isMirror("alice-lfs"))
+	cfg.LFS.Enabled = true
 
 	// Switching mirroring off is never refused.
 	is.NoErr(be.SetMirror(ctx, "alice-ssh", false))
@@ -401,16 +408,62 @@ func TestSetMirrorChecksOwnerPolicy(t *testing.T) {
 	is.NoErr(cfg.Validate())
 	is.NoErr(be.SetMirror(ctx, "alice-ssh", true))
 	is.True(isMirror("alice-ssh"))
-	newRepo("alice-lfs-other", alice, sshRemote, "ssh://git@10.0.0.1/x.git")
-	err = be.SetMirror(ctx, "alice-lfs-other", true)
+	newRepo("alice-other", alice, "ssh://git@10.0.0.1/x.git", "")
+	err = be.SetMirror(ctx, "alice-other", true)
 	is.True(errors.Is(err, proto.ErrInvalidRemote))
 	is.True(errors.Is(err, ssrf.ErrSSHHostNotAllowed))
+	is.True(!isMirror("alice-other"))
 	is.NoErr(be.SetMirror(ctx, "admin-ssh", false))
 	cfg.SSH.ClientAllowedHosts = []string{"git.internal.example"}
 	is.NoErr(cfg.Validate())
 	err = be.SetMirror(ctx, "admin-ssh", true)
 	is.True(errors.Is(err, ssrf.ErrSSHHostNotAllowed))
 	is.True(!isMirror("admin-ssh"))
+}
+
+// TestSetMirrorValidatesOutsideTransaction verifies that SetMirror resolves
+// remotes with a deadline and before it opens a transaction, so a slow
+// resolver cannot hold the database lock and stall other writers.
+func TestSetMirrorValidatesOutsideTransaction(t *testing.T) {
+	is := is.New(t)
+	be, cfg := newTestBackend(t)
+	ctx := backendTestContext(be, cfg)
+
+	admin, err := be.User(ctx, "admin")
+	is.NoErr(err)
+	_, err = seedCreate(be, ctx, "slow", admin, proto.RepositoryOptions{})
+	is.NoErr(err)
+	r, err := git.Open(be.repoPath("slow"))
+	is.NoErr(err)
+	rcfg, err := r.Config()
+	is.NoErr(err)
+	rcfg.Section("remote").Subsection("origin").SetOption("url", "https://1.1.1.1/x.git")
+	is.NoErr(r.SetConfig(rcfg))
+
+	entered := make(chan bool, 1)
+	release := make(chan struct{})
+	prev := validateGitRemote
+	t.Cleanup(func() { validateGitRemote = prev })
+	validateGitRemote = func(ctx context.Context, remote string, policy ssrf.GitRemotePolicy) (ssrf.ValidatedGitRemote, error) {
+		_, hasDeadline := ctx.Deadline()
+		entered <- hasDeadline
+		<-release
+		return prev(ctx, remote, policy)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- be.SetMirror(ctx, "slow", true) }()
+	is.True(<-entered) // the lookup is bounded
+
+	// While validation is stalled, another writer still commits.
+	_, err = be.CreateUser(ctx, "bob", proto.UserOptions{})
+	is.NoErr(err)
+
+	close(release)
+	is.NoErr(<-done)
+	m, err := be.IsMirror(ctx, "slow")
+	is.NoErr(err)
+	is.True(m)
 }
 
 // TestImportRepositoryDisabled verifies that when the installed git is too
