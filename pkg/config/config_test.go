@@ -455,3 +455,19 @@ func TestAdminKeyFileWithSeveralKeys(t *testing.T) {
 	is.Equal(cfg.IgnoredAdminKeys(), 1)
 	is.Equal(cfg.UnreadableAdminKeyFiles(), []string(nil))
 }
+
+// A key listed inline and again in a key file, there twice with different
+// comments and spacing, is one admin key.
+func TestAdminKeyFileRepeatsKey(t *testing.T) {
+	is := is.New(t)
+	k1 := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINMwLvyV3ouVrTysUYGoJdl5Vgn5BACKov+n9PlzfPwH"
+	file := filepath.Join(t.TempDir(), "authorized_keys")
+	is.NoErr(os.WriteFile(file, []byte(k1+" a@b\n"+k1+"  c@d\n"), 0o600))
+	cfg := &Config{
+		DataPath:         t.TempDir(),
+		InitialAdminKeys: []string{k1 + " x@y", file},
+	}
+	is.Equal(len(cfg.AdminKeys()), 1)
+	is.Equal(cfg.IgnoredAdminKeys(), 0)
+	is.Equal(len(cfg.UnreadableAdminKeyFiles()), 0)
+}
