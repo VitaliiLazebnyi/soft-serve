@@ -712,7 +712,8 @@ By default, new repositories are public: a pushed repository, and one made
 by `repo create` or `repo import` without `--private` (`-p`). An admin can set
 `default_private: true` (`SOFT_SERVE_DEFAULT_PRIVATE`) to make them private
 unless created with `--private=false`; see
-[Server Configuration](#server-configuration).
+[Server Configuration](#server-configuration). The TUI marks every repository
+as private (🔒) or public (🌐), and `repo info` and `repo private` print it.
 
 ### Nested Repositories
 

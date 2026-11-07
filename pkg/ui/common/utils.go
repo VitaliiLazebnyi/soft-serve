@@ -33,3 +33,13 @@ func RepoURL(publicURL, name string) string {
 
 	return fmt.Sprintf("%s/%s", publicURL, name)
 }
+
+// VisibilityMarker returns the marker shown after a repository's name: a
+// lock for a private repository and a globe for a public one. Both are
+// shown so a public repository cannot be mistaken for a private one.
+func VisibilityMarker(private bool) string {
+	if private {
+		return "🔒"
+	}
+	return "🌐"
+}

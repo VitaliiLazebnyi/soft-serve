@@ -36,9 +36,17 @@ git -C config push origin HEAD
 # test repositories tab
 ui '"    q"'
 cp stdout home2.txt
-grep 'Config' home2.txt
+grep 'Config 🌐' home2.txt
 grep 'Test Soft Serve' home2.txt
 grep 'git clone ssh://localhost:.*/.soft-serve' home2.txt
+
+# a private repository is marked as such
+soft repo private .soft-serve true
+ui '"    q"'
+cp stdout home3.txt
+grep 'Config 🔒' home3.txt
+! grep '🌐' home3.txt
+soft repo private .soft-serve false
 
 # test about tab
 ui '"\t      q"'
