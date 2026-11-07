@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,5 +91,27 @@ func TestTreeEntryPathForwardSlashes(t *testing.T) {
 		if !strings.Contains(path, "/") {
 			t.Errorf("expected forward slash in path: %q", path)
 		}
+	}
+}
+
+// TestOpenReportsGitReason checks that when git refuses a repository the
+// error still matches ErrNotAGitRepository but also says why.
+func TestOpenReportsGitReason(t *testing.T) {
+	repoPath := filepath.Join(t.TempDir(), "repo.git")
+	cmd := exec.CommandContext(context.Background(), "git", "init", "--bare", repoPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+
+	// Makes git treat the repository as owned by someone else, as it would
+	// on a volume owned by another user.
+	t.Setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+
+	_, err := Open(repoPath)
+	if !errors.Is(err, ErrNotAGitRepository) {
+		t.Fatalf("Open error = %v, want ErrNotAGitRepository", err)
+	}
+	if !strings.Contains(err.Error(), "dubious ownership") {
+		t.Errorf("Open error = %q, want git's reason (dubious ownership)", err)
 	}
 }
