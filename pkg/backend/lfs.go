@@ -2,7 +2,9 @@ package backend
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"path"
 	"path/filepath"
@@ -48,19 +50,39 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 			}
 
 			defer content.Close() //nolint: errcheck
-			if recorded[p.Oid] {
-				_, err := strg.Put(path.Join("objects", p.RelativePath()), content)
+
+			// Stream the object to a temporary file outside of any database
+			// transaction, so a slow download doesn't hold the write lock.
+			randBytes := make([]byte, 12)
+			if _, err := rand.Read(randBytes); err != nil {
 				return err
 			}
 
-			return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
-				if err := store.CreateLFSObject(ctx, tx, repo.ID(), p.Oid, p.Size); err != nil {
-					return db.WrapError(err)
-				}
-
-				_, err := strg.Put(path.Join("objects", p.RelativePath()), content)
+			tempName := path.Join("incomplete", fmt.Sprintf("%s%x", p.Oid, randBytes))
+			if _, err := strg.Put(tempName, content); err != nil {
+				_ = strg.Delete(tempName)
 				return err
-			})
+			}
+
+			if err := strg.Rename(tempName, path.Join("objects", p.RelativePath())); err != nil {
+				_ = strg.Delete(tempName)
+				return err
+			}
+
+			if recorded[p.Oid] {
+				return nil
+			}
+
+			// If recording fails, the object stays on disk and the next sync
+			// records it.
+			if err := store.CreateLFSObject(ctx, dbx, repo.ID(), p.Oid, p.Size); err != nil {
+				// Someone else recorded it in the meantime.
+				if err := db.WrapError(err); !errors.Is(err, db.ErrDuplicateKey) {
+					return err
+				}
+			}
+
+			return nil
 		})
 	}
 
