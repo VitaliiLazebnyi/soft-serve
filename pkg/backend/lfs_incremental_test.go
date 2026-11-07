@@ -122,7 +122,7 @@ func (lt *lfsTest) bareGit(t *testing.T, args ...string) string {
 // gitIn runs git in dir and returns its output.
 func (lt *lfsTest) gitIn(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(t.Context(), "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
@@ -369,7 +369,11 @@ func TestSyncRepoLFSObjectsPeriodicFullScan(t *testing.T) {
 	_, fullScan := readScannedRefs(lt.markerPath())
 	is.True(!fullScan.IsZero())
 
-	// A scan of the new history keeps the time of the last full scan.
+	// A scan of the new history keeps the time of the last full scan. It
+	// is set an hour back, so a scan that saved the current time shows.
+	tips, _ := readScannedRefs(lt.markerPath())
+	fullScan = time.Now().Add(-time.Hour)
+	is.NoErr(writeScannedRefs(lt.markerPath(), tips, fullScan))
 	p := lt.addObject(t)
 	is.NoErr(lt.sync())
 	got := scans()
