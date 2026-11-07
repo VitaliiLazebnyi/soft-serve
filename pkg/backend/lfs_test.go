@@ -338,3 +338,31 @@ func TestStoreRepoMissingLFSObjectsUnrequested(t *testing.T) {
 	}))
 	is.Equal(len(found), 0) // the invalid pointer wrote nothing
 }
+
+// TestStoreRepoMissingLFSObjectsTruncated verifies that a file on disk whose
+// size doesn't match its pointer, such as one an interrupted download left
+// behind, is downloaded again rather than recorded as it is.
+func TestStoreRepoMissingLFSObjectsTruncated(t *testing.T) {
+	for _, recorded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recorded %v", recorded), func(t *testing.T) {
+			is := is.New(t)
+			lt := newLFSTest(t, 1)
+			p := lt.pointers[0]
+			content := lt.client.objects[p.Oid]
+
+			if recorded {
+				is.NoErr(lt.be.store.CreateLFSObject(lt.ctx, lt.be.db, lt.repo.ID(), p.Oid, p.Size))
+			}
+			is.NoErr(os.MkdirAll(filepath.Dir(lt.path(p)), 0o755))
+			is.NoErr(os.WriteFile(lt.path(p), content[:len(content)/2], 0o600))
+
+			is.NoErr(lt.store())
+			is.Equal(lt.client.requested, []string{p.Oid}) // the object is downloaded again
+			got, err := os.ReadFile(lt.path(p))
+			is.NoErr(err)
+			is.Equal(got, content) // and stored in full
+			_, err = lt.be.store.GetLFSObjectByOid(lt.ctx, lt.be.db, lt.repo.ID(), p.Oid)
+			is.NoErr(err) // and recorded
+		})
+	}
+}

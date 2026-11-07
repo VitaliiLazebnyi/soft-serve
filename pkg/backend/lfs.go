@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -139,8 +140,14 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 			return db.WrapError(err)
 		}
 
-		exist, err := strg.Exists(path.Join("objects", pointer.RelativePath()))
-		if err != nil {
+		// A file of the wrong size, such as one an interrupted download left
+		// behind, counts as missing and is downloaded again.
+		var exist bool
+		fi, err := strg.Stat(path.Join("objects", pointer.RelativePath()))
+		switch {
+		case err == nil:
+			exist = fi.Size() == pointer.Size
+		case !errors.Is(err, fs.ErrNotExist):
 			return err
 		}
 
