@@ -26,7 +26,12 @@ type fakeLFSClient struct {
 	// errs holds the per-object errors the remote reports.
 	errs map[string]error
 	// err, if set, fails the whole download, like a failed batch request.
-	err       error
+	err error
+	// omit holds requested objects the remote leaves out of its response.
+	omit map[string]bool
+	// extra holds objects the remote sends without being asked for them,
+	// with their content.
+	extra     map[lfs.Pointer][]byte
 	requested []string
 	// onRead, if set, runs when an object's content is first read, standing
 	// in for the time spent receiving it from the network.
@@ -45,11 +50,19 @@ func (c *fakeLFSClient) Download(_ context.Context, pointers []lfs.Pointer, cb l
 			}
 			continue
 		}
+		if c.omit[p.Oid] {
+			continue
+		}
 		var r io.Reader = bytes.NewReader(c.objects[p.Oid])
 		if c.onRead != nil {
 			r = &hookReader{r: r, hook: c.onRead}
 		}
 		if err := cb(p, io.NopCloser(r), nil); err != nil {
+			return err
+		}
+	}
+	for p, content := range c.extra {
+		if err := cb(p, io.NopCloser(bytes.NewReader(content)), nil); err != nil {
 			return err
 		}
 	}
@@ -261,4 +274,67 @@ func TestFetchImportLFSObjects(t *testing.T) {
 
 	lt.client.err = errors.New("batch request failed")
 	is.True(lt.be.fetchImportLFSObjects(lt.ctx, lt.repo, lt.client) != nil) // other errors fail the import
+}
+
+// TestStoreRepoMissingLFSObjectsBadContent verifies that content which
+// doesn't match the requested pointer is neither stored nor recorded.
+func TestStoreRepoMissingLFSObjectsBadContent(t *testing.T) {
+	for name, content := range map[string]func([]byte) []byte{
+		"wrong hash": func(b []byte) []byte { return bytes.ToUpper(b) },
+		"too short":  func(b []byte) []byte { return b[:len(b)-1] },
+		"too long":   func(b []byte) []byte { return append(b, '!') },
+	} {
+		t.Run(name, func(t *testing.T) {
+			is := is.New(t)
+			lt := newLFSTest(t, 1)
+			p := lt.pointers[0]
+			lt.client.objects[p.Oid] = content(lt.client.objects[p.Oid])
+
+			is.True(errors.Is(lt.store(), ErrLFSObjectsUnavailable)) // the object is reported
+			_, err := os.Stat(lt.path(p))
+			is.True(os.IsNotExist(err)) // the content is not stored
+			_, err = lt.be.store.GetLFSObjectByOid(lt.ctx, lt.be.db, lt.repo.ID(), p.Oid)
+			is.True(err != nil) // nor recorded
+			tmp, _ := os.ReadDir(filepath.Join(filepath.Dir(lt.path(p)), "..", "..", "..", "incomplete"))
+			is.Equal(len(tmp), 0) // no temporary file is left behind
+		})
+	}
+}
+
+// TestStoreRepoMissingLFSObjectsOmitted verifies that a requested object the
+// remote leaves out of its response is reported.
+func TestStoreRepoMissingLFSObjectsOmitted(t *testing.T) {
+	is := is.New(t)
+	lt := newLFSTest(t, 1)
+	lt.client.omit = map[string]bool{lt.pointers[0].Oid: true}
+	is.True(errors.Is(lt.store(), ErrLFSObjectsUnavailable))
+}
+
+// TestStoreRepoMissingLFSObjectsUnrequested verifies that objects the remote
+// sends without being asked for, valid or not, are not stored.
+func TestStoreRepoMissingLFSObjectsUnrequested(t *testing.T) {
+	is := is.New(t)
+	lt := newLFSTest(t, 1)
+
+	unasked := []byte("not in the repository")
+	up, err := lfs.GeneratePointer(bytes.NewReader(unasked))
+	is.NoErr(err)
+	invalid := lfs.Pointer{Oid: "../../../../escaped", Size: 1}
+	lt.client.extra = map[lfs.Pointer][]byte{up: unasked, invalid: []byte("x")}
+
+	is.NoErr(lt.store())
+	_, err = os.Stat(lt.path(lt.pointers[0]))
+	is.NoErr(err) // the requested object is stored
+	_, err = os.Stat(lt.path(up))
+	is.True(os.IsNotExist(err)) // the unrequested one is not
+	_, err = lt.be.store.GetLFSObjectByOid(lt.ctx, lt.be.db, lt.repo.ID(), up.Oid)
+	is.True(err != nil) // nor recorded
+	var found []string
+	is.NoErr(filepath.Walk(lt.be.cfg.DataPath, func(path string, _ os.FileInfo, err error) error {
+		if filepath.Base(path) == "escaped" || filepath.Base(filepath.Dir(path)) == "escaped" {
+			found = append(found, path)
+		}
+		return err
+	}))
+	is.Equal(len(found), 0) // the invalid pointer wrote nothing
 }

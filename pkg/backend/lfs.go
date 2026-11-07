@@ -3,6 +3,8 @@ package backend
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -61,13 +63,29 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 	}
 
 	download := func(pointers []lfs.Pointer) error {
-		return lfsClient.Download(ctx, pointers, func(p lfs.Pointer, content io.ReadCloser, objectError error) error {
+		pending := make(map[string]lfs.Pointer, len(pointers))
+		for _, p := range pointers {
+			pending[p.Oid] = p
+		}
+
+		if err := lfsClient.Download(ctx, pointers, func(got lfs.Pointer, content io.ReadCloser, objectError error) error {
+			if content != nil {
+				defer content.Close() //nolint: errcheck
+			}
+
+			// The pointer comes from the remote's response. Only take
+			// objects we asked for, and go by our own pointer from then on.
+			p, ok := pending[got.Oid]
+			if !got.IsValid() || !ok {
+				logger.Warn("ignoring lfs object that was not requested", "repo", repo.Name(), "oid", got.Oid)
+				return nil
+			}
+			delete(pending, got.Oid)
+
 			if objectError != nil {
 				objectFailed(p, objectError)
 				return nil
 			}
-
-			defer content.Close() //nolint: errcheck
 
 			// Stream the object to a temporary file outside of any database
 			// transaction, so a slow download doesn't hold the write lock.
@@ -77,9 +95,19 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 			}
 
 			tempName := path.Join("incomplete", fmt.Sprintf("%s%x", p.Oid, randBytes))
-			if _, err := strg.Put(tempName, content); err != nil {
+			// Read one byte past the expected size, enough to tell that
+			// the content is too long without storing all of it.
+			hash := sha256.New()
+			written, err := strg.Put(tempName, io.TeeReader(io.LimitReader(content, p.Size+1), hash))
+			if err != nil {
 				_ = strg.Delete(tempName)
 				return err
+			}
+
+			if sum := hex.EncodeToString(hash.Sum(nil)); written != p.Size || sum != p.Oid {
+				_ = strg.Delete(tempName)
+				objectFailed(p, fmt.Errorf("content does not match: got %d bytes with sha256 %s", written, sum))
+				return nil
 			}
 
 			if err := strg.Rename(tempName, path.Join("objects", p.RelativePath())); err != nil {
@@ -94,7 +122,14 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 			// If recording fails, the object stays on disk and the next sync
 			// records it.
 			return recordLFSObject(ctx, dbx, store, repo.ID(), p)
-		})
+		}); err != nil {
+			return err
+		}
+
+		for _, p := range pending {
+			objectFailed(p, errors.New("not returned by the remote"))
+		}
+		return nil
 	}
 
 	var batch []lfs.Pointer
