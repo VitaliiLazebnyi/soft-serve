@@ -397,3 +397,47 @@ func TestStoreRepoMissingLFSObjectsDuplicateOid(t *testing.T) {
 	is.NoErr(lt.store())
 	is.Equal(lt.client.requested, []string{lt.pointers[0].Oid}) // requested once
 }
+
+// TestStoreRepoMissingLFSObjectsSameOidOtherSize verifies that a pointer
+// blob with the right oid but the wrong size doesn't keep the object of the
+// right pointer from being fetched, whichever of the two is scanned first,
+// and that later syncs neither fetch nor report anything.
+func TestStoreRepoMissingLFSObjectsSameOidOtherSize(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// file is where the bad pointer goes. Blobs are scanned in tree
+		// order, so it decides which of the two pointers comes first.
+		file string
+		// unavailable is whether the first sync reports the bad pointer.
+		unavailable bool
+	}{
+		{"bad pointer first", "a-bad.bin", true},
+		{"bad pointer last", "z-bad.bin", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			is := is.New(t)
+			lt := newLFSTestWith(t, 1, func(work string, pointers []lfs.Pointer) {
+				bad := lfs.Pointer{Oid: pointers[0].Oid, Size: pointers[0].Size + 1}
+				is.NoErr(os.WriteFile(filepath.Join(work, tc.file), []byte(bad.String()), 0o600))
+			})
+			p := lt.pointers[0]
+
+			err := lt.store()
+			if tc.unavailable {
+				is.True(errors.Is(err, ErrLFSObjectsUnavailable)) // the bad pointer can't be fetched
+			} else {
+				is.NoErr(err)
+			}
+			got, err := os.ReadFile(lt.path(p))
+			is.NoErr(err)
+			is.Equal(got, lt.client.objects[p.Oid]) // the right pointer's object is stored
+			obj, err := lt.be.store.GetLFSObjectByOid(lt.ctx, lt.be.db, lt.repo.ID(), p.Oid)
+			is.NoErr(err)
+			is.Equal(obj.Size, p.Size) // and recorded with its size
+
+			lt.client.requested = nil
+			is.NoErr(lt.store())                  // the next sync is clean
+			is.Equal(len(lt.client.requested), 0) // and fetches nothing
+		})
+	}
+}

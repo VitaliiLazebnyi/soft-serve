@@ -147,54 +147,100 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 		return nil
 	}
 
-	var batch []lfs.Pointer
-	// queued holds the oids already batched. Different pointer blobs can
-	// share an oid, and the download callback expects each oid once.
-	queued := make(map[string]bool)
-	for pointer := range pointerChan {
-		if queued[pointer.Oid] {
-			continue
-		}
-
+	// missing reports whether the object of pointer has to be downloaded.
+	// An object already on disk is recorded if it isn't yet.
+	missing := func(pointer lfs.Pointer) (bool, error) {
 		obj, err := store.GetLFSObjectByOid(ctx, dbx, repo.ID(), pointer.Oid)
 		if err != nil && !errors.Is(err, db.ErrRecordNotFound) {
-			return db.WrapError(err)
+			return false, db.WrapError(err)
 		}
 
 		// A file of the wrong size, such as one an interrupted download left
 		// behind, counts as missing and is downloaded again.
-		var exist bool
 		fi, err := strg.Stat(path.Join("objects", pointer.RelativePath()))
 		switch {
-		case err == nil:
-			exist = fi.Size() == pointer.Size
-		case !errors.Is(err, fs.ErrNotExist):
-			return err
-		}
-
-		if exist {
+		case err == nil && fi.Size() == pointer.Size:
 			// The object is on disk, make sure it's recorded.
 			if obj.ID == 0 {
-				if err := recordLFSObject(ctx, dbx, store, repo.ID(), pointer.Pointer); err != nil {
-					return err
+				if err := recordLFSObject(ctx, dbx, store, repo.ID(), pointer); err != nil {
+					return false, err
 				}
 			}
-			continue
+			return false, nil
+		case err == nil && obj.ID != 0 && obj.Size == fi.Size():
+			// The object is stored and recorded with another size, which
+			// a pointer with this oid can't have, so this pointer is
+			// malformed. Downloading it would only fail its verification
+			// on every sync.
+			logger.Debug("ignoring lfs pointer with the wrong size", "repo", repo.Name(), "oid", pointer.Oid, "size", pointer.Size, "stored", obj.Size)
+			return false, nil
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			return false, err
 		}
 
 		if obj.ID != 0 {
 			recorded[pointer.Oid] = true
 		}
+		return true, nil
+	}
 
-		queued[pointer.Oid] = true
-		batch = append(batch, pointer.Pointer)
+	// Different pointer blobs can share an oid and size, for example when
+	// one has a trailing line, so pointers are queued once per oid and size.
+	// Pointers can also share an oid but not the size, when one of them is
+	// malformed; each one is tried, as the first one scanned may be the bad
+	// one.
+	type pointerKey struct {
+		oid  string
+		size int64
+	}
+	queued := make(map[pointerKey]bool)
+
+	// The download callback expects each oid once per batch, so a pointer
+	// whose oid is already in the batch waits in deferred for a later one.
+	var batch, deferred []lfs.Pointer
+	batched := make(map[string]bool)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := download(batch); err != nil {
+			return err
+		}
+		batch = nil
+		clear(batched)
+		return nil
+	}
+	queue := func(pointer lfs.Pointer) error {
+		if batched[pointer.Oid] {
+			deferred = append(deferred, pointer)
+			return nil
+		}
+		batched[pointer.Oid] = true
+		batch = append(batch, pointer)
 		// Limit batch requests to 20 objects
 		if len(batch) >= 20 {
-			if err := download(batch); err != nil {
-				return err
-			}
+			return flush()
+		}
+		return nil
+	}
 
-			batch = nil
+	for pointer := range pointerChan {
+		key := pointerKey{pointer.Oid, pointer.Size}
+		if queued[key] {
+			continue
+		}
+
+		need, err := missing(pointer.Pointer)
+		if err != nil {
+			return err
+		}
+		if !need {
+			continue
+		}
+
+		queued[key] = true
+		if err := queue(pointer.Pointer); err != nil {
+			return err
 		}
 	}
 
@@ -202,10 +248,26 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 		return err
 	}
 
-	// Download whatever is left over from the last, partial batch.
-	if len(batch) > 0 {
-		if err := download(batch); err != nil {
+	// Download whatever is left over from the last, partial batch, then the
+	// pointers that shared an oid with another one in their batch. Those
+	// are checked again, as the other pointer may have stored the object.
+	for len(batch) > 0 || len(deferred) > 0 {
+		if err := flush(); err != nil {
 			return err
+		}
+
+		pointers := deferred
+		deferred = nil
+		for _, pointer := range pointers {
+			need, err := missing(pointer)
+			if err != nil {
+				return err
+			}
+			if need {
+				if err := queue(pointer); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
