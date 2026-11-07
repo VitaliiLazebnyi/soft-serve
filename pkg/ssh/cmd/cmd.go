@@ -254,13 +254,8 @@ func checkIfServerAdmin(cmd *cobra.Command, _ []string) error {
 // checkIfServerAdmin: repository gates must keep giving the same answer
 // for a private and a missing repository.
 func errNotServerAdmin(ctx context.Context) error {
-	pk := sshutils.PublicKeyFromContext(ctx)
-	if pk == nil {
-		return proto.ErrUnauthorized
-	}
-	return fmt.Errorf("%w: this command needs a server admin, and the key this session authenticated with (%s) is not an admin's; "+
-		"if you passed -i to ssh, also pass -o IdentitiesOnly=yes so ssh offers only that key",
-		proto.ErrUnauthorized, gossh.FingerprintSHA256(pk))
+	return sessionKeyError(ctx, proto.ErrUnauthorized,
+		"this command needs a server admin, and the key this session authenticated with (%s) is not an admin's")
 }
 
 // checkIfRepoCollab gates create and import, which name a repository that
@@ -281,13 +276,23 @@ func checkIfRepoCollab(cmd *cobra.Command, args []string) error {
 // with -i. The error names the key's fingerprint and how to make ssh offer
 // only the chosen key. It still matches proto.ErrUserNotFound.
 func errUnknownKey(ctx context.Context) error {
+	return sessionKeyError(ctx, proto.ErrUserNotFound,
+		"no user has the key this session authenticated with (%s)")
+}
+
+// identitiesOnlyHint ends the errors that name the session key: ssh offers
+// agent and default keys before the one passed with -i unless told not to.
+const identitiesOnlyHint = "if you passed -i to ssh, also pass -o IdentitiesOnly=yes so ssh offers only that key"
+
+// sessionKeyError wraps base with reason, whose %s is replaced by the SHA256
+// fingerprint of the session's public key, followed by identitiesOnlyHint.
+// The result still matches base. Without a session key it returns base.
+func sessionKeyError(ctx context.Context, base error, reason string) error {
 	pk := sshutils.PublicKeyFromContext(ctx)
 	if pk == nil {
-		return proto.ErrUserNotFound
+		return base
 	}
-	return fmt.Errorf("%w: no user has the key this session authenticated with (%s); "+
-		"if you passed -i to ssh, also pass -o IdentitiesOnly=yes so ssh offers only that key",
-		proto.ErrUserNotFound, gossh.FingerprintSHA256(pk))
+	return fmt.Errorf("%w: %s; %s", base, fmt.Sprintf(reason, gossh.FingerprintSHA256(pk)), identitiesOnlyHint)
 }
 
 // userByPublicKey returns the user that owns the session's public key. When
@@ -295,6 +300,10 @@ func errUnknownKey(ctx context.Context) error {
 func userByPublicKey(ctx context.Context) (proto.User, error) {
 	be := backend.FromContext(ctx)
 	user, err := be.UserByPublicKey(ctx, sshutils.PublicKeyFromContext(ctx))
+	// ErrAdminKeyNonAdminOwner also matches proto.ErrUserNotFound, but the
+	// key does belong to a user, so it keeps its own message. Over SSH this
+	// is unreachable, since the auth middleware refuses those sessions
+	// before any command runs; the check is a safeguard should that change.
 	var nonAdminOwner *backend.ErrAdminKeyNonAdminOwner
 	if errors.Is(err, proto.ErrUserNotFound) && !errors.As(err, &nonAdminOwner) {
 		return nil, errUnknownKey(ctx)
