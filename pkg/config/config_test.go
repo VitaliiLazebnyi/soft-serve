@@ -547,3 +547,57 @@ func TestQuotedInitAdminKeys(t *testing.T) {
 	is.Equal(len(cfg.AdminKeys()), 0)
 	is.Equal(cfg.IgnoredAdminKeys(), 2)
 }
+
+// SOFT_SERVE_INITIAL_ADMIN_KEYS is split on newlines before each entry's
+// quotes are trimmed, so a value with several keys in one outer pair of
+// quotes must not lose its first and last keys.
+func TestOuterQuotedInitAdminKeys(t *testing.T) {
+	k1 := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINMwLvyV3ouVrTysUYGoJdl5Vgn5BACKov+n9PlzfPwH"
+	k2 := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxIobhwtfdwN7m1TFt9wx3PsfvcAkISGPxmbmbauST8"
+	for _, tc := range []struct {
+		name string
+		env  string
+		want []string
+	}{
+		{"single quotes", "'" + k1 + "\n" + k2 + " a@b'", []string{k1, k2}},
+		{"double quotes", `"` + k1 + "\n" + k2 + `"`, []string{k1, k2}},
+		{"key file and blank lines", "\n 'testdata/k1.pub\n\n" + k2 + "' \n", []string{k1, k2}},
+		{"quotes on their own lines", "'\n" + k1 + "\n" + k2 + "\n'", []string{k1, k2}},
+		{"inner quoted entry", "'" + k1 + "\n\"" + k2 + "\"'", []string{k1, k2}},
+		{"each entry quoted", "'" + k1 + "'\n'" + k2 + "'", []string{k1, k2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			is := is.New(t)
+			t.Setenv("SOFT_SERVE_INITIAL_ADMIN_KEYS", tc.env)
+			t.Setenv("SOFT_SERVE_DATA_PATH", t.TempDir())
+			cfg := DefaultConfig()
+			is.NoErr(cfg.ParseEnv())
+			is.Equal(cfg.InitialAdminKeys, tc.want)
+			is.Equal(cfg.IgnoredAdminKeys(), 0)
+		})
+	}
+
+	// The outer quotes are stripped before the config file's keys are
+	// merged in.
+	t.Run("with config file keys", func(t *testing.T) {
+		is := is.New(t)
+		t.Setenv("SOFT_SERVE_INITIAL_ADMIN_KEYS", "'"+k1+"\n"+k2+"'")
+		t.Setenv("SOFT_SERVE_DATA_PATH", t.TempDir())
+		cfg := DefaultConfig()
+		cfg.InitialAdminKeys = []string{k2}
+		is.NoErr(cfg.ParseEnv())
+		is.Equal(cfg.InitialAdminKeys, []string{k1, k2})
+		is.Equal(cfg.IgnoredAdminKeys(), 0)
+	})
+
+	// Mismatched outer quotes are not stripped.
+	t.Run("mismatched quotes", func(t *testing.T) {
+		is := is.New(t)
+		t.Setenv("SOFT_SERVE_INITIAL_ADMIN_KEYS", "'"+k1+"\n"+k2+`"`)
+		t.Setenv("SOFT_SERVE_DATA_PATH", t.TempDir())
+		cfg := DefaultConfig()
+		is.NoErr(cfg.ParseEnv())
+		is.Equal(len(cfg.InitialAdminKeys), 0)
+		is.Equal(cfg.IgnoredAdminKeys(), 2)
+	})
+}
