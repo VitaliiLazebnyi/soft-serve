@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -179,6 +180,11 @@ func (m mirrorPull) Func(ctx context.Context) func() {
 						}
 
 						if err := backend.StoreRepoMissingLFSObjects(ctx, repo, dbx, datastore, client); err != nil {
+							if errors.Is(err, backend.ErrLFSObjectsUnavailable) {
+								// The next sync tries them again.
+								logger.Warn("mirrored repository without some lfs objects", "repo", name, "err", err)
+								return
+							}
 							logger.Error("failed to store missing lfs objects", "err", err, "path", r.Path)
 							return
 						}
