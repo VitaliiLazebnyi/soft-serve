@@ -2,24 +2,27 @@ package config
 
 import (
 	"bytes"
+	"fmt"
+	"strings"
 	"text/template"
+	"unicode/utf8"
 )
 
-var configFileTmpl = template.Must(template.New("config").Parse(`# Soft Serve Plus Server configurations
+var configFileTmpl = template.Must(template.New("config").Funcs(template.FuncMap{"q": yamlQuote}).Parse(`# Soft Serve Plus Server configurations
 
 # The name of the server.
 # This is the name that will be displayed in the UI.
-name: "{{ .Name }}"
+name: {{ q .Name }}
 
 # Logging configuration.
 log:
   # Log format to use. Valid values are "json", "logfmt", and "text".
-  format: "{{ .Log.Format }}"
+  format: {{ q .Log.Format }}
   # Time format for the log "timestamp" field.
   # Should be described in Golang's time format.
-  time_format: "{{ .Log.TimeFormat }}"
+  time_format: {{ q .Log.TimeFormat }}
   # Path to the log file. Leave empty to write to stderr.
-  #path: "{{ .Log.Path }}"
+  #path: {{ q .Log.Path }}
 
 # The SSH server configuration.
 ssh:
@@ -27,18 +30,18 @@ ssh:
   enabled: {{ .SSH.Enabled }}
 
   # The address on which the SSH server will listen.
-  listen_addr: "{{ .SSH.ListenAddr }}"
+  listen_addr: {{ q .SSH.ListenAddr }}
 
   # The public URL of the SSH server.
   # This is the address that will be used to clone repositories.
-  public_url: "{{ .SSH.PublicURL }}"
+  public_url: {{ q .SSH.PublicURL }}
 
   # The path to the SSH server's private key.
-  key_path: {{ .SSH.KeyPath }}
+  key_path: {{ q .SSH.KeyPath }}
 
   # The path to the server's client private key. This key will be used to
   # authenticate the server to make git requests to ssh remotes.
-  client_key_path: {{ .SSH.ClientKeyPath }}
+  client_key_path: {{ q .SSH.ClientKeyPath }}
 
   # How the server's ssh client verifies host keys of ssh remotes it imports
   # or mirrors from, checked against <data_path>/ssh/known_hosts.
@@ -46,7 +49,7 @@ ssh:
   # one. "yes" refuses any host that is not already in known_hosts; use it
   # with a pre-seeded known_hosts file. The client always runs with
   # BatchMode=yes, so it fails fast instead of prompting for a passphrase.
-  client_strict_host_key_checking: "{{ .SSH.ClientStrictHostKeyChecking }}"
+  client_strict_host_key_checking: {{ q .SSH.ClientStrictHostKeyChecking }}
 
   # The ssh hosts that repositories may be imported from or mirrored. The
   # client key above is presented to every host a user imports from, so list
@@ -62,7 +65,7 @@ ssh:
   # ssh_config still applies to it.
   client_allowed_hosts:
 {{- range .SSH.ClientAllowedHosts }}
-    - "{{ . }}"
+    - {{ q . }}
 {{- else }} []
     # - "git.internal.example"
     # - "gitlab.corp:2222"
@@ -83,11 +86,11 @@ git:
   enabled: {{ .Git.Enabled }}
 
   # The address on which the Git daemon will listen.
-  listen_addr: "{{ .Git.ListenAddr }}"
+  listen_addr: {{ q .Git.ListenAddr }}
 
   # The public URL of the Git daemon server.
   # This is the address that will be used to clone repositories.
-  public_url: "{{ .Git.PublicURL }}"
+  public_url: {{ q .Git.PublicURL }}
 
   # The maximum number of seconds a connection can take.
   # A value of 0 means no timeout.
@@ -105,18 +108,18 @@ http:
   enabled: {{ .HTTP.Enabled }}
 
   # The address on which the HTTP server will listen.
-  listen_addr: "{{ .HTTP.ListenAddr }}"
+  listen_addr: {{ q .HTTP.ListenAddr }}
 
   # The path to the TLS private key.
-  tls_key_path: {{ .HTTP.TLSKeyPath }}
+  tls_key_path: {{ q .HTTP.TLSKeyPath }}
 
   # The path to the TLS certificate.
-  tls_cert_path: {{ .HTTP.TLSCertPath }}
+  tls_cert_path: {{ q .HTTP.TLSCertPath }}
 
   # The public URL of the HTTP server.
   # This is the address that will be used to clone repositories.
   # Make sure to use https:// if you are using TLS.
-  public_url: "{{ .HTTP.PublicURL }}"
+  public_url: {{ q .HTTP.PublicURL }}
 
   # The cross-origin request security options
   cors:
@@ -134,7 +137,7 @@ http:
        - "Access-Control-Allow-Origin"
     # The allowed cross-origin URLs
     allowed_origins:
-       - "{{ .HTTP.PublicURL }}" # always allowed
+       - {{ q .HTTP.PublicURL }} # always allowed
        # - "https://example.com"
     # The allowed cross-origin methods
     allowed_methods:
@@ -150,17 +153,17 @@ stats:
   enabled: {{ .Stats.Enabled }}
 
   # The address on which the stats server will listen.
-  listen_addr: "{{ .Stats.ListenAddr }}"
+  listen_addr: {{ q .Stats.ListenAddr }}
 
 # The database configuration.
 db:
   # The database driver to use.
   # Valid values are "sqlite" and "postgres".
-  driver: "{{ .DB.Driver }}"
+  driver: {{ q .DB.Driver }}
   # The database data source name.
   # This is driver specific and can be a file path or connection string.
   # Make sure foreign key support is enabled when using SQLite.
-  data_source: "{{ .DB.DataSource }}"
+  data_source: {{ q .DB.DataSource }}
 
 # Git LFS configuration.
 lfs:
@@ -171,7 +174,31 @@ lfs:
 
 # Cron job configuration
 jobs:
-  mirror_pull: "{{ .Jobs.MirrorPull }}"
+  mirror_pull: {{ q .Jobs.MirrorPull }}
+
+# Repository webhook configuration.
+webhook:
+  # Private and internal destinations webhooks may be sent to. Webhooks to
+  # loopback, private networks and other internal addresses are refused
+  # unless listed here. Entries are hostnames, IP addresses, or CIDR ranges,
+  # each with an optional port (a URL without a port uses 80 for http and
+  # 443 for https). An IP or CIDR entry allows the addresses it covers,
+  # whatever hostname the webhook URL names. A hostname entry allows that
+  # name to resolve to loopback, RFC1918, CGNAT or IPv6 unique local
+  # addresses, and the name is resolved again for every delivery, so list
+  # only names whose DNS you trust. Link-local and cloud metadata addresses
+  # (such as 169.254.169.254) are reachable only through an IP or CIDR entry
+  # inside their own range; a broad range such as 0.0.0.0/0 does not open
+  # them. The list is checked when a webhook is created or updated, and
+  # again on every delivery, so existing webhooks follow the current list.
+  allowed_hosts:
+{{- range .Webhook.AllowedHosts }}
+    - {{ q . }}
+{{- else }} []
+    # - "jenkins.internal.example"
+    # - "10.0.0.0/8"
+    # - "127.0.0.1:8080"
+{{- end }}
 
 # Additional admin keys.
 #initial_admin_keys:
@@ -180,9 +207,10 @@ jobs:
 # Only server admins (admin accounts or initial_admin_keys) may create
 # repositories. Registered non-admins and anonymous users cannot create or
 # import. Renaming counts as creating the new name, so repository owners and
-# collaborators can no longer rename their repositories. Anonymous access to a
-# name that does not exist yet is capped at read-only whatever anon_access
-# says. Access to existing repositories is not affected. Defaults to false.
+# admin-access collaborators can no longer rename their repositories.
+# Anonymous access to a name that does not exist yet is capped at read-only
+# whatever anon_access says. Access to existing repositories is not affected.
+# Defaults to false.
 #admin_only_create: false
 
 # Maximum number of repositories each user may create (repo create, repo
@@ -205,6 +233,33 @@ jobs:
 # exist. Empty disables this behavior.
 #default_repo: ""
 `))
+
+// yamlQuote renders s as a YAML double-quoted scalar that reads back as s.
+// Backslashes and quotes are escaped, so a Windows path such as
+// C:\data\soft-serve.db is not read as escape sequences, and characters YAML
+// does not allow in a document, or would fold, are written as \u escapes.
+func yamlQuote(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r == '"':
+			b.WriteString(`\"`)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r < 0x20, r == 0x7f, r >= 0x80 && r < 0xa0, r == 0x2028, r == 0x2029, r == 0xfeff, r == 0xfffe, r == 0xffff, r == utf8.RuneError:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
 
 func newConfigFile(cfg *Config) string {
 	var b bytes.Buffer
