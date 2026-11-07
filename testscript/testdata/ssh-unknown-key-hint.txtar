@@ -1,0 +1,28 @@
+# vi: set ft=conf
+
+# The server accepts any public key, so a session can use a key that
+# belongs to no user, for example an agent key ssh offered before the one
+# passed with -i. Commands that need the caller's account say which key was
+# used and how to make ssh offer only the chosen key.
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# user1's key is not registered yet
+! usoft info
+stderr 'user not found: no user has the key this session authenticated with \(SHA256:[A-Za-z0-9+/]+\); if you passed -i to ssh, also pass -o IdentitiesOnly=yes'
+! usoft pubkey list
+stderr 'SHA256:[A-Za-z0-9+/]+.*IdentitiesOnly=yes'
+! usoft token list
+stderr 'SHA256:[A-Za-z0-9+/]+.*IdentitiesOnly=yes'
+
+# once registered, info works
+soft user create user1 -k "$USER1_AUTHORIZED_KEY"
+usoft info
+stdout 'Username: user1'
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -271,4 +272,32 @@ func checkIfRepoCollab(cmd *cobra.Command, args []string) error {
 		return proto.ErrUnauthorized
 	}
 	return nil
+}
+
+// errUnknownKey returns proto.ErrUserNotFound for a command that needs the
+// caller's account when the session's public key belongs to no user. The
+// server accepts any key, so the session uses the first key the client
+// offers, which may be an agent or default key rather than the one passed
+// with -i. The error names the key's fingerprint and how to make ssh offer
+// only the chosen key. It still matches proto.ErrUserNotFound.
+func errUnknownKey(ctx context.Context) error {
+	pk := sshutils.PublicKeyFromContext(ctx)
+	if pk == nil {
+		return proto.ErrUserNotFound
+	}
+	return fmt.Errorf("%w: no user has the key this session authenticated with (%s); "+
+		"if you passed -i to ssh, also pass -o IdentitiesOnly=yes so ssh offers only that key",
+		proto.ErrUserNotFound, gossh.FingerprintSHA256(pk))
+}
+
+// userByPublicKey returns the user that owns the session's public key. When
+// no user owns it, the error is errUnknownKey.
+func userByPublicKey(ctx context.Context) (proto.User, error) {
+	be := backend.FromContext(ctx)
+	user, err := be.UserByPublicKey(ctx, sshutils.PublicKeyFromContext(ctx))
+	var nonAdminOwner *backend.ErrAdminKeyNonAdminOwner
+	if errors.Is(err, proto.ErrUserNotFound) && !errors.As(err, &nonAdminOwner) {
+		return nil, errUnknownKey(ctx)
+	}
+	return user, err
 }
