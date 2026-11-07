@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -22,7 +22,6 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/lfs"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/ssrf"
-	"github.com/charmbracelet/soft-serve/pkg/storage"
 	"github.com/charmbracelet/soft-serve/pkg/utils"
 	"github.com/charmbracelet/soft-serve/pkg/webhook"
 	gitcfg "github.com/go-git/go-git/v5/plumbing/format/config"
@@ -176,9 +175,12 @@ func (d *Backend) createRepository(ctx context.Context, name string, user proto.
 	}
 
 	if _, err := git.Init(rp, true); err != nil {
-		d.logger.Debug("failed to create repository", "err", err)
+		if !errors.Is(err, git.ErrNotAGitRepository) {
+			// openRepoError logs the other case.
+			d.logger.Debug("failed to create repository", "err", err)
+		}
 		os.RemoveAll(rp) //nolint:errcheck
-		return nil, err
+		return nil, openRepoError(d.logger, err, rp)
 	}
 
 	return d.registerRepository(ctx, name, user, opts, limited)
@@ -567,6 +569,9 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 		}
 	}
 
+	// repoID is set once the repository's row is found, and names its LFS
+	// directory.
+	var repoID int64
 	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
 		repom, dberr := d.store.GetRepoByName(ctx, tx, name)
 		if dberr != nil {
@@ -580,24 +585,7 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 			return db.WrapError(dberr)
 		}
 
-		repoID := strconv.FormatInt(repom.ID, 10)
-		strg := storage.NewLocalStorage(filepath.Join(d.cfg.DataPath, "lfs", repoID))
-		objs, err := d.store.GetLFSObjectsByName(ctx, tx, name)
-		if err != nil {
-			return db.WrapError(err)
-		}
-
-		for _, obj := range objs {
-			p := lfs.Pointer{
-				Oid:  obj.Oid,
-				Size: obj.Size,
-			}
-
-			d.logger.Debug("deleting lfs object", "repo", name, "oid", obj.Oid)
-			if err := strg.Delete(path.Join("objects", p.RelativePath())); err != nil {
-				d.logger.Error("failed to delete lfs object", "repo", name, "err", err, "oid", obj.Oid)
-			}
-		}
+		repoID = repom.ID
 
 		// Remove the webhooks and their rows explicitly, so none are left
 		// behind whether or not the connection enforces foreign keys.
@@ -612,6 +600,22 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 		return os.RemoveAll(rp)
 	}); err != nil {
 		return wrapRepoError(err)
+	}
+
+	// Remove the repository's LFS storage only now that its row is gone, so
+	// a failed delete leaves its objects in place. This takes the temporary
+	// files of unfinished uploads and objects without a row along with the
+	// recorded ones. Repository ids are never reused, so no other repository
+	// can have written here. The row is already gone, so a failure is logged
+	// rather than returned. An LFS upload, import or mirror sync still running
+	// for this repository can recreate the directory after it is removed,
+	// leaving an orphan; since the id is not reused, no other repository can
+	// reach it.
+	if repoID != 0 {
+		lfsPath := filepath.Join(d.cfg.DataPath, "lfs", strconv.FormatInt(repoID, 10))
+		if err := os.RemoveAll(lfsPath); err != nil {
+			d.logger.Error("failed to delete lfs objects", "repo", name, "path", lfsPath, "err", err)
+		}
 	}
 
 	// The repository is gone, so its event is delivered without recording
@@ -711,9 +715,10 @@ func (d *Backend) Repositories(ctx context.Context) ([]proto.Repository, error) 
 
 		for _, m := range ms {
 			r := &repo{
-				name: m.Name,
-				path: filepath.Join(d.repoPath(m.Name)),
-				repo: m,
+				name:   m.Name,
+				path:   filepath.Join(d.repoPath(m.Name)),
+				repo:   m,
+				logger: d.logger,
 			}
 
 			repos = append(repos, r)
@@ -751,9 +756,10 @@ func (d *Backend) Repository(ctx context.Context, name string) (proto.Repository
 	}
 
 	r := &repo{
-		name: name,
-		path: rp,
-		repo: m,
+		name:   name,
+		path:   rp,
+		repo:   m,
+		logger: d.logger,
 	}
 
 	return r, nil
@@ -1153,9 +1159,10 @@ var _ proto.Repository = (*repo)(nil)
 
 // repo is a Git repository with metadata stored in a SQLite database.
 type repo struct {
-	name string
-	path string
-	repo models.Repo
+	name   string
+	path   string
+	repo   models.Repo
+	logger *log.Logger
 }
 
 // ID returns the repository's ID.
@@ -1208,7 +1215,26 @@ func (r *repo) Name() string {
 //
 // It implements backend.Repository.
 func (r *repo) Open() (*git.Repository, error) {
-	return git.Open(r.path)
+	gr, err := git.Open(r.path)
+	if err != nil {
+		return nil, openRepoError(r.logger, err, r.path)
+	}
+	return gr, nil
+}
+
+// openRepoError returns the error to show to clients when git does not accept
+// a repository. git's reason (for example "detected dubious ownership") names
+// the server path, so it is logged here and the client gets the plain
+// ErrNotAGitRepository, as before. Other errors are returned unchanged.
+func openRepoError(logger *log.Logger, err error, path string) error {
+	if !errors.Is(err, git.ErrNotAGitRepository) {
+		return err
+	}
+	if logger == nil {
+		logger = log.Default()
+	}
+	logger.Error("git does not accept the repository", "err", err, "path", path)
+	return git.ErrNotAGitRepository
 }
 
 // ProjectName returns the repository's project name.
