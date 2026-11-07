@@ -47,7 +47,11 @@ func serviceLfsLocksCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req lfs.LockCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxLfsJSONBodySize)
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		if lfsBodyTooLarge(w, logger, err) {
+			return
+		}
 		logger.Error("error decoding json", "err", err)
 		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
 			Message: "invalid request: " + err.Error(),
@@ -319,7 +323,11 @@ func serviceLfsLocksVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req lfs.LockVerifyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxLfsJSONBodySize)
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		if lfsBodyTooLarge(w, logger, err) {
+			return
+		}
 		logger.Error("error decoding request", "err", err)
 		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
 			Message: "invalid request: " + err.Error(),
@@ -425,7 +433,11 @@ func serviceLfsLocksDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req lfs.LockDeleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxLfsJSONBodySize)
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		if lfsBodyTooLarge(w, logger, err) {
+			return
+		}
 		logger.Error("error decoding request", "err", err)
 		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
 			Message: "invalid request: " + err.Error(),
