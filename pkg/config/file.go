@@ -191,6 +191,16 @@ jobs:
 # limit is refused; existing repositories are kept. 0 means no limit.
 #max_repos_per_user: 0
 
+# Make repositories created without an explicit visibility private:
+# push-to-create over SSH and HTTP, repo create and repo import without
+# --private, and default_repo. "repo create --private=false" still creates a
+# public repository. An anonymous user could not access a private
+# repository (it would be owned by the default admin), so when this is set
+# anonymous push-to-create is refused, and anonymous repo create and repo
+# import need --private=false. Defaults to false (such repositories are
+# public).
+#default_private: false
+
 # Name of a repository to create automatically on boot if it doesn't already
 # exist. Empty disables this behavior.
 #default_repo: ""

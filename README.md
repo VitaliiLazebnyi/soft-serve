@@ -334,6 +334,16 @@ stats:
 # limit is refused; existing repositories are kept. 0 means no limit.
 #max_repos_per_user: 0
 
+# Make repositories created without an explicit visibility private:
+# push-to-create over SSH and HTTP, repo create and repo import without
+# --private, and default_repo. "repo create --private=false" still creates a
+# public repository. An anonymous user could not access a private
+# repository (it would be owned by the default admin), so when this is set
+# anonymous push-to-create is refused, and anonymous repo create and repo
+# import need --private=false. Defaults to false (such repositories are
+# public).
+#default_private: false
+
 # Repository name to create on boot if it does not already exist.
 # Leave empty to disable.
 #default_repo: ""
@@ -353,6 +363,7 @@ name all in uppercase. Here are some examples:
 - `SOFT_SERVE_ALLOW_KEYLESS`: Overrides the `allow-keyless` setting (see [Authentication](#authentication))
 - `SOFT_SERVE_ADMIN_ONLY_CREATE`: Only server admins may create repositories. Owners and collaborators can no longer rename repositories, and anonymous access to names that do not exist yet is capped at read-only. Defaults to `false`. Access to existing repositories is not affected.
 - `SOFT_SERVE_MAX_REPOS_PER_USER`: Maximum number of repositories each user may create. Server admins are exempt, and repositories created without an account count together as one user. Defaults to `0` (no limit).
+- `SOFT_SERVE_DEFAULT_PRIVATE`: Make repositories created without an explicit visibility (push-to-create, `repo create` and `repo import` without `--private`, `default_repo`) private. Defaults to `false`. When set, anonymous push-to-create is refused, and anonymous `repo create` and `repo import` need `--private=false`, since an anonymous user could not access the private repository.
 - `SOFT_SERVE_DEFAULT_REPO`: Repository name to create on boot if missing
 
 #### Database Configuration
@@ -696,6 +707,12 @@ on the server it’ll be created.
 ```
 git push origin main
 ```
+
+By default, new repositories are public: a pushed repository, and one made
+by `repo create` or `repo import` without `--private` (`-p`). An admin can set
+`default_private: true` (`SOFT_SERVE_DEFAULT_PRIVATE`) to make them private
+unless created with `--private=false`; see
+[Server Configuration](#server-configuration).
 
 ### Nested Repositories
 

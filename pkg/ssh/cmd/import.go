@@ -27,6 +27,10 @@ func importCommand() *cobra.Command {
 			user := proto.UserFromContext(ctx)
 			name := args[0]
 			remote := args[1]
+			private, err := privateOrDefault(cmd, private)
+			if err != nil {
+				return err
+			}
 			if _, err := be.ImportRepository(ctx, name, user, remote, proto.RepositoryOptions{
 				Private:     private,
 				Description: description,
@@ -46,7 +50,7 @@ func importCommand() *cobra.Command {
 	cmd.Flags().BoolVarP(&lfs, "lfs", "", false, "pull Git LFS objects")
 	cmd.Flags().StringVarP(&lfsEndpoint, "lfs-endpoint", "", "", "set the Git LFS endpoint")
 	cmd.Flags().BoolVarP(&mirror, "mirror", "m", false, "mirror the repository")
-	cmd.Flags().BoolVarP(&private, "private", "p", false, "make the repository private")
+	cmd.Flags().BoolVarP(&private, "private", "p", false, "make the repository private (default: the server's default_private)")
 	cmd.Flags().StringVarP(&description, "description", "d", "", "set the repository description")
 	cmd.Flags().StringVarP(&projectName, "name", "n", "", "set the project name")
 	cmd.Flags().BoolVarP(&hidden, "hidden", "H", false, "hide the repository from the UI")

@@ -20,6 +20,11 @@ var (
 	// ErrRepoLimitReached is returned when creating a repository would take
 	// its creator past max_repos_per_user.
 	ErrRepoLimitReached = errors.New("repository limit reached")
+	// ErrAnonymousPrivate is returned when an anonymous caller creates a
+	// repository without choosing its visibility while default_private is
+	// set. The repository would be private and owned by the default admin,
+	// so its creator could not reach it.
+	ErrAnonymousPrivate = errors.New("new repositories are private by default on this server, and an anonymous user cannot access a private repository")
 	// ErrFileNotFound is returned when the file is not found.
 	ErrFileNotFound = errors.New("file not found")
 	// ErrRepoNotFound is returned when a repository is not found.

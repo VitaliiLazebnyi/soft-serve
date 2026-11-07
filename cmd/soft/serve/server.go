@@ -182,7 +182,7 @@ func ensureDefaultRepo(ctx context.Context, cfg *config.Config, be *backend.Back
 		return
 	}
 
-	switch _, err := be.CreateSystemRepository(ctx, name, owner, proto.RepositoryOptions{}); {
+	switch _, err := be.CreateSystemRepository(ctx, name, owner, proto.RepositoryOptions{Private: cfg.DefaultPrivate}); {
 	case errors.Is(err, proto.ErrRepoExist):
 		logger.Warn("default repo directory exists without a database row, skipping", "name", name)
 	case err != nil:

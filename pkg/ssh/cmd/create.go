@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/charmbracelet/soft-serve/pkg/backend"
@@ -27,6 +28,10 @@ func createCommand() *cobra.Command {
 			be := backend.FromContext(ctx)
 			user := proto.UserFromContext(ctx)
 			name := args[0]
+			private, err := privateOrDefault(cmd, private)
+			if err != nil {
+				return err
+			}
 			r, err := be.CreateRepository(ctx, name, user, proto.RepositoryOptions{
 				Private:     private,
 				Description: description,
@@ -45,10 +50,26 @@ func createCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&private, "private", "p", false, "make the repository private")
+	cmd.Flags().BoolVarP(&private, "private", "p", false, "make the repository private (default: the server's default_private)")
 	cmd.Flags().StringVarP(&description, "description", "d", "", "set the repository description")
 	cmd.Flags().StringVarP(&projectName, "name", "n", "", "set the project name")
 	cmd.Flags().BoolVarP(&hidden, "hidden", "H", false, "hide the repository from the UI")
 
 	return cmd
+}
+
+// privateOrDefault returns the visibility for a new repository: the value of
+// the --private flag when it was given, and the server's default otherwise
+// (see Backend.DefaultPrivate). A bool flag alone cannot tell
+// "--private=false" from no flag.
+func privateOrDefault(cmd *cobra.Command, private bool) (bool, error) {
+	if cmd.Flags().Changed("private") {
+		return private, nil
+	}
+	ctx := cmd.Context()
+	private, err := backend.FromContext(ctx).DefaultPrivate(ctx, proto.UserFromContext(ctx))
+	if errors.Is(err, proto.ErrAnonymousPrivate) {
+		return false, fmt.Errorf("%w; sign in, or pass --private=false to create a public repository", err)
+	}
+	return private, err
 }

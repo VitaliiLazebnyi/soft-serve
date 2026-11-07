@@ -1,0 +1,148 @@
+# vi: set ft=conf
+
+# FIXME: don't skip windows
+[windows] skip 'curl makes github actions hang'
+
+# default_private decides the visibility of repositories created without an
+# explicit one: repo create and repo import without --private, push-to-create
+# over SSH and HTTP, and default_repo. --private=false still creates a public
+# repository.
+
+# --- default_private off (the default): such repositories are public ---
+env SOFT_SERVE_DEFAULT_REPO=bootoff
+exec soft serve &
+ensureserverrunning SSH_PORT
+
+soft user create user1 --key "$USER1_AUTHORIZED_KEY"
+usoft token create 'push'
+stdout 'ss_*'
+cp stdout utokenfile
+envfile UTOKEN=utokenfile
+
+# a source repository on the server itself, so imports need no network
+soft repo create src
+git clone ssh://localhost:$SSH_PORT/src src
+mkfile ./src/README.md '# src'
+git -C src add -A
+git -C src commit -m 'first'
+git -C src push origin HEAD
+
+usoft repo create offcreate
+usoft repo private offcreate
+stdout 'false'
+usoft repo create -p offcreatep
+usoft repo private offcreatep
+stdout 'true'
+
+mkdir work
+mkfile ./work/README.md '# Hello'
+ugit -C work init
+ugit -C work add README.md
+ugit -C work commit -m 'first'
+ugit -C work push ssh://localhost:$SSH_PORT/offsshpush HEAD:refs/heads/main
+usoft repo private offsshpush
+stdout 'false'
+
+curl http://$UTOKEN@localhost:$HTTP_PORT/offhttppush.git/info/refs?service=git-receive-pack
+stdout '.*git-receive-pack.*'
+usoft repo private offhttppush
+stdout 'false'
+
+soft repo import offimport ssh://git@127.0.0.1:$SSH_PORT/src
+soft repo private offimport
+stdout 'false'
+
+soft repo private bootoff
+stdout 'false'
+
+stopserver
+ensureservernotrunning SSH_PORT
+
+# --- default_private on ---
+env SOFT_SERVE_DEFAULT_PRIVATE=true
+env SOFT_SERVE_DEFAULT_REPO=booton
+exec soft serve &
+ensureserverrunning SSH_PORT
+
+# repositories that already exist keep their visibility
+usoft repo private offcreate
+stdout 'false'
+
+# default_repo
+soft repo private booton
+stdout 'true'
+
+# repo create without --private, with -p, and with -p=false
+usoft repo create oncreate
+usoft repo private oncreate
+stdout 'true'
+usoft repo create -p oncreatep
+usoft repo private oncreatep
+stdout 'true'
+usoft repo create -p=false oncreatepublic
+usoft repo private oncreatepublic
+stdout 'false'
+usoft repo create --private=false oncreatepublic2
+usoft repo private oncreatepublic2
+stdout 'false'
+
+# a private repository is hidden from users who are not collaborators
+soft repo create -p=false adminpublic
+soft repo create adminprivate
+usoft repo list
+stdout 'adminpublic'
+! stdout 'adminprivate'
+
+# push-to-create over SSH; the owner can still push and clone it
+ugit -C work push ssh://localhost:$SSH_PORT/onsshpush HEAD:refs/heads/main
+usoft repo private onsshpush
+stdout 'true'
+ugit -C work push ssh://localhost:$SSH_PORT/onsshpush HEAD:refs/heads/again
+ugit clone ssh://localhost:$SSH_PORT/onsshpush onsshpush
+exists onsshpush/README.md
+
+# push-to-create over HTTP
+curl http://$UTOKEN@localhost:$HTTP_PORT/onhttppush.git/info/refs?service=git-receive-pack
+stdout '.*git-receive-pack.*'
+usoft repo private onhttppush
+stdout 'true'
+
+# repo import, plain, mirror and explicit
+soft repo import onimport ssh://git@127.0.0.1:$SSH_PORT/src
+soft repo private onimport
+stdout 'true'
+soft repo import --mirror onmirror ssh://git@127.0.0.1:$SSH_PORT/src
+soft repo private onmirror
+stdout 'true'
+soft repo import -p=false onimportpublic ssh://git@127.0.0.1:$SSH_PORT/src
+soft repo private onimportpublic
+stdout 'false'
+
+# An anonymous caller cannot reach a private repository (it would be owned
+# by the default admin), so with default_private an anonymous create that
+# does not choose a visibility is refused before anything is created.
+soft settings anon-access read-write
+mkdir anonwork
+mkfile ./anonwork/README.md '# anon'
+git -c init.defaultBranch=main -C anonwork init
+git -C anonwork add -A
+git -C anonwork commit -m 'first'
+! git -C anonwork push http://localhost:$HTTP_PORT/onanonhttp HEAD
+stderr 'private by default'
+curl http://localhost:$HTTP_PORT/onanonhttp2.git/info/refs?service=git-receive-pack
+stdout 'private by default.*authenticate'
+! ksoft repo create onanonssh
+stderr 'private by default.*--private=false'
+! ksoft repo import onanonimport http://localhost:$HTTP_PORT/src
+stderr 'private by default.*--private=false'
+soft repo list
+! stdout 'onanon'
+
+# choosing public explicitly still works anonymously
+ksoft repo create -p=false onanonpublic
+soft repo private onanonpublic
+stdout 'false'
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .

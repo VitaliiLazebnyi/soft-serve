@@ -410,8 +410,16 @@ func withAccess(next http.Handler) http.HandlerFunc {
 
 		switch authorize(service, file, r.Method, repo != nil, accessLevel, user == nil, badCredentials(err)) {
 		case createThenServe:
-			var cerr error
-			repo, cerr = be.CreateRepository(ctx, repoName, user, proto.RepositoryOptions{})
+			private, cerr := be.DefaultPrivate(ctx, user)
+			if errors.Is(cerr, proto.ErrAnonymousPrivate) {
+				logger.Info("refusing anonymous push-to-create", "repo", repoName, "err", cerr)
+				// git shows a text/plain error body to the user.
+				http.Error(w, cerr.Error()+"; authenticate to create a repository by pushing, or ask an admin", http.StatusForbidden)
+				return
+			}
+			if cerr == nil {
+				repo, cerr = be.CreateRepository(ctx, repoName, user, proto.RepositoryOptions{Private: private})
+			}
 			if errors.Is(cerr, proto.ErrRepoLimitReached) {
 				logger.Info("refusing push-to-create", "repo", repoName, "err", cerr)
 				// git shows a text/plain error body to the user.
