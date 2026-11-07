@@ -127,6 +127,45 @@ func TestHTTPPushCreateCleanupChecksID(t *testing.T) {
 	is.True(f.exists("moved"))
 }
 
+// A repository created by an HTTP push is kept when its push fails if
+// anything was done with it meanwhile, such as adding a collaborator or
+// changing its description: removing it would lose that work.
+func TestHTTPPushCreateCleanupKeepsUsed(t *testing.T) {
+	is := is.New(t)
+	f := newOracleFixture(t)
+	auth := "Token " + f.token
+	ownerCtx := proto.WithUserContext(f.ctx, f.owner)
+
+	is.Equal(f.do(http.MethodGet, "/collab.git/info/refs?service=git-receive-pack", auth).Code, http.StatusOK)
+	is.NoErr(f.be.AddCollaborator(ownerCtx, "collab", "owner", access.ReadOnlyAccess))
+	is.Equal(f.push(t, "collab", auth, "garbage"), http.StatusOK)
+	is.True(f.exists("collab"))
+
+	is.Equal(f.do(http.MethodGet, "/described.git/info/refs?service=git-receive-pack", auth).Code, http.StatusOK)
+	is.NoErr(f.be.SetDescription(ownerCtx, "described", "about"))
+	is.Equal(f.push(t, "described", auth, "garbage"), http.StatusOK)
+	is.True(f.exists("described"))
+}
+
+// A push over SSH to a repository an HTTP push created, running when that
+// repository's HTTP push fails, keeps the repository: the SSH push may write
+// refs at any moment.
+func TestHTTPPushCreateCleanupWaitsForOtherPushes(t *testing.T) {
+	is := is.New(t)
+	f := newOracleFixture(t)
+	auth := "Token " + f.token
+
+	is.Equal(f.do(http.MethodGet, "/shared.git/info/refs?service=git-receive-pack", auth).Code, http.StatusOK)
+	repo, err := f.be.Repository(f.ctx, "shared")
+	is.NoErr(err)
+	done, err := f.be.BeginPush(f.ctx, repo) // as the SSH push does
+	is.NoErr(err)
+	defer done()
+
+	is.Equal(f.push(t, "shared", auth, "garbage"), http.StatusOK)
+	is.True(f.exists("shared"))
+}
+
 // A repository whose refs cannot be listed counts as having refs, so the
 // cleanup never removes one it could not check.
 func TestHasRefsFailsSafe(t *testing.T) {

@@ -432,7 +432,7 @@ func withAccess(pending *pushCreates, next http.Handler) http.HandlerFunc {
 
 			ctx = proto.WithRepositoryContext(ctx, repo)
 			r = r.WithContext(ctx)
-			pending.add(ctx, repoName, repo.ID(), mux.Vars(r)["dir"])
+			pending.add(ctx, repoName, repo, mux.Vars(r)["dir"])
 		case denyUnreadable:
 			denyRead(w, r, err, lfsJSON)
 			return

@@ -42,6 +42,10 @@ type Backend struct {
 	// keys already logged as owned by a non-admin account, so the warning
 	// is logged once per key rather than on every lookup.
 	warnedOwnedAdminKeys sync.Map
+
+	// pushGates orders pushes against the removal of repositories created
+	// by an HTTP push; see BeginPush and RemovePushCreatedRepository.
+	pushGates pushGates
 }
 
 // New returns a new Soft Serve backend.
