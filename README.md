@@ -551,10 +551,13 @@ Soft Serve Plus offers a simple access control. There are four access levels,
 no-access, read-only, read-write, and admin-access.
 
 `admin-access` has full control of the server and can make changes to users and repos.
+Given to a collaborator, it only applies to that repo.
 
 `read-write` access can push to repos and change their content and metadata.
 Deleting or renaming a repo, changing whether it is private, and managing its
-webhooks need `admin-access` to that repo, which its owner always has.
+webhooks need `admin-access` to that repo, which its owner always has. With
+`anon-access: read-write`, anonymous users can push to public repos but can't
+delete, rename or change the visibility of any of them.
 
 `read-only` can read public repos.
 

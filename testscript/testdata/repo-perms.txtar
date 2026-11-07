@@ -106,6 +106,14 @@ usoft repo delete repo1
 usoft repo list
 ! stdout .
 
+# an owner who is not a server admin has admin access to their own repo
+usoft repo create own
+usoft repo private own true
+usoft repo rename own own2
+usoft repo delete own2
+usoft repo list
+! stdout .
+
 # stop the server
 [windows] stopserver
 [windows] ! stderr .

@@ -31,7 +31,8 @@ func privateCommand() *cobra.Command {
 					return err
 				}
 				// Making a private repository public exposes it to everyone,
-				// so only repository admins may change it.
+				// and making a public one private locks out its readers, so
+				// only repository admins may change it.
 				if err := requireLevel(ctx, access.AdminAccess); err != nil {
 					return err
 				}
