@@ -77,8 +77,40 @@ stdout user1
 usoft repo info repo1
 cmp stdout info.txt
 
+# a read-write collaborator can't delete, rename, or change visibility:
+# those need admin access to the repository
+! usoft repo delete repo1
+stderr 'unauthorized'
+! usoft repo rename repo1 repo11
+stderr 'unauthorized'
+! usoft repo private repo1 false
+stderr 'unauthorized'
+! usoft repo private repo1 true
+stderr 'unauthorized'
+soft repo private repo1
+stdout true
+soft repo info repo1
+cmp stdout info.txt
+
+# a collaborator with admin access can
+soft repo collab remove repo1 user1
+soft repo collab add repo1 user1 admin-access
+usoft repo private repo1 false
+soft repo private repo1
+stdout false
+usoft repo rename repo1 repo11
+usoft repo rename repo11 repo1
+
 # delete
 usoft repo delete repo1
+usoft repo list
+! stdout .
+
+# an owner who is not a server admin has admin access to their own repo
+usoft repo create own
+usoft repo private own true
+usoft repo rename own own2
+usoft repo delete own2
 usoft repo list
 ! stdout .
 
