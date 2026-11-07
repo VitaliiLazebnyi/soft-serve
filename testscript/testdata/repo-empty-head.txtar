@@ -55,6 +55,12 @@ soft repo branch default repo1 dev
 soft repo branch default repo1
 stdout 'dev'
 
+# the default branch itself still cannot be deleted
+! soft repo branch delete repo1 dev
+stderr 'cannot delete the default branch'
+soft repo branch list repo1
+stdout 'dev'
+
 # stop the server
 [windows] stopserver
 [windows] ! stderr .

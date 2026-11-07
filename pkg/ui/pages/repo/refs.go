@@ -263,7 +263,9 @@ func switchRefCmd(ref *git.Reference) tea.Cmd {
 	}
 }
 
-// UpdateRefCmd gets the repository's HEAD reference and sends a RefMsg.
+// UpdateRefCmd sends a RefMsg with the reference to show first: HEAD, or a
+// fallback branch when HEAD names a branch that does not exist (see
+// defaultRef). It sends EmptyRepoMsg when the repository has no branches.
 func UpdateRefCmd(repo proto.Repository) tea.Cmd {
 	return func() tea.Msg {
 		r, err := repo.Open()
