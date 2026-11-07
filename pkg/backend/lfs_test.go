@@ -10,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/lfs"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
@@ -102,6 +104,13 @@ type lfsTest struct {
 // object, numbered "lfs object 0" and up.
 func newLFSTest(t *testing.T, objects int) *lfsTest {
 	t.Helper()
+	return newLFSTestWith(t, objects, nil)
+}
+
+// newLFSTestWith is newLFSTest, with extra, if set, called to add more files
+// to the work tree before it is committed.
+func newLFSTestWith(t *testing.T, objects int, extra func(work string, pointers []lfs.Pointer)) *lfsTest {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found")
 	}
@@ -126,6 +135,10 @@ func newLFSTest(t *testing.T, objects int) *lfsTest {
 		if err := os.WriteFile(filepath.Join(work, fmt.Sprintf("file%d.bin", i)), []byte(p.String()), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+
+	if extra != nil {
+		extra(work, lt.pointers)
 	}
 
 	for _, args := range [][]string{
@@ -252,8 +265,9 @@ func TestStoreRepoMissingLFSObjectsObjectError(t *testing.T) {
 	lt.client.errs = map[string]error{missing.Oid: errors.New("object does not exist")}
 
 	err := lt.store()
-	is.True(errors.Is(err, ErrLFSObjectsUnavailable)) // the missing object is reported
-	is.Equal(len(lt.client.requested), 2)             // every object is attempted
+	is.True(errors.Is(err, ErrLFSObjectsUnavailable))            // the missing object is reported
+	is.Equal(err.Error(), "some lfs objects are unavailable: 1") // as a count; each oid is logged on its own
+	is.Equal(len(lt.client.requested), 2)                        // every object is attempted
 
 	_, err = lt.be.store.GetLFSObjectByOid(lt.ctx, lt.be.db, lt.repo.ID(), ok.Oid)
 	is.NoErr(err) // the available object is recorded
@@ -269,8 +283,12 @@ func TestFetchImportLFSObjects(t *testing.T) {
 	is := is.New(t)
 	lt := newLFSTest(t, 2)
 
+	var logs bytes.Buffer
+	lt.be.logger = log.New(&logs)
 	lt.client.errs = map[string]error{lt.pointers[0].Oid: errors.New("object does not exist")}
-	is.NoErr(lt.be.fetchImportLFSObjects(lt.ctx, lt.repo, lt.client)) // missing objects are only logged
+	is.NoErr(lt.be.fetchImportLFSObjects(lt.ctx, lt.repo, lt.client))     // missing objects are only logged
+	is.True(strings.Contains(logs.String(), "will not be fetched again")) // a plain import doesn't retry them
+	is.True(strings.Contains(logs.String(), "missing=1"))                 // the warning counts them
 
 	lt.client.err = errors.New("batch request failed")
 	is.True(lt.be.fetchImportLFSObjects(lt.ctx, lt.repo, lt.client) != nil) // other errors fail the import
@@ -365,4 +383,17 @@ func TestStoreRepoMissingLFSObjectsTruncated(t *testing.T) {
 			is.NoErr(err) // and recorded
 		})
 	}
+}
+
+// TestStoreRepoMissingLFSObjectsDuplicateOid verifies that an oid two
+// different pointer blobs share is requested only once.
+func TestStoreRepoMissingLFSObjectsDuplicateOid(t *testing.T) {
+	is := is.New(t)
+	lt := newLFSTestWith(t, 1, func(work string, pointers []lfs.Pointer) {
+		// A trailing line makes another blob that parses to the same pointer.
+		is.NoErr(os.WriteFile(filepath.Join(work, "copy.bin"), []byte(pointers[0].String()+"\n"), 0o600))
+	})
+
+	is.NoErr(lt.store())
+	is.Equal(lt.client.requested, []string{lt.pointers[0].Oid}) // requested once
 }

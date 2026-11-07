@@ -512,12 +512,21 @@ func (d *Backend) importRepository(ctx context.Context, user proto.User, imp imp
 
 // fetchImportLFSObjects fetches the LFS objects of an imported repository.
 // Like git lfs fetch, it only warns about objects the remote can't provide,
-// so one missing object doesn't throw the whole import away; the mirror job
-// tries them again on every sync. Any other failure fails the import.
+// so one missing object doesn't throw the whole import away. For a mirror,
+// the mirror job tries them again on every sync; a plain import never
+// fetches them again, so they stay missing until someone pushes them. Any
+// other failure fails the import.
 func (d *Backend) fetchImportLFSObjects(ctx context.Context, r proto.Repository, client lfs.Client) error {
 	err := StoreRepoMissingLFSObjects(ctx, r, d.db, d.store, client)
-	if errors.Is(err, ErrLFSObjectsUnavailable) {
-		d.logger.Warn("imported repository without some lfs objects", "repo", r.Name(), "err", err)
+	var unavailable *lfsObjectsUnavailableError
+	if errors.As(err, &unavailable) {
+		if r.IsMirror() {
+			d.logger.Warn("imported mirror without some lfs objects, mirror syncs will retry them",
+				"repo", r.Name(), "missing", unavailable.count)
+		} else {
+			d.logger.Warn("imported repository without some lfs objects, they will not be fetched again",
+				"repo", r.Name(), "missing", unavailable.count)
+		}
 		return nil
 	}
 	return err

@@ -22,15 +22,29 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/store"
 )
 
-// ErrLFSObjectsUnavailable is returned, joined with the error of each object,
-// when the remote could not provide some LFS objects. Every other object was
-// still stored.
+// ErrLFSObjectsUnavailable is returned when the remote could not provide some
+// LFS objects. Every other object was still stored. The error that wraps it
+// carries the number of objects; each one is logged on its own.
 var ErrLFSObjectsUnavailable = errors.New("some lfs objects are unavailable")
+
+// lfsObjectsUnavailableError is ErrLFSObjectsUnavailable with the number of
+// objects that were unavailable.
+type lfsObjectsUnavailableError struct {
+	count int
+}
+
+func (e *lfsObjectsUnavailableError) Error() string {
+	return fmt.Sprintf("%s: %d", ErrLFSObjectsUnavailable, e.count)
+}
+
+func (e *lfsObjectsUnavailableError) Unwrap() error {
+	return ErrLFSObjectsUnavailable
+}
 
 // StoreRepoMissingLFSObjects stores missing LFS objects for a repository.
 //
-// Objects the remote can't provide are logged and skipped, and reported
-// together as ErrLFSObjectsUnavailable once every other object is stored.
+// Objects the remote can't provide are logged and skipped, and counted in an
+// error wrapping ErrLFSObjectsUnavailable once every other object is stored.
 // Any other error stops the sync.
 func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx *db.DB, store store.Store, lfsClient lfs.Client) error {
 	cfg := config.FromContext(ctx)
@@ -57,10 +71,10 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 	// on disk. Those only need their content written.
 	recorded := make(map[string]bool)
 	logger := log.FromContext(ctx).WithPrefix("lfs")
-	var unavailable []error
+	var unavailable int
 	objectFailed := func(p lfs.Pointer, err error) {
 		logger.Warn("skipping lfs object", "repo", repo.Name(), "oid", p.Oid, "err", err)
-		unavailable = append(unavailable, fmt.Errorf("lfs object %s: %w", p.Oid, err))
+		unavailable++
 	}
 
 	download := func(pointers []lfs.Pointer) error {
@@ -134,7 +148,14 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 	}
 
 	var batch []lfs.Pointer
+	// queued holds the oids already batched. Different pointer blobs can
+	// share an oid, and the download callback expects each oid once.
+	queued := make(map[string]bool)
 	for pointer := range pointerChan {
+		if queued[pointer.Oid] {
+			continue
+		}
+
 		obj, err := store.GetLFSObjectByOid(ctx, dbx, repo.ID(), pointer.Oid)
 		if err != nil && !errors.Is(err, db.ErrRecordNotFound) {
 			return db.WrapError(err)
@@ -165,6 +186,7 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 			recorded[pointer.Oid] = true
 		}
 
+		queued[pointer.Oid] = true
 		batch = append(batch, pointer.Pointer)
 		// Limit batch requests to 20 objects
 		if len(batch) >= 20 {
@@ -187,8 +209,8 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 		}
 	}
 
-	if len(unavailable) > 0 {
-		return fmt.Errorf("%w: %w", ErrLFSObjectsUnavailable, errors.Join(unavailable...))
+	if unavailable > 0 {
+		return &lfsObjectsUnavailableError{count: unavailable}
 	}
 
 	return nil
