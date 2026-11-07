@@ -89,13 +89,19 @@ func TestHTTPPushCreateCleanup(t *testing.T) {
 	is.True(f.eventuallyGone("abandoned"))
 
 	// A repository that got refs is kept, even after a failed push and
-	// the timeout.
+	// the timeout. The refs are written here outside any request, which
+	// the timeout armed by the advertisement does not wait for, and the
+	// git processes that write them can take longer than a short timeout
+	// to start (on Windows they did), so the timeout is long until the
+	// refs are in.
+	pushCreateTimeout = time.Hour
 	advertise("kept")
 	work := filepath.Join(t.TempDir(), "work")
 	gitRun(t, "init", "-q", "-b", "master", work)
 	gitRun(t, "-C", work, "commit", "-q", "--allow-empty", "-m", "first")
 	dir := filepath.Join(config.FromContext(f.ctx).DataPath, "repos", "kept.git")
 	gitRun(t, "-C", dir, "fetch", "-q", work, "master:refs/heads/master")
+	pushCreateTimeout = 200 * time.Millisecond
 	is.Equal(f.push(t, "kept", auth, "garbage"), http.StatusOK)
 	time.Sleep(3 * pushCreateTimeout)
 	is.True(f.exists("kept"))
@@ -119,4 +125,15 @@ func TestHTTPPushCreateCleanupChecksID(t *testing.T) {
 	is.Equal(f.push(t, "name", auth, "garbage"), http.StatusOK)
 	is.True(f.exists("name"))
 	is.True(f.exists("moved"))
+}
+
+// A repository whose refs cannot be listed counts as having refs, so the
+// cleanup never removes one it could not check.
+func TestHasRefsFailsSafe(t *testing.T) {
+	is := is.New(t)
+	is.True(hasRefs(filepath.Join(t.TempDir(), "missing.git")))
+
+	dir := filepath.Join(t.TempDir(), "empty.git")
+	gitRun(t, "init", "-q", "--bare", dir)
+	is.True(!hasRefs(dir))
 }
