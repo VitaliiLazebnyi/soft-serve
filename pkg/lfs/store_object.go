@@ -32,10 +32,12 @@ var (
 // hashed, reading at most one byte past size so an oversized object is not
 // written out in full. Only if exactly size bytes were read and their SHA-256
 // is oid is the file renamed into objects/ and recorded. A concurrent upload
-// of the same object renames identical bytes over the same path. If the
-// object is already recorded, by an earlier or concurrent upload, that counts
-// as success, but only once the row reads back: db.WrapError maps foreign key
-// violations to db.ErrDuplicateKey too. The temporary file is always removed.
+// of the same object renames identical bytes over the same path; where that
+// rename fails, as it can on Windows, a file of the expected size already in
+// place is taken to be the object. If the object is already recorded, by an
+// earlier or concurrent upload, that counts as success, but only once the row
+// reads back: db.WrapError maps foreign key violations to db.ErrDuplicateKey
+// too. The temporary file is always removed.
 //
 // A mismatch is reported as ErrObjectSizeMismatch or ErrObjectOidMismatch;
 // any other error is a storage or database failure. size must not be
@@ -64,8 +66,16 @@ func StoreObject(ctx context.Context, strg storage.Storage, dbx db.Handler, data
 	// Rename takes names relative to the storage root, not the absolute path
 	// the temp file happens to live at.
 	pointer := Pointer{Oid: oid, Size: size}
-	if err := strg.Rename(tempName, path.Join("objects", pointer.RelativePath())); err != nil {
-		return fmt.Errorf("rename object: %w", err)
+	objPath := path.Join("objects", pointer.RelativePath())
+	if err := strg.Rename(tempName, objPath); err != nil {
+		// On Windows, renaming onto a file that a concurrent upload of the
+		// same object is renaming or has open fails. The data was checked
+		// against the oid that names objPath, so a regular file of the
+		// expected size there is the same object.
+		fi, serr := strg.Stat(objPath)
+		if serr != nil || !fi.Mode().IsRegular() || fi.Size() != size {
+			return fmt.Errorf("rename object: %w", err)
+		}
 	}
 
 	if err := datastore.CreateLFSObject(ctx, dbx, repoID, oid, size); err != nil {
