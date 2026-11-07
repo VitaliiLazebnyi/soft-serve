@@ -174,6 +174,29 @@ type JobsConfig struct {
 	MirrorPull string `env:"MIRROR_PULL" yaml:"mirror_pull"`
 }
 
+// WebhookConfig is the configuration for repository webhooks.
+type WebhookConfig struct {
+	// AllowedHosts lists the private and internal destinations webhooks
+	// may be sent to, which are otherwise refused. Entries are hostnames,
+	// IP addresses, or CIDR ranges with an optional port. An IP or CIDR
+	// entry allows the addresses it covers for any hostname. A hostname
+	// entry allows that name to resolve to loopback, RFC1918, CGNAT or IPv6
+	// unique local addresses, whatever they are when a webhook is sent.
+	// Link-local and cloud metadata addresses need an IP or CIDR entry
+	// inside their own range. Empty (the default) allows public addresses
+	// only.
+	AllowedHosts []string `env:"ALLOWED_HOSTS" yaml:"allowed_hosts"`
+
+	// allowedHosts is AllowedHosts parsed by Validate.
+	allowedHosts ssrf.AllowedHosts
+}
+
+// ParsedAllowedHosts returns the parsed webhook allowlist. It is empty until
+// Validate has run.
+func (c *WebhookConfig) ParsedAllowedHosts() ssrf.AllowedHosts {
+	return c.allowedHosts
+}
+
 // Config is the configuration for Soft Serve.
 type Config struct {
 	// Name is the name of the server.
@@ -202,6 +225,9 @@ type Config struct {
 
 	// Jobs is the configuration for cron jobs
 	Jobs JobsConfig `envPrefix:"JOBS_" yaml:"jobs"`
+
+	// Webhook is the configuration for repository webhooks.
+	Webhook WebhookConfig `envPrefix:"WEBHOOK_" yaml:"webhook"`
 
 	// InitialAdminKeys is a list of public keys that will be added to the list of admins.
 	InitialAdminKeys []string `env:"INITIAL_ADMIN_KEYS" envSeparator:"\n" yaml:"initial_admin_keys"`
@@ -308,6 +334,7 @@ func (c *Config) Environ() []string {
 		fmt.Sprintf("SOFT_SERVE_LFS_ENABLED=%t", c.LFS.Enabled),
 		fmt.Sprintf("SOFT_SERVE_LFS_SSH_ENABLED=%t", c.LFS.SSHEnabled),
 		fmt.Sprintf("SOFT_SERVE_JOBS_MIRROR_PULL=%s", c.Jobs.MirrorPull),
+		fmt.Sprintf("SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS=%s", strings.Join(c.Webhook.AllowedHosts, ",")),
 	}...)
 
 	// AnonAccess and AllowKeyless are tri-state overrides: only emit them
@@ -575,6 +602,15 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("ssh.client_allowed_hosts: %w", err)
 	}
 	c.SSH.allowedHosts = allowed
+
+	c.Webhook.AllowedHosts = slices.DeleteFunc(slices.Clone(c.Webhook.AllowedHosts), func(s string) bool {
+		return strings.TrimSpace(s) == ""
+	})
+	webhookAllowed, err := ssrf.ParseAllowedHosts(c.Webhook.AllowedHosts)
+	if err != nil {
+		return fmt.Errorf("webhook.allowed_hosts: %w", err)
+	}
+	c.Webhook.allowedHosts = webhookAllowed
 
 	if c.HTTP.TLSKeyPath != "" && !filepath.IsAbs(c.HTTP.TLSKeyPath) {
 		c.HTTP.TLSKeyPath = filepath.Join(c.DataPath, c.HTTP.TLSKeyPath)
