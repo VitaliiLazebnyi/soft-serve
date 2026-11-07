@@ -65,6 +65,18 @@ type SSHConfig struct {
 	// IdleTimeout is the number of seconds a connection can be idle before it is closed.
 	IdleTimeout int `env:"IDLE_TIMEOUT" yaml:"idle_timeout"`
 
+	// KexAlgorithms lists the key exchange algorithms the SSH server offers,
+	// in order of preference. When empty, DefaultSSHKexAlgorithms is used.
+	KexAlgorithms []string `env:"KEX_ALGORITHMS" yaml:"kex_algorithms"`
+
+	// Ciphers lists the ciphers the SSH server offers, in order of
+	// preference. When empty, DefaultSSHCiphers is used.
+	Ciphers []string `env:"CIPHERS" yaml:"ciphers"`
+
+	// MACs lists the message authentication codes the SSH server offers, in
+	// order of preference. When empty, DefaultSSHMACs is used.
+	MACs []string `env:"MACS" yaml:"macs"`
+
 	// allowedHosts is ClientAllowedHosts parsed by Validate.
 	allowedHosts ssrf.AllowedHosts
 }
@@ -311,6 +323,9 @@ func (c *Config) Environ() []string {
 		fmt.Sprintf("SOFT_SERVE_SSH_CLIENT_ALLOWED_HOSTS=%s", strings.Join(c.SSH.ClientAllowedHosts, ",")),
 		fmt.Sprintf("SOFT_SERVE_SSH_MAX_TIMEOUT=%d", c.SSH.MaxTimeout),
 		fmt.Sprintf("SOFT_SERVE_SSH_IDLE_TIMEOUT=%d", c.SSH.IdleTimeout),
+		fmt.Sprintf("SOFT_SERVE_SSH_KEX_ALGORITHMS=%s", strings.Join(c.SSH.KexAlgorithms, ",")),
+		fmt.Sprintf("SOFT_SERVE_SSH_CIPHERS=%s", strings.Join(c.SSH.Ciphers, ",")),
+		fmt.Sprintf("SOFT_SERVE_SSH_MACS=%s", strings.Join(c.SSH.MACs, ",")),
 		fmt.Sprintf("SOFT_SERVE_GIT_ENABLED=%t", c.Git.Enabled),
 		fmt.Sprintf("SOFT_SERVE_GIT_LISTEN_ADDR=%s", c.Git.ListenAddr),
 		fmt.Sprintf("SOFT_SERVE_GIT_PUBLIC_URL=%s", c.Git.PublicURL),
@@ -602,6 +617,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("ssh.client_allowed_hosts: %w", err)
 	}
 	c.SSH.allowedHosts = allowed
+
+	if err := c.SSH.validateAlgorithms(); err != nil {
+		return err
+	}
 
 	c.Webhook.AllowedHosts = slices.DeleteFunc(slices.Clone(c.Webhook.AllowedHosts), func(s string) bool {
 		return strings.TrimSpace(s) == ""

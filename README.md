@@ -221,6 +221,15 @@ ssh:
   # The number of seconds a connection can be idle before it is closed.
   idle_timeout: 120
 
+  # The key exchange algorithms, ciphers and MACs the SSH server offers, in
+  # order of preference. When a list is empty, the server offers every
+  # algorithm golang.org/x/crypto/ssh considers secure, which leaves out the
+  # SHA-1 based ones. Unknown names are rejected at startup. See
+  # "SSH Algorithms" below.
+  kex_algorithms: []
+  ciphers: []
+  macs: []
+
 # The Git daemon configuration.
 git:
   # The address on which the Git daemon will listen.
@@ -375,7 +384,62 @@ name all in uppercase. Here are some examples:
 - `SOFT_SERVE_ADMIN_ONLY_CREATE`: Only server admins may create repositories. Owners and admin-access collaborators can no longer rename repositories, and anonymous access to names that do not exist yet is capped at read-only. Defaults to `false`. Access to existing repositories is not affected.
 - `SOFT_SERVE_MAX_REPOS_PER_USER`: Maximum number of repositories each user may create. Server admins are exempt, and repositories created without an account count together as one user. Defaults to `0` (no limit).
 - `SOFT_SERVE_DEFAULT_REPO`: Repository name to create on boot if missing
+- `SOFT_SERVE_SSH_KEX_ALGORITHMS`, `SOFT_SERVE_SSH_CIPHERS`, `SOFT_SERVE_SSH_MACS`: Comma-separated lists of the SSH key exchange algorithms, ciphers and MACs to offer. Empty means the secure defaults (see [SSH Algorithms](#ssh-algorithms))
 - `SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS`: Comma-separated private or internal hosts, IP addresses or CIDR ranges (each with an optional port) that webhooks may be sent to (see [Repository webhooks](#repository-webhooks)). Defaults to empty: public addresses only.
+
+#### SSH Algorithms
+
+The SSH server offers the key exchange algorithms, ciphers and MACs that
+[golang.org/x/crypto/ssh](https://pkg.go.dev/golang.org/x/crypto/ssh#SupportedAlgorithms)
+considers secure, minus `hmac-sha1`. With the current x/crypto that is:
+
+- key exchange: `mlkem768x25519-sha256`, `curve25519-sha256` (and its alias `curve25519-sha256@libssh.org`), `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521`, `diffie-hellman-group14-sha256`, `diffie-hellman-group16-sha512`, `diffie-hellman-group-exchange-sha256`
+- ciphers: `aes128-gcm@openssh.com`, `aes256-gcm@openssh.com`, `chacha20-poly1305@openssh.com`, `aes128-ctr`, `aes192-ctr`, `aes256-ctr`
+- MACs: `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512-etm@openssh.com`, `hmac-sha2-256`, `hmac-sha2-512`
+
+Earlier versions offered x/crypto's defaults, which also include the SHA-1
+based `diffie-hellman-group14-sha1`, `hmac-sha1` and `hmac-sha1-96`. To
+restrict the server further, for example to drop the NIST curves, set
+`ssh.kex_algorithms`, `ssh.ciphers` or `ssh.macs` (or the environment
+variables above). A list replaces the default rather than adding to it, and
+a name x/crypto does not implement stops the server at startup.
+
+**Older clients.** The host key Soft Serve Plus generates by default is
+Ed25519, and the clients we checked that can verify an Ed25519 host key all
+agree on the defaults: OpenSSH 6.6 and later (Ed25519 arrived in 6.5),
+libssh2 1.10 (Ubuntu 22.04), and the maintained JSch fork
+(`com.github.mwiede:jsch`) on Java 15 or later. Clients without Ed25519 host
+key support cannot verify the default host key, with or without this
+setting: OpenSSH before 6.5, libssh2 1.8 (Ubuntu 18.04 and 20.04, used by
+libgit2 based tools there), and the original JCraft JSch up to 0.1.55. With
+an RSA host key (`ssh.key_path`), libssh2 1.8 and JSch 0.1.55 do connect
+with the defaults, using `diffie-hellman-group-exchange-sha256` (or ECDH for
+JSch), `aes128-ctr` and `hmac-sha2-256`.
+
+A client limited to SHA-1 key exchange or MACs is refused. To let one in,
+copy the default list above and append the legacy algorithm. Listing only a
+few algorithms would drop the rest, including the post-quantum
+`mlkem768x25519-sha256`, for every client:
+
+```yaml
+ssh:
+  kex_algorithms:
+    - "mlkem768x25519-sha256"
+    - "curve25519-sha256"
+    - "ecdh-sha2-nistp256"
+    - "ecdh-sha2-nistp384"
+    - "ecdh-sha2-nistp521"
+    - "diffie-hellman-group14-sha256"
+    - "diffie-hellman-group16-sha512"
+    - "diffie-hellman-group-exchange-sha256"
+    - "diffie-hellman-group14-sha1" # legacy, appended
+  macs:
+    - "hmac-sha2-256-etm@openssh.com"
+    - "hmac-sha2-512-etm@openssh.com"
+    - "hmac-sha2-256"
+    - "hmac-sha2-512"
+    - "hmac-sha1" # legacy, appended
+```
 
 #### Database Configuration
 
