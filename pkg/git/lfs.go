@@ -219,8 +219,15 @@ func (t *lfsTransfer) Upload(oid string, size int64, r io.Reader, _ transfer.Arg
 	pointer := transfer.Pointer{Oid: oid, Size: size}
 	expectedPath := path.Join("objects", pointer.RelativePath())
 	if err := t.storage.Rename(tempName, expectedPath); err != nil {
-		t.logger.Errorf("error renaming object: %v", err)
-		return err
+		// On Windows, renaming onto a file that a concurrent upload of the
+		// same object is renaming or has open fails. The data was checked
+		// against the oid that names expectedPath, so a file of the expected
+		// size there is the same object.
+		fi, serr := t.storage.Stat(expectedPath)
+		if serr != nil || !fi.Mode().IsRegular() || fi.Size() != size {
+			t.logger.Errorf("error renaming object: %v", err)
+			return err
+		}
 	}
 
 	if err := t.store.CreateLFSObject(t.ctx, t.dbx, t.repo.ID(), pointer.Oid, pointer.Size); err != nil {

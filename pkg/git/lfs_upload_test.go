@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -210,4 +211,54 @@ func TestLFSTransferPutObjectOversized(t *testing.T) {
 		t.Errorf("object stored despite size mismatch (stat err: %v)", err)
 	}
 	assertNoLFSTempFiles(t, tr.cfg)
+}
+
+// failRenameStorage is a storage whose Rename always fails, as renaming onto
+// a file another upload is renaming or has open does on Windows.
+type failRenameStorage struct{ storage.Storage }
+
+func (failRenameStorage) Rename(string, string) error {
+	return errors.New("rename: access is denied")
+}
+
+// When the rename into objects/ fails but a concurrent upload of the same
+// object has already put a file of the expected size there, the object is
+// stored and the upload succeeds. On Windows, one of two identical
+// concurrent uploads used to fail this way. Otherwise the rename error is
+// returned.
+func TestLFSTransferUploadRenameOntoExistingObject(t *testing.T) {
+	const content = "hello lfs"
+	oid := oidOf(content)
+	objPath := path.Join("objects", oid[0:2], oid[2:4], oid)
+
+	cases := []struct {
+		name    string
+		dest    string // content already at objPath, "" for none
+		wantErr bool
+	}{
+		{"destination holds the object", content, false},
+		{"no destination", "", true},
+		{"destination of another size", content + "!", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr, _ := newLFSUploadTransfer(t)
+			if tc.dest != "" {
+				if _, err := tr.storage.Put(objPath, strings.NewReader(tc.dest)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tr.storage = failRenameStorage{tr.storage}
+
+			err := tr.Upload(oid, int64(len(content)), strings.NewReader(content), nil)
+			if gotErr := err != nil; gotErr != tc.wantErr {
+				t.Fatalf("Upload => %v, want error %v", err, tc.wantErr)
+			}
+			_, gerr := tr.store.GetLFSObjectByOid(tr.ctx, tr.dbx, 1, oid)
+			if recorded := gerr == nil; recorded == tc.wantErr {
+				t.Errorf("object recorded = %v, want %v", recorded, !tc.wantErr)
+			}
+			assertNoLFSTempFiles(t, tr.cfg)
+		})
+	}
 }
