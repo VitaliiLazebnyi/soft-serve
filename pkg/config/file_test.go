@@ -24,7 +24,7 @@ func TestNewConfigFile(t *testing.T) {
 // read as the escapes \a and \x1.
 func TestNewConfigFileRoundTrip(t *testing.T) {
 	const winPath = `D:\a\soft-serve\x1\data\soft-serve.db?_pragma=busy_timeout(5000)`
-	odd := "quote \" backslash \\ hash # colon: tab\t bell\a nel\u0085 ls\u2028 é"
+	odd := "quote \" backslash \\ hash # colon: tab\t bell\a nel\u0085 ls\u2028 nonchar\ufffe\uffff é"
 
 	cfg := DefaultConfig()
 	cfg.Name = odd
