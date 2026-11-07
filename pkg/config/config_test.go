@@ -514,6 +514,31 @@ func TestMaxReposPerUser(t *testing.T) {
 	is.True(cfg.ParseEnv() != nil)
 }
 
+func TestDefaultPrivate(t *testing.T) {
+	is := is.New(t)
+	// Ignore any value exported in the environment running the tests.
+	t.Setenv("SOFT_SERVE_DEFAULT_PRIVATE", "")
+	is.NoErr(os.Unsetenv("SOFT_SERVE_DEFAULT_PRIVATE"))
+	cfg := DefaultConfig()
+	is.NoErr(cfg.ParseEnv())
+	is.True(!cfg.DefaultPrivate) // public by default, as upstream
+	is.True(slices.Contains(cfg.Environ(), "SOFT_SERVE_DEFAULT_PRIVATE=false"))
+
+	t.Setenv("SOFT_SERVE_DEFAULT_PRIVATE", "true")
+	cfg = DefaultConfig()
+	is.NoErr(cfg.ParseEnv())
+	is.True(cfg.DefaultPrivate)
+	// Hooks re-read the config from the environment.
+	is.True(slices.Contains(cfg.Environ(), "SOFT_SERVE_DEFAULT_PRIVATE=true"))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	is.NoErr(os.WriteFile(path, []byte("default_private: true\n"), 0o600))
+	cfg = DefaultConfig()
+	is.NoErr(parseFile(cfg, path))
+	is.True(cfg.DefaultPrivate)
+}
+
 // Docker Compose's list syntax keeps quotes in the value, as in
 // "- SOFT_SERVE_INITIAL_ADMIN_KEYS='ssh-ed25519 AAAA...'". A key or key file
 // path wrapped in one pair of matching quotes is read without them.
@@ -546,6 +571,60 @@ func TestQuotedInitAdminKeys(t *testing.T) {
 	cfg := &Config{InitialAdminKeys: []string{"'" + k2 + `"`, `"` + k2}}
 	is.Equal(len(cfg.AdminKeys()), 0)
 	is.Equal(cfg.IgnoredAdminKeys(), 2)
+}
+
+// SOFT_SERVE_INITIAL_ADMIN_KEYS is split on newlines before each entry's
+// quotes are trimmed, so a value with several keys in one outer pair of
+// quotes must not lose its first and last keys.
+func TestOuterQuotedInitAdminKeys(t *testing.T) {
+	k1 := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINMwLvyV3ouVrTysUYGoJdl5Vgn5BACKov+n9PlzfPwH"
+	k2 := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxIobhwtfdwN7m1TFt9wx3PsfvcAkISGPxmbmbauST8"
+	for _, tc := range []struct {
+		name string
+		env  string
+		want []string
+	}{
+		{"single quotes", "'" + k1 + "\n" + k2 + " a@b'", []string{k1, k2}},
+		{"double quotes", `"` + k1 + "\n" + k2 + `"`, []string{k1, k2}},
+		{"key file and blank lines", "\n 'testdata/k1.pub\n\n" + k2 + "' \n", []string{k1, k2}},
+		{"quotes on their own lines", "'\n" + k1 + "\n" + k2 + "\n'", []string{k1, k2}},
+		{"inner quoted entry", "'" + k1 + "\n\"" + k2 + "\"'", []string{k1, k2}},
+		{"each entry quoted", "'" + k1 + "'\n'" + k2 + "'", []string{k1, k2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			is := is.New(t)
+			t.Setenv("SOFT_SERVE_INITIAL_ADMIN_KEYS", tc.env)
+			t.Setenv("SOFT_SERVE_DATA_PATH", t.TempDir())
+			cfg := DefaultConfig()
+			is.NoErr(cfg.ParseEnv())
+			is.Equal(cfg.InitialAdminKeys, tc.want)
+			is.Equal(cfg.IgnoredAdminKeys(), 0)
+		})
+	}
+
+	// The outer quotes are stripped before the config file's keys are
+	// merged in.
+	t.Run("with config file keys", func(t *testing.T) {
+		is := is.New(t)
+		t.Setenv("SOFT_SERVE_INITIAL_ADMIN_KEYS", "'"+k1+"\n"+k2+"'")
+		t.Setenv("SOFT_SERVE_DATA_PATH", t.TempDir())
+		cfg := DefaultConfig()
+		cfg.InitialAdminKeys = []string{k2}
+		is.NoErr(cfg.ParseEnv())
+		is.Equal(cfg.InitialAdminKeys, []string{k1, k2})
+		is.Equal(cfg.IgnoredAdminKeys(), 0)
+	})
+
+	// Mismatched outer quotes are not stripped.
+	t.Run("mismatched quotes", func(t *testing.T) {
+		is := is.New(t)
+		t.Setenv("SOFT_SERVE_INITIAL_ADMIN_KEYS", "'"+k1+"\n"+k2+`"`)
+		t.Setenv("SOFT_SERVE_DATA_PATH", t.TempDir())
+		cfg := DefaultConfig()
+		is.NoErr(cfg.ParseEnv())
+		is.Equal(len(cfg.InitialAdminKeys), 0)
+		is.Equal(cfg.IgnoredAdminKeys(), 2)
+	})
 }
 
 func TestWebhookAllowedHosts(t *testing.T) {

@@ -206,6 +206,17 @@ db:
   # Make sure foreign key support is enabled when using SQLite.
   data_source: {{ q .DB.DataSource }}
 
+  # Connection pool limits. 0 keeps the database/sql default: no limit on
+  # open connections, 2 idle connections, and no limit on how long a
+  # connection is reused or may sit idle. With Postgres, set max_open_conns
+  # below the server's max_connections (minus what other clients use) so a
+  # burst of requests waits for a free connection instead of failing.
+  # Durations are in seconds.
+  max_open_conns: {{ .DB.MaxOpenConns }}
+  max_idle_conns: {{ .DB.MaxIdleConns }}
+  conn_max_lifetime: {{ .DB.ConnMaxLifetime }}
+  conn_max_idle_time: {{ .DB.ConnMaxIdleTime }}
+
 # Git LFS configuration.
 lfs:
   # Enable Git LFS.
@@ -259,6 +270,16 @@ webhook:
 # created without an account all count together as one user. A user at the
 # limit is refused; existing repositories are kept. 0 means no limit.
 #max_repos_per_user: 0
+
+# Make repositories created without an explicit visibility private:
+# push-to-create over SSH and HTTP, repo create and repo import without
+# --private, and default_repo. "repo create --private=false" still creates a
+# public repository. An anonymous user could not access a private
+# repository (it would be owned by the default admin), so when this is set
+# anonymous push-to-create is refused, and anonymous repo create and repo
+# import need --private=false. Defaults to false (such repositories are
+# public).
+#default_private: false
 
 # Name of a repository to create automatically on boot if it doesn't already
 # exist. Empty disables this behavior.

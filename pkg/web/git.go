@@ -416,8 +416,20 @@ func withAccess(pending *pushCreates, next http.Handler) http.HandlerFunc {
 
 		switch authorize(service, file, r.Method, repo != nil, accessLevel, user == nil, badCredentials(err)) {
 		case createThenServe:
-			var cerr error
-			repo, cerr = be.CreateRepository(ctx, repoName, user, proto.RepositoryOptions{})
+			private, cerr := be.DefaultPrivate(ctx, user)
+			if errors.Is(cerr, proto.ErrAnonymousPrivate) {
+				logger.Info("refusing anonymous push-to-create", "repo", repoName, "err", cerr)
+				// Ask for credentials, as for the unauthorized verdict: git
+				// sends none on its first request, and only retries with
+				// them after a 401. A signed-in user then creates the
+				// repository; an anonymous client sees this body.
+				askCredentials(w, r)
+				http.Error(w, cerr.Error()+"; authenticate to create a repository by pushing, or ask an admin", http.StatusUnauthorized)
+				return
+			}
+			if cerr == nil {
+				repo, cerr = be.CreateRepository(ctx, repoName, user, proto.RepositoryOptions{Private: private})
+			}
 			if errors.Is(cerr, proto.ErrRepoLimitReached) {
 				logger.Info("refusing push-to-create", "repo", repoName, "err", cerr)
 				// git shows a text/plain error body to the user.
