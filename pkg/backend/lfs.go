@@ -75,14 +75,7 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 
 			// If recording fails, the object stays on disk and the next sync
 			// records it.
-			if err := store.CreateLFSObject(ctx, dbx, repo.ID(), p.Oid, p.Size); err != nil {
-				// Someone else recorded it in the meantime.
-				if err := db.WrapError(err); !errors.Is(err, db.ErrDuplicateKey) {
-					return err
-				}
-			}
-
-			return nil
+			return recordLFSObject(ctx, dbx, store, repo.ID(), p)
 		})
 	}
 
@@ -101,11 +94,8 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 		if exist {
 			// The object is on disk, make sure it's recorded.
 			if obj.ID == 0 {
-				if err := store.CreateLFSObject(ctx, dbx, repo.ID(), pointer.Oid, pointer.Size); err != nil {
-					// Someone else recorded it in the meantime.
-					if err := db.WrapError(err); !errors.Is(err, db.ErrDuplicateKey) {
-						return err
-					}
+				if err := recordLFSObject(ctx, dbx, store, repo.ID(), pointer.Pointer); err != nil {
+					return err
 				}
 			}
 			continue
@@ -136,4 +126,18 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 	}
 
 	return nil
+}
+
+// recordLFSObject records an LFS object of a repository. An object someone
+// else recorded in the meantime is not an error.
+func recordLFSObject(ctx context.Context, dbx *db.DB, store store.Store, repoID int64, p lfs.Pointer) error {
+	err := db.WrapError(store.CreateLFSObject(ctx, dbx, repoID, p.Oid, p.Size))
+	if errors.Is(err, db.ErrDuplicateKey) {
+		// db.WrapError reports foreign key violations, e.g. a repository
+		// deleted mid-sync, as duplicate keys too, so check the row is there.
+		if _, gerr := store.GetLFSObjectByOid(ctx, dbx, repoID, p.Oid); gerr == nil {
+			return nil
+		}
+	}
+	return err
 }
