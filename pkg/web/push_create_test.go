@@ -18,7 +18,7 @@ import (
 // push sends a receive-pack RPC with body and returns the status code.
 func (f *oracleFixture) push(t *testing.T, name, auth, body string) int {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/"+name+".git/git-receive-pack", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/"+name+".git/git-receive-pack", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
 	req.Header.Set("Authorization", auth)
 	w := httptest.NewRecorder()
@@ -35,7 +35,7 @@ func (f *oracleFixture) exists(name string) bool {
 // gitRun runs git and fails the test on error.
 func gitRun(t *testing.T, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(t.Context(), "git", args...)
 	cmd.Env = append(cmd.Environ(),
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
 		"GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@b",
