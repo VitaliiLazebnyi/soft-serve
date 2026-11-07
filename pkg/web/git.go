@@ -33,6 +33,9 @@ type GitRoute struct {
 	method  []string
 	handler http.HandlerFunc
 	path    string
+	// pending tracks repositories created by push-to-create; see
+	// pushCreates. GitController sets it.
+	pending *pushCreates
 }
 
 var _ http.Handler = GitRoute{}
@@ -54,7 +57,7 @@ func (g GitRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	withAccess(g.handler)(w, r)
+	withAccess(g.pending, g.handler)(w, r)
 }
 
 var (
@@ -106,7 +109,9 @@ func withParams(next http.Handler) http.Handler {
 // GitController is a router for git services.
 func GitController(_ context.Context, r *mux.Router) {
 	basePrefix := "/{repo:.*}"
+	pending := newPushCreates()
 	for _, route := range gitRoutes {
+		route.pending = pending
 		// NOTE: withParam must always be the outermost wrapper, otherwise the
 		// request vars will not be set.
 		r.Handle(basePrefix+route.path, withParams(route))
@@ -377,8 +382,9 @@ func withCaller(next http.Handler) http.HandlerFunc {
 }
 
 // withAccess authenticates the caller and authorizes them for the requested
-// repository.
-func withAccess(next http.Handler) http.HandlerFunc {
+// repository. A repository created by push-to-create is recorded in pending,
+// which removes it if the push ends, or never arrives, without any ref.
+func withAccess(pending *pushCreates, next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r, err := identify(r)
 		if !requireCaller(w, r) {
@@ -426,6 +432,7 @@ func withAccess(next http.Handler) http.HandlerFunc {
 
 			ctx = proto.WithRepositoryContext(ctx, repo)
 			r = r.WithContext(ctx)
+			pending.add(ctx, repoName, mux.Vars(r)["dir"])
 		case denyUnreadable:
 			denyRead(w, r, err, lfsJSON)
 			return
@@ -439,6 +446,10 @@ func withAccess(next http.Handler) http.HandlerFunc {
 		case forbidLFSWrite, unauthorizedLFS:
 			denyLFSWrite(w, r)
 			return
+		}
+
+		if done := pending.begin(repoName); done != nil {
+			defer done(service == git.ReceivePackService && file == git.ReceivePackService.String())
 		}
 
 		next.ServeHTTP(w, r)
