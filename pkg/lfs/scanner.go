@@ -49,12 +49,9 @@ func SearchPointerBlobs(ctx context.Context, repo *git.Repository, pointerChan c
 
 	// A canceled scan stops early, possibly after git rev-list finished
 	// cleanly, so report it rather than let it pass for a complete one.
-	// Don't block if rev-list already reported an error.
+	// Don't block if a stage already reported an error.
 	if err := ctx.Err(); err != nil {
-		select {
-		case errChan <- err:
-		default:
-		}
+		sendScanError(errChan, err)
 	}
 
 	close(pointerChan)
