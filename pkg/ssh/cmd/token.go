@@ -33,7 +33,7 @@ func TokenCommand() *cobra.Command {
 
 			user := proto.UserFromContext(ctx)
 			if user == nil {
-				return proto.ErrUserNotFound
+				return errUnknownKey(ctx)
 			}
 
 			var expiresAt time.Time
@@ -78,7 +78,7 @@ func TokenCommand() *cobra.Command {
 
 			user := proto.UserFromContext(ctx)
 			if user == nil {
-				return proto.ErrUserNotFound
+				return errUnknownKey(ctx)
 			}
 
 			tokens, err := be.ListAccessTokens(ctx, user)
@@ -125,7 +125,7 @@ func TokenCommand() *cobra.Command {
 
 			user := proto.UserFromContext(ctx)
 			if user == nil {
-				return proto.ErrUserNotFound
+				return errUnknownKey(ctx)
 			}
 
 			id, err := strconv.ParseInt(args[0], 10, 64)

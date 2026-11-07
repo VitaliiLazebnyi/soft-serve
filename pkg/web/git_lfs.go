@@ -1,6 +1,9 @@
 package web
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +26,31 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// Limits on LFS JSON request bodies. A batch request costs a storage stat and
+// a database lookup per object, so the number of objects is capped. git-lfs
+// sends 100 objects per batch by default (lfs.transfer.batchSize); the batch
+// body limit leaves room for 1000 objects with long ref names. Verify and lock
+// requests carry a single object or path.
+const (
+	maxLfsBatchObjects  = 1000
+	maxLfsBatchBodySize = 1 << 20  // 1 MiB
+	maxLfsJSONBodySize  = 64 << 10 // 64 KiB
+)
+
+// lfsBodyTooLarge answers 413 when err comes from a body limited with
+// http.MaxBytesReader, and reports whether it did.
+func lfsBodyTooLarge(w http.ResponseWriter, logger *log.Logger, err error) bool {
+	var maxErr *http.MaxBytesError
+	if !errors.As(err, &maxErr) {
+		return false
+	}
+	logger.Warn("request body too large", "limit", maxErr.Limit)
+	renderJSON(w, http.StatusRequestEntityTooLarge, lfs.ErrorResponse{
+		Message: "request too large",
+	})
+	return true
+}
+
 // serviceLfsBatch handles a Git LFS batch requests.
 // https://github.com/git-lfs/git-lfs/blob/main/docs/api/batch.md
 // TODO: support refname
@@ -39,7 +67,11 @@ func serviceLfsBatch(w http.ResponseWriter, r *http.Request) {
 
 	var batchRequest lfs.BatchRequest
 	defer r.Body.Close() //nolint: errcheck
-	if err := json.NewDecoder(r.Body).Decode(&batchRequest); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxLfsBatchBodySize)
+	if err := json.NewDecoder(body).Decode(&batchRequest); err != nil {
+		if lfsBodyTooLarge(w, logger, err) {
+			return
+		}
 		logger.Errorf("error decoding json: %s", err)
 		renderJSON(w, http.StatusUnprocessableEntity, lfs.ErrorResponse{
 			Message: "validation error in request: " + err.Error(),
@@ -69,6 +101,15 @@ func serviceLfsBatch(w http.ResponseWriter, r *http.Request) {
 	if len(batchRequest.Objects) == 0 {
 		renderJSON(w, http.StatusUnprocessableEntity, lfs.ErrorResponse{
 			Message: "no objects found",
+		})
+		return
+	}
+
+	// The batch API answers 413 when a request has too many objects.
+	if len(batchRequest.Objects) > maxLfsBatchObjects {
+		logger.Warn("too many objects in batch request", "objects", len(batchRequest.Objects))
+		renderJSON(w, http.StatusRequestEntityTooLarge, lfs.ErrorResponse{
+			Message: fmt.Sprintf("too many objects in batch request: %d, the maximum is %d", len(batchRequest.Objects), maxLfsBatchObjects),
 		})
 		return
 	}
@@ -340,8 +381,35 @@ func serviceLfsBasicUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pointer := lfs.Pointer{Oid: oid}
-	if _, err := strg.Put(path.Join("objects", pointer.RelativePath()), r.Body); err != nil {
+	// The declared size is the content length. net/http has already rejected
+	// an invalid Content-Length header; -1 means the length is unknown, as
+	// with a chunked body, and the object cannot be checked against it.
+	size := r.ContentLength
+	if size < 0 {
+		logger.Error("missing content length", "oid", oid)
+		renderJSON(w, http.StatusLengthRequired, lfs.ErrorResponse{
+			Message: "content length required",
+		})
+		return
+	}
+
+	// Write to a temporary file first and only move it into place once the
+	// content matches the oid and the declared size. Reading one byte past
+	// the declared size is enough to tell an oversized body apart.
+	randBytes := make([]byte, 12)
+	if _, err := rand.Read(randBytes); err != nil {
+		logger.Error("error generating temp name", "err", err)
+		renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
+			Message: "internal server error",
+		})
+		return
+	}
+	tempName := path.Join("incomplete", fmt.Sprintf("%s%x", oid, randBytes))
+	defer strg.Delete(tempName) //nolint: errcheck
+
+	hash := sha256.New()
+	written, err := strg.Put(tempName, io.TeeReader(io.LimitReader(r.Body, size+1), hash))
+	if err != nil {
 		logger.Error("error writing object", "oid", oid, "err", err)
 		renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
 			Message: "internal server error",
@@ -349,24 +417,93 @@ func serviceLfsBasicUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	size, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
-	if err != nil {
-		logger.Error("error parsing content length", "err", err)
-		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
-			Message: "invalid content length",
+	if written != size {
+		logger.Error("object size mismatch", "oid", oid, "size", size, "written", written)
+		renderJSON(w, http.StatusUnprocessableEntity, lfs.ErrorResponse{
+			Message: "object size does not match content length",
+		})
+		return
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != oid {
+		logger.Error("object hash mismatch", "oid", oid)
+		renderJSON(w, http.StatusUnprocessableEntity, lfs.ErrorResponse{
+			Message: "object content does not match oid",
 		})
 		return
 	}
 
-	if err := datastore.CreateLFSObject(ctx, dbx, repo.ID(), oid, size); err != nil {
-		logger.Error("error creating object", "oid", oid, "err", err)
+	// The content is verified, so a concurrent upload of the same object
+	// renames identical bytes over the same path.
+	pointer := lfs.Pointer{Oid: oid}
+	if err := renameLFSObject(strg, tempName, path.Join("objects", pointer.RelativePath()), oid, size); err != nil {
+		logger.Error("error renaming object", "oid", oid, "err", err)
 		renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
 			Message: "internal server error",
 		})
 		return
 	}
 
+	if err := datastore.CreateLFSObject(ctx, dbx, repo.ID(), oid, size); err != nil {
+		// A concurrent upload of the same object may have recorded it first.
+		// WrapError also maps foreign key violations to ErrDuplicateKey, so
+		// only treat it as success if the row is really there.
+		if !errors.Is(err, db.ErrDuplicateKey) {
+			logger.Error("error creating object", "oid", oid, "err", err)
+			renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
+				Message: "internal server error",
+			})
+			return
+		}
+		if _, gerr := datastore.GetLFSObjectByOid(ctx, dbx, repo.ID(), oid); gerr != nil {
+			logger.Error("error creating object", "oid", oid, "err", err, "lookup_err", gerr)
+			renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
+				Message: "internal server error",
+			})
+			return
+		}
+	}
+
 	renderStatus(http.StatusOK)(w, nil)
+}
+
+// renameLFSObject moves the verified temporary file tempName to objPath. On
+// Windows, renaming onto a file that another upload is renaming or a download
+// has open fails. If objPath already holds the object, the rename counts as
+// done. Not everything that writes objects/ verifies the content, so the
+// existing file is accepted only if it is size bytes long and hashes to oid;
+// otherwise the rename error is returned and the client retries.
+func renameLFSObject(strg storage.Storage, tempName, objPath, oid string, size int64) error {
+	err := strg.Rename(tempName, objPath)
+	if err == nil || isLFSObject(strg, objPath, oid, size) {
+		return nil
+	}
+	return err
+}
+
+// isLFSObject reports whether objPath is a regular file of size bytes whose
+// SHA-256 is oid.
+func isLFSObject(strg storage.Storage, objPath, oid string, size int64) bool {
+	// Check the type before opening: opening a FIFO blocks until a writer
+	// shows up. The file is checked again once open, in case it changed.
+	regularOfSize := func(fi fs.FileInfo, err error) bool {
+		return err == nil && fi.Mode().IsRegular() && fi.Size() == size
+	}
+	if !regularOfSize(strg.Stat(objPath)) {
+		return false
+	}
+	f, err := strg.Open(objPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close() //nolint: errcheck
+	if !regularOfSize(f.Stat()) {
+		return false
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return false
+	}
+	return hex.EncodeToString(hash.Sum(nil)) == oid
 }
 
 // POST: /<repo>.git/info/lfs/objects/basic/verify
@@ -385,7 +522,11 @@ func serviceLfsBasicVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer r.Body.Close() //nolint: errcheck
-	if err := json.NewDecoder(r.Body).Decode(&pointer); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxLfsJSONBodySize)
+	if err := json.NewDecoder(body).Decode(&pointer); err != nil {
+		if lfsBodyTooLarge(w, logger, err) {
+			return
+		}
 		logger.Error("error decoding json", "err", err)
 		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
 			Message: "invalid request: " + err.Error(),

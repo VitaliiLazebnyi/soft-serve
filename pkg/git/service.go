@@ -11,7 +11,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"charm.land/log/v2"
 )
@@ -82,6 +84,23 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 	if len(scmd.Env) > 0 {
 		cmd.Env = append(cmd.Env, scmd.Env...)
 	}
+
+	// killed records that git was killed because the context was done. On
+	// Windows a killed process exits with status 1, so the exit status cannot
+	// tell a kill from a failure there. It is not used on Unix: killing a git
+	// that already exited but was not yet reaped also succeeds, and there the
+	// signal in the exit status tells the two apart.
+	var killed atomic.Bool
+	cmd.Cancel = func() error {
+		err := cmd.Process.Kill()
+		if err == nil {
+			killed.Store(true)
+		}
+		return err
+	}
+	// Kill git as a fallback if it is still running this long after the
+	// context is done, for when CmdFunc replaces Cancel.
+	cmd.WaitDelay = waitDelay
 
 	if scmd.CmdFunc != nil {
 		scmd.CmdFunc(cmd)
@@ -159,10 +178,29 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 	// Ensure all the output is written before waiting for the command to
 	// finish.
 	// Stdin is handled by the client side.
-	wg.Wait()
+	copied := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(copied)
+	}()
+	select {
+	case <-copied:
+	case <-ctx.Done():
+		// git is killed for the context, and its output has nowhere to go.
+		// A process git started can still hold the output pipes open after
+		// git is gone, as the git wrapper on Windows does, so the copies may
+		// never finish on their own. Wait closes the pipes once git exits,
+		// which ends them.
+	}
 
 	err = cmd.Wait()
-	if err != nil && errors.Is(err, os.ErrNotExist) {
+	<-copied
+	if err != nil && stoppedByContext(ctx, err, killed.Load()) {
+		// The context was cancelled, usually because the client went away,
+		// and git was killed for it. Report the cancellation rather than
+		// the kill so callers can tell it apart from a git failure.
+		return fmt.Errorf("%s: %w (%v)", svc, ctx.Err(), err)
+	} else if err != nil && errors.Is(err, os.ErrNotExist) {
 		return ErrInvalidRepo
 	} else if err != nil {
 		var exitErr *exec.ExitError
@@ -176,39 +214,12 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 	return nil
 }
 
-// ServiceCommand is used to run a git service command.
-type ServiceCommand struct {
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
-	Dir    string
-	Env    []string
-	Args   []string
-
-	// Modifier functions
-	CmdFunc func(*exec.Cmd)
-}
-
-// UploadPack runs the git upload-pack protocol against the provided repo.
-func UploadPack(ctx context.Context, cmd ServiceCommand) error {
-	return gitServiceHandler(ctx, UploadPackService, cmd)
-}
-
-// UploadArchive runs the git upload-archive protocol against the provided repo.
-func UploadArchive(ctx context.Context, cmd ServiceCommand) error {
-	return gitServiceHandler(ctx, UploadArchiveService, cmd)
-}
-
-// ReceivePack runs the git receive-pack protocol against the provided repo.
-func ReceivePack(ctx context.Context, cmd ServiceCommand) error {
-	return gitServiceHandler(ctx, ReceivePackService, cmd)
-}
-
 // logCopyError logs a failure to copy between git and the client. A client
 // that goes away, closing the SSH channel or the HTTP connection, makes the
-// copy fail, usually as the context is cancelled for it. That is expected,
-// so it is logged at Debug, as is any failure the caller marks as expected;
-// any other failure is logged at Error.
+// copy fail: either the write to (or read from) the client fails, or the
+// context is cancelled for it and the pipes are closed under the copy. That
+// is expected, so it is logged at Debug, as is any failure the caller marks
+// as expected; any other failure is logged at Error.
 func logCopyError(ctx context.Context, stream string, err error, expected bool) {
 	if expected || ctx.Err() != nil || clientGone(err) {
 		log.Debugf("gitServiceHandler: failed to copy %s: %v", stream, err)
@@ -275,4 +286,58 @@ var windowsClientGoneErrnos = []syscall.Errno{
 	windowsErrorNoData,
 	windowsWSAEConnAborted,
 	windowsWSAEConnReset,
+}
+
+// waitDelay is how long after the context is done git is killed as a
+// fallback if Cancel did not stop it.
+const waitDelay = 5 * time.Second
+
+// stoppedByContext reports whether err, returned by Wait for a command run
+// with ctx, comes from the command being stopped because ctx was done rather
+// than from the command failing on its own. Wait returns the context error
+// itself when the command exits successfully after it was told to stop.
+//
+// killed reports that the command was killed for the context, and is only
+// trusted on Windows, where a killed process exits with a status. On Unix a
+// command killed for the context was terminated by a signal; one that exited
+// with a status, even after the context was done, failed on its own and its
+// error is the one to report.
+func stoppedByContext(ctx context.Context, err error, killed bool) bool {
+	ctxErr := ctx.Err()
+	if ctxErr == nil {
+		return false
+	}
+	if (killed && runtime.GOOS == "windows") || errors.Is(err, ctxErr) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && !exitErr.Exited()
+}
+
+// ServiceCommand is used to run a git service command.
+type ServiceCommand struct {
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
+	Dir    string
+	Env    []string
+	Args   []string
+
+	// Modifier functions
+	CmdFunc func(*exec.Cmd)
+}
+
+// UploadPack runs the git upload-pack protocol against the provided repo.
+func UploadPack(ctx context.Context, cmd ServiceCommand) error {
+	return gitServiceHandler(ctx, UploadPackService, cmd)
+}
+
+// UploadArchive runs the git upload-archive protocol against the provided repo.
+func UploadArchive(ctx context.Context, cmd ServiceCommand) error {
+	return gitServiceHandler(ctx, UploadArchiveService, cmd)
+}
+
+// ReceivePack runs the git receive-pack protocol against the provided repo.
+func ReceivePack(ctx context.Context, cmd ServiceCommand) error {
+	return gitServiceHandler(ctx, ReceivePackService, cmd)
 }
