@@ -530,6 +530,11 @@ func serviceRpc(w http.ResponseWriter, r *http.Request) {
 	cmd.Stdout = w
 
 	if err := service.Handler(ctx, cmd); err != nil {
+		if errors.Is(err, context.Canceled) {
+			// The client went away before git was done.
+			logger.Debugf("service cancelled: %v", err)
+			return
+		}
 		logger.Errorf("failed to handle service: %v", err)
 		return
 	}
