@@ -159,7 +159,12 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 	wg.Wait()
 
 	err = cmd.Wait()
-	if err != nil && errors.Is(err, os.ErrNotExist) {
+	if err != nil && ctx.Err() != nil {
+		// The context was cancelled, usually because the client went away,
+		// and git was killed for it. Report the cancellation rather than
+		// the kill so callers can tell it apart from a git failure.
+		return fmt.Errorf("%s: %w", svc, ctx.Err())
+	} else if err != nil && errors.Is(err, os.ErrNotExist) {
 		return ErrInvalidRepo
 	} else if err != nil {
 		var exitErr *exec.ExitError
