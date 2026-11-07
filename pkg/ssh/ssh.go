@@ -100,14 +100,8 @@ func NewSSHServer(ctx context.Context) (*SSHServer, error) {
 		return nil, err
 	}
 
-	if config.IsDebug() {
-		s.srv.ServerConfigCallback = func(_ ssh.Context) *gossh.ServerConfig {
-			return &gossh.ServerConfig{
-				AuthLogCallback: func(conn gossh.ConnMetadata, method string, err error) {
-					logger.Debug("authentication", "user", conn.User(), "method", method, "err", err)
-				},
-			}
-		}
+	s.srv.ServerConfigCallback = func(_ ssh.Context) *gossh.ServerConfig {
+		return serverConfig(cfg, logger)
 	}
 
 	if cfg.SSH.MaxTimeout > 0 {
@@ -127,6 +121,28 @@ func NewSSHServer(ctx context.Context) (*SSHServer, error) {
 	}
 
 	return s, nil
+}
+
+// serverConfig returns the x/crypto server configuration for a new
+// connection. It restricts the key exchanges, ciphers and MACs offered to
+// those in the config, which default to the algorithms x/crypto considers
+// secure. Without them x/crypto falls back to its own defaults, which still
+// include SHA-1 key exchange and MACs. The SSH server adds the host keys
+// and authentication callbacks on top of this.
+func serverConfig(cfg *config.Config, logger *log.Logger) *gossh.ServerConfig {
+	sc := &gossh.ServerConfig{
+		Config: gossh.Config{
+			KeyExchanges: cfg.SSH.SSHKexAlgorithms(),
+			Ciphers:      cfg.SSH.SSHCiphers(),
+			MACs:         cfg.SSH.SSHMACs(),
+		},
+	}
+	if config.IsDebug() {
+		sc.AuthLogCallback = func(conn gossh.ConnMetadata, method string, err error) {
+			logger.Debug("authentication", "user", conn.User(), "method", method, "err", err)
+		}
+	}
+	return sc
 }
 
 // ListenAndServe starts the SSH server.
