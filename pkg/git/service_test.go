@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +51,10 @@ func TestUploadPackClientGoesAway(t *testing.T) {
 	err := <-errc
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	// The original Wait error stays in the message.
+	if runtime.GOOS != "windows" && !strings.Contains(err.Error(), "signal: killed") {
+		t.Fatalf("expected the error to keep the Wait error, got %v", err)
 	}
 }
 
@@ -98,5 +105,43 @@ func TestUploadPackFailsAfterCancel(t *testing.T) {
 	}
 	if errors.Is(err, context.Canceled) {
 		t.Fatalf("expected the git failure, got the cancellation: %v", err)
+	}
+}
+
+func TestStoppedByContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if stoppedByContext(context.Background(), context.Canceled) {
+		t.Error("a context that is not done must not report a cancellation")
+	}
+	if !stoppedByContext(ctx, context.Canceled) {
+		t.Error("the context error must report a cancellation")
+	}
+	if !stoppedByContext(ctx, fmt.Errorf("wait: %w", context.Canceled)) {
+		t.Error("a wrapped context error must report a cancellation")
+	}
+	if stoppedByContext(ctx, errors.New("some other failure")) {
+		t.Error("an unrelated error must not report a cancellation")
+	}
+
+	if runtime.GOOS == "windows" {
+		t.Skip("exit by signal is not reported on windows")
+	}
+
+	exited := exec.Command("sh", "-c", "exit 1").Run()
+	if exited == nil {
+		t.Fatal("expected sh to exit with an error")
+	}
+	if stoppedByContext(ctx, exited) {
+		t.Errorf("a process that exited on its own must not report a cancellation: %v", exited)
+	}
+
+	killed := exec.Command("sh", "-c", "kill -9 $$").Run()
+	if killed == nil {
+		t.Fatal("expected sh to be killed")
+	}
+	if !stoppedByContext(ctx, killed) {
+		t.Errorf("a process killed by a signal must report a cancellation: %v", killed)
 	}
 }
