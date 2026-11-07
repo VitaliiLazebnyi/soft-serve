@@ -135,7 +135,7 @@ func TestSSHPushAfterPushCreatedRemovalCreates(t *testing.T) {
 	// A commit to push, and its pack.
 	work := t.TempDir()
 	gitCmd := func(stdin string, args ...string) []byte {
-		cmd := exec.Command("git", append([]string{"-C", work}, args...)...)
+		cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", work}, args...)...)
 		cmd.Stdin = strings.NewReader(stdin)
 		cmd.Env = append(os.Environ(),
 			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",

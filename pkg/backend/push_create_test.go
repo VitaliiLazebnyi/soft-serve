@@ -32,13 +32,13 @@ func TestRemovePushCreatedRepositoryKeepsUsed(t *testing.T) {
 		"untouched": nil,
 		"ref": func(t *testing.T, r proto.Repository) {
 			dir := be.repoPath(r.Name())
-			tree, err := exec.Command("git", "-C", dir, "mktree").Output()
+			tree, err := exec.CommandContext(t.Context(), "git", "-C", dir, "mktree").Output()
 			is.New(t).NoErr(err)
-			cmd := exec.Command("git", "-C", dir, "commit-tree", string(tree[:len(tree)-1]), "-m", "x")
+			cmd := exec.CommandContext(t.Context(), "git", "-C", dir, "commit-tree", string(tree[:len(tree)-1]), "-m", "x")
 			cmd.Env = append(cmd.Environ(), "GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@b", "GIT_COMMITTER_NAME=a", "GIT_COMMITTER_EMAIL=a@b")
 			commit, err := cmd.Output()
 			is.New(t).NoErr(err)
-			is.New(t).NoErr(exec.Command("git", "-C", dir, "update-ref", "refs/heads/main", string(commit[:len(commit)-1])).Run())
+			is.New(t).NoErr(exec.CommandContext(t.Context(), "git", "-C", dir, "update-ref", "refs/heads/main", string(commit[:len(commit)-1])).Run())
 		},
 		// The settings are changed in the store, as the backend's setters
 		// do, without the webhook event those also deliver.
