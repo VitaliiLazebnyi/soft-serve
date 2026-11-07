@@ -14,7 +14,8 @@ import (
 )
 
 // TestSearchPointerBlobsCancel verifies that the scan stops once its context
-// is canceled, even when nobody reads the remaining pointers.
+// is canceled, even when nobody reads the remaining pointers, and reports
+// that it didn't finish.
 func TestSearchPointerBlobsCancel(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found")
@@ -72,5 +73,9 @@ func TestSearchPointerBlobsCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("SearchPointerBlobs did not return after the context was canceled")
+	}
+
+	if err, ok := <-errChan; !ok || err == nil {
+		t.Fatal("SearchPointerBlobs did not report the canceled scan")
 	}
 }
