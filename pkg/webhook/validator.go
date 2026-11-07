@@ -16,5 +16,11 @@ func ValidateWebhookURL(rawURL string) error {
 	return ssrf.ValidateURL(rawURL) //nolint:wrapcheck
 }
 
+// ValidateWebhookURLAllowing is ValidateWebhookURL with the private and
+// internal destinations allowed permits (webhook.allowed_hosts) let through.
+func ValidateWebhookURLAllowing(rawURL string, allowed ssrf.AllowedHosts) error {
+	return ssrf.ValidateURLAllowing(rawURL, allowed) //nolint:wrapcheck
+}
+
 // ValidateIPBeforeDial validates an IP address before establishing a connection.
 var ValidateIPBeforeDial = ssrf.ValidateIPBeforeDial

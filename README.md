@@ -301,6 +301,26 @@ lfs:
 jobs:
   mirror_pull: "@every 10m"
 
+# Repository webhook configuration.
+webhook:
+  # Private and internal destinations webhooks may be sent to. Webhooks to
+  # loopback, private networks and other internal addresses are refused
+  # unless listed here. Entries are hostnames, IP addresses, or CIDR ranges,
+  # each with an optional port (a URL without a port uses 80 for http and
+  # 443 for https). An IP or CIDR entry allows the addresses it covers,
+  # whatever hostname the webhook URL names. A hostname entry allows that
+  # name to resolve to loopback, RFC1918, CGNAT or IPv6 unique local
+  # addresses, and the name is resolved again for every delivery, so list
+  # only names whose DNS you trust. Link-local and cloud metadata addresses
+  # (such as 169.254.169.254) are reachable only through an IP or CIDR entry
+  # inside their own range; a broad range such as 0.0.0.0/0 does not open
+  # them. The list is checked when a webhook is created or updated, and
+  # again on every delivery, so existing webhooks follow the current list.
+  allowed_hosts: []
+    # - "jenkins.internal.example"
+    # - "10.0.0.0/8"
+    # - "127.0.0.1:8080"
+
 # The stats server configuration.
 stats:
   # The address on which the stats server will listen.
@@ -355,6 +375,7 @@ name all in uppercase. Here are some examples:
 - `SOFT_SERVE_ADMIN_ONLY_CREATE`: Only server admins may create repositories. Owners and admin-access collaborators can no longer rename repositories, and anonymous access to names that do not exist yet is capped at read-only. Defaults to `false`. Access to existing repositories is not affected.
 - `SOFT_SERVE_MAX_REPOS_PER_USER`: Maximum number of repositories each user may create. Server admins are exempt, and repositories created without an account count together as one user. Defaults to `0` (no limit).
 - `SOFT_SERVE_DEFAULT_REPO`: Repository name to create on boot if missing
+- `SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS`: Comma-separated private or internal hosts, IP addresses or CIDR ranges (each with an optional port) that webhooks may be sent to (see [Repository webhooks](#repository-webhooks)). Defaults to empty: public addresses only.
 
 #### Database Configuration
 
@@ -866,6 +887,55 @@ to about the size of the file. On Postgres, autovacuum makes the space
 reusable, and `VACUUM FULL webhook_deliveries` returns it to the system.
 
 A repository can have at most 20 webhooks.
+
+#### Webhooks to internal services
+
+Webhooks are protected against server-side request forgery: by default a
+webhook URL may not point at loopback, a private network, a link-local or
+cloud metadata address, or any other internal address. This is checked when a
+webhook is created or updated, and again when each delivery connects, so a
+name that later resolves to an internal address is refused too. Redirects are
+never followed.
+
+To send webhooks to an internal service such as a CI server, list it in
+`webhook.allowed_hosts` (or `SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS`, comma
+separated):
+
+```yaml
+webhook:
+  allowed_hosts:
+    - "jenkins.internal.example" # this name, on any port
+    - "10.20.0.0/16"             # any URL whose addresses fall in this range
+    - "127.0.0.1:8080"           # only port 8080 on loopback
+```
+
+The entries are trusted differently:
+
+- An IP address or CIDR range allows the addresses it covers whatever host
+  name the URL uses. It is checked against the address actually connected to,
+  so DNS cannot get around it. Prefer it when the service has a fixed address.
+- A hostname allows that name to resolve to loopback, RFC1918, CGNAT
+  (100.64.0.0/10) and IPv6 unique local (fc00::/7) addresses. The name is
+  resolved again for every delivery, so whoever controls its DNS decides
+  which of those addresses is reached; list only names you trust. A hostname
+  entry never opens anything else, and it does not cover other names that
+  resolve to the same addresses. `localhost` names need a hostname entry.
+- Link-local addresses, including the 169.254.169.254 metadata service, the
+  other cloud metadata addresses (`fd00:ec2::254`, `100.100.100.200`) and the
+  remaining reserved ranges can only be opened by an IP or CIDR entry inside
+  that range, such as `169.254.169.254`; a broad entry such as `0.0.0.0/0`
+  does not open them.
+- An entry in an IPv6 transition range, such as NAT64 (`64:ff9b::/96`) or
+  6to4 (`2002::/16`), also reaches the IPv4 addresses embedded in the
+  addresses it covers once a gateway translates them, metadata addresses
+  included: `64:ff9b::/96` reaches 169.254.169.254 as `64:ff9b::a9fe:a9fe`.
+  List such ranges only if you mean every IPv4 address behind them.
+
+Every address a name resolves to must be public or allowed, otherwise the
+webhook is refused. Existing webhooks follow the list in effect when they are
+delivered: removing an entry stops deliveries to it, which are then recorded as
+failed. The list applies to webhooks only. Git LFS transfers and HTTP repository
+imports and mirrors are not affected by it.
 
 ## The Soft Serve Plus TUI
 
