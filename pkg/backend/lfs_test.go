@@ -98,6 +98,8 @@ type lfsTest struct {
 	repo     proto.Repository
 	pointers []lfs.Pointer
 	client   *fakeLFSClient
+	// work is the work tree the repository is pushed from.
+	work string
 }
 
 // newLFSTest creates the repository "lfs-repo" with one LFS pointer file per
@@ -122,8 +124,8 @@ func newLFSTestWith(t *testing.T, objects int, extra func(work string, pointers 
 		t.Fatal(err)
 	}
 
-	lt := &lfsTest{be: be, ctx: ctx, repo: repo, client: &fakeLFSClient{objects: map[string][]byte{}}}
 	work := t.TempDir()
+	lt := &lfsTest{be: be, ctx: ctx, repo: repo, client: &fakeLFSClient{objects: map[string][]byte{}}, work: work}
 	for i := 0; i < objects; i++ {
 		content := []byte(fmt.Sprintf("lfs object %d", i))
 		p, err := lfs.GeneratePointer(bytes.NewReader(content))
