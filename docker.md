@@ -56,6 +56,22 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o linux/amd64/soft ./cmd/soft
 docker build --platform linux/amd64 -t soft-serve-plus:latest .
 ```
 
+## Reaping background git processes
+
+Git starts detached background processes (for example
+`git maintenance run --auto --detach` after a push or a mirror sync). When the
+git process that started one exits, the orphan is re-parented to PID 1 of the
+container, which must reap it when it exits in turn, or such processes pile up
+as zombie (`<defunct>`) processes. The image runs Soft Serve Plus under
+[tini](https://github.com/krallin/tini) for this reason, so no extra flags are
+needed: `docker run --init` and `init: true` in docker-compose are no longer
+required with this image. They are harmless if you already use them, because
+tini is registered as a child subreaper and reaps the processes itself.
+
+If you build your own image with `soft serve` as the entrypoint, or run an older
+image that does not include tini, run the container with an init process:
+`docker run --init ...`, or `init: true` for the service in docker-compose.
+
 [ghcr]: https://github.com/VitaliiLazebnyi/soft-serve-plus/pkgs/container/soft-serve-plus
 
 > **Warning**

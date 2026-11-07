@@ -54,10 +54,25 @@ var dialContext = (&net.Dialer{KeepAlive: 30 * time.Second}).DialContext
 // and internal networks; see secureDial. Redirects are disabled to match the
 // webhook client convention and prevent redirect-based SSRF.
 func NewSecureClient() *http.Client {
+	return NewSecureClientAllowing(nil)
+}
+
+// NewSecureClientAllowing is NewSecureClient with the private and internal
+// destinations that allowed permits (see AllowedHosts.permitsHTTP) let
+// through. With an empty allowed it is NewSecureClient. Redirects stay
+// disabled, so every request reaches only the host it names and the
+// allowlist is checked against that host alone.
+func NewSecureClientAllowing(allowed AllowedHosts) *http.Client {
+	dial := secureDial
+	if len(allowed) > 0 {
+		dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return secureDialAllowing(ctx, network, addr, allowed)
+		}
+	}
 	return &http.Client{
 		Timeout: ClientTimeout,
 		Transport: &http.Transport{
-			DialContext:           secureDial,
+			DialContext:           dial,
 			MaxIdleConns:          100,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
@@ -85,6 +100,12 @@ func NewSecureClient() *http.Client {
 // TLS still verifies against the original hostname, which net/http takes
 // from the request URL rather than from the dialed address.
 func secureDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	return secureDialAllowing(ctx, network, addr, nil)
+}
+
+// secureDialAllowing is secureDial with the destinations allowed permits let
+// through; see AllowedHosts.permitsHTTP.
+func secureDialAllowing(ctx context.Context, network, addr string, allowed AllowedHosts) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err //nolint:wrapcheck
@@ -95,7 +116,7 @@ func secureDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
-	ips, err := resolveDialTargets(ctx, network, host)
+	ips, err := resolveDialTargetsAllowing(ctx, network, host, port, allowed)
 	if err != nil {
 		return nil, err
 	}
@@ -183,8 +204,14 @@ var dialLookup lookupFunc
 // the order the resolver returned them. Every address the name resolves to
 // is checked, and any private or internal one refuses the host as a whole.
 func resolveDialTargets(ctx context.Context, network, host string) ([]net.IPAddr, error) {
+	return resolveDialTargetsAllowing(ctx, network, host, "", nil)
+}
+
+// resolveDialTargetsAllowing is resolveDialTargets with the addresses allowed
+// permits for host and port let through.
+func resolveDialTargetsAllowing(ctx context.Context, network, host, port string, allowed AllowedHosts) ([]net.IPAddr, error) {
 	if ip := net.ParseIP(host); ip != nil {
-		if isPrivateOrInternal(ip) {
+		if !allowed.permitsHTTP(host, port, ip) {
 			return nil, ErrPrivateIP
 		}
 		return []net.IPAddr{{IP: ip}}, nil
@@ -205,7 +232,7 @@ func resolveDialTargets(ctx context.Context, network, host string) ([]net.IPAddr
 		return nil, fmt.Errorf("no IP addresses found for host: %s", host)
 	}
 	for _, ip := range ips {
-		if isPrivateOrInternal(ip.IP) {
+		if !allowed.permitsHTTP(host, port, ip.IP) {
 			return nil, ErrPrivateIP
 		}
 	}
@@ -346,12 +373,20 @@ func isPrivateOrInternal(ip net.IP) bool {
 // It checks that the scheme is http/https, the hostname is not localhost,
 // and all resolved IPs are public.
 func ValidateURL(rawURL string) error {
-	return validateURL(rawURL, nil)
+	return validateURL(rawURL, nil, nil)
 }
 
-// validateURL is ValidateURL with the resolver used for hostnames; nil means
-// net.DefaultResolver.
-func validateURL(rawURL string, lookup lookupFunc) error {
+// ValidateURLAllowing is ValidateURL with the private and internal
+// destinations that allowed permits let through (see
+// AllowedHosts.permitsHTTP). With an empty allowed it is ValidateURL. Every
+// address the hostname resolves to must be public or permitted.
+func ValidateURLAllowing(rawURL string, allowed AllowedHosts) error {
+	return validateURL(rawURL, allowed, nil)
+}
+
+// validateURL is ValidateURLAllowing with the resolver used for hostnames;
+// nil means net.DefaultResolver.
+func validateURL(rawURL string, allowed AllowedHosts, lookup lookupFunc) error {
 	if rawURL == "" {
 		return ErrInvalidURL
 	}
@@ -370,12 +405,21 @@ func validateURL(rawURL string, lookup lookupFunc) error {
 		return fmt.Errorf("%w: missing hostname", ErrInvalidURL)
 	}
 
-	if isLocalhost(hostname) {
+	port := u.Port()
+	if port == "" {
+		port = defaultHTTPPort(u.Scheme)
+	}
+
+	// A localhost name is refused before it is resolved, since the system
+	// resolver may answer it without asking DNS. Only a hostname entry for
+	// the name itself lets it through, and then its addresses are still
+	// checked below.
+	if isLocalhost(hostname) && !allowed.namesHost(hostname, port) {
 		return ErrPrivateIP
 	}
 
 	if ip := net.ParseIP(hostname); ip != nil {
-		if isPrivateOrInternal(ip) {
+		if !allowed.permitsHTTP(hostname, port, ip) {
 			return ErrPrivateIP
 		}
 		return nil
@@ -391,7 +435,7 @@ func validateURL(rawURL string, lookup lookupFunc) error {
 	}
 
 	if slices.ContainsFunc(ips, func(addr net.IPAddr) bool {
-		return isPrivateOrInternal(addr.IP)
+		return !allowed.permitsHTTP(hostname, port, addr.IP)
 	}) {
 		return ErrPrivateIP
 	}
