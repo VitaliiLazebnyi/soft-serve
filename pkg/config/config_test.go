@@ -514,6 +514,31 @@ func TestMaxReposPerUser(t *testing.T) {
 	is.True(cfg.ParseEnv() != nil)
 }
 
+func TestDefaultPrivate(t *testing.T) {
+	is := is.New(t)
+	// Ignore any value exported in the environment running the tests.
+	t.Setenv("SOFT_SERVE_DEFAULT_PRIVATE", "")
+	is.NoErr(os.Unsetenv("SOFT_SERVE_DEFAULT_PRIVATE"))
+	cfg := DefaultConfig()
+	is.NoErr(cfg.ParseEnv())
+	is.True(!cfg.DefaultPrivate) // public by default, as upstream
+	is.True(slices.Contains(cfg.Environ(), "SOFT_SERVE_DEFAULT_PRIVATE=false"))
+
+	t.Setenv("SOFT_SERVE_DEFAULT_PRIVATE", "true")
+	cfg = DefaultConfig()
+	is.NoErr(cfg.ParseEnv())
+	is.True(cfg.DefaultPrivate)
+	// Hooks re-read the config from the environment.
+	is.True(slices.Contains(cfg.Environ(), "SOFT_SERVE_DEFAULT_PRIVATE=true"))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	is.NoErr(os.WriteFile(path, []byte("default_private: true\n"), 0o600))
+	cfg = DefaultConfig()
+	is.NoErr(parseFile(cfg, path))
+	is.True(cfg.DefaultPrivate)
+}
+
 // Docker Compose's list syntax keeps quotes in the value, as in
 // "- SOFT_SERVE_INITIAL_ADMIN_KEYS='ssh-ed25519 AAAA...'". A key or key file
 // path wrapped in one pair of matching quotes is read without them.

@@ -298,6 +298,16 @@ type Config struct {
 	// limit.
 	MaxReposPerUser int `env:"MAX_REPOS_PER_USER" yaml:"max_repos_per_user"`
 
+	// DefaultPrivate makes repositories created without an explicit
+	// visibility private: push-to-create over SSH and HTTP, repo create and
+	// repo import without --private, and default_repo on boot. An explicit
+	// --private=false still creates a public repository. An anonymous
+	// caller could not access a private repository, so with this set an
+	// anonymous create that does not choose a visibility is refused (see
+	// Backend.DefaultPrivate). false (the default) keeps upstream
+	// behaviour: such repositories are public.
+	DefaultPrivate bool `env:"DEFAULT_PRIVATE" yaml:"default_private"`
+
 	// DefaultRepo is a repository name to create on boot if it does not
 	// already exist. Leave empty to disable.
 	DefaultRepo string `env:"DEFAULT_REPO" yaml:"default_repo"`
@@ -386,6 +396,7 @@ func (c *Config) Environ() []string {
 
 	envs = append(envs, fmt.Sprintf("SOFT_SERVE_ADMIN_ONLY_CREATE=%t", c.AdminOnlyCreate))
 	envs = append(envs, fmt.Sprintf("SOFT_SERVE_MAX_REPOS_PER_USER=%d", c.MaxReposPerUser))
+	envs = append(envs, fmt.Sprintf("SOFT_SERVE_DEFAULT_PRIVATE=%t", c.DefaultPrivate))
 
 	return envs
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -299,7 +300,14 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 		// else goes through the same check as every other service.
 		created := repo == nil && accessLevel >= access.ReadWriteAccess
 		if created {
-			if _, err := be.CreateRepository(ctx, name, user, proto.RepositoryOptions{Private: false}); err != nil {
+			private, err := be.DefaultPrivate(ctx, user)
+			if errors.Is(err, proto.ErrAnonymousPrivate) {
+				return fmt.Errorf("%w; authenticate to create %s by pushing, or ask an admin", err, name)
+			}
+			if err != nil {
+				return err
+			}
+			if _, err := be.CreateRepository(ctx, name, user, proto.RepositoryOptions{Private: private}); err != nil {
 				log.Errorf("failed to create repo: %s", err)
 				return err
 			}

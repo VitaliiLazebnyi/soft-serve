@@ -143,6 +143,29 @@ func (d *Backend) errRepoLimit(user proto.User) error {
 	return fmt.Errorf("%w: each user may create %d repositories; delete one or ask an admin", proto.ErrRepoLimitReached, d.cfg.MaxReposPerUser)
 }
 
+// DefaultPrivate returns whether a repository that user creates without
+// choosing a visibility is private: the default_private setting. Callers
+// pass the result as RepositoryOptions.Private for push-to-create, and for
+// repo create and repo import without --private.
+//
+// A repository created without an account is owned by the default admin
+// (see registerRepository), and nobody but its owner, admins and
+// collaborators can access a private one, so a private default would lock
+// its anonymous creator out at once. Over HTTP the push that created it
+// would itself be refused. So with default_private set, an anonymous caller
+// who is not a server admin (see isServerAdmin) is refused with
+// proto.ErrAnonymousPrivate before anything is created. Such a caller can
+// still choose a public repository explicitly where the command allows it.
+func (d *Backend) DefaultPrivate(ctx context.Context, user proto.User) (bool, error) {
+	if !d.cfg.DefaultPrivate {
+		return false, nil
+	}
+	if (user == nil || user.ID() == 0) && !d.isServerAdmin(ctx, user) {
+		return false, proto.ErrAnonymousPrivate
+	}
+	return true, nil
+}
+
 // CreateRepository creates a new repository.
 //
 // It implements backend.Backend.

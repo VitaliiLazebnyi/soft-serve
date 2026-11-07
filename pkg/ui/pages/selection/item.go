@@ -163,14 +163,14 @@ func (d *ItemDelegate) Render(w io.Writer, m list.Model, index int, listItem lis
 		styles = d.common.Styles.RepoSelector.Active
 	}
 
-	title := i.Title()
-	title = common.TruncateString(title, m.Width()-styles.Base.GetHorizontalFrameSize())
-	if i.repo.IsPrivate() {
-		title += " 🔒"
-	}
+	// A long title is truncated to leave room for the visibility marker.
+	suffix := " " + common.VisibilityMarker(i.repo.IsPrivate())
 	if isSelected {
-		title += " "
+		suffix += " "
 	}
+	title := i.Title()
+	title = common.TruncateString(title, m.Width()-styles.Base.GetHorizontalFrameSize()-lipgloss.Width(suffix))
+	title += suffix
 	var updatedStr string
 	if i.lastUpdate != nil {
 		updatedStr = fmt.Sprintf(" Updated %s", humanize.Time(*i.lastUpdate))

@@ -328,7 +328,8 @@ func (r *Repo) headerView() string {
 	if header == "" {
 		header = r.selectedRepo.Name()
 	}
-	header = r.common.Styles.Repo.HeaderName.Render(header)
+	header = r.common.Styles.Repo.HeaderName.Render(header) +
+		" " + common.VisibilityMarker(r.selectedRepo.IsPrivate())
 	desc := strings.TrimSpace(r.selectedRepo.Description())
 	if desc != "" {
 		header = lipgloss.JoinVertical(lipgloss.Left,
