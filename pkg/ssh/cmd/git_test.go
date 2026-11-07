@@ -160,6 +160,14 @@ func writeRef(t *testing.T, dir string) {
 	git("update-ref", "refs/heads/main", commit)
 }
 
+// noRowOps returns the operations with del, and no repository listed.
+func noRowOps(del func(context.Context, string) error) failedPushRepoOps {
+	return failedPushRepoOps{
+		del:       del,
+		rowExists: func(context.Context, string) (bool, error) { return false, nil },
+	}
+}
+
 func dirExists(dir string) bool {
 	_, err := os.Lstat(dir)
 	return err == nil
@@ -178,29 +186,63 @@ func TestRemoveFailedPushRepoRetries(t *testing.T) {
 		return os.RemoveAll(dir)
 	}
 
-	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, del, fastRetry)
+	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, noRowOps(del), fastRetry)
 	is.Equal(calls, 3)
 	is.True(!dirExists(dir))
 }
 
-// A delete that removes the row but leaves the directory behind is retried
-// until the directory is gone, without checking refs on what is left of it.
-func TestRemoveFailedPushRepoRetriesLeftoverDirectory(t *testing.T) {
+// A delete that removes the row but leaves the directory behind is followed
+// by removing the leftover directory, without checking refs on what is left
+// of it and without deleting the repository again.
+func TestRemoveFailedPushRepoRemovesLeftoverDirectory(t *testing.T) {
 	is := is.New(t)
 	dir := emptyBareRepo(t)
 	calls := 0
 	del := func(context.Context, string) error {
 		calls++
-		if calls == 1 {
-			// The row is gone and the directory was partly removed.
-			return os.Remove(filepath.Join(dir, "HEAD"))
-		}
-		return os.RemoveAll(dir)
+		// The row is gone and the directory was partly removed.
+		return os.Remove(filepath.Join(dir, "HEAD"))
 	}
 
-	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, del, fastRetry)
-	is.Equal(calls, 2)
+	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, noRowOps(del), fastRetry)
+	is.Equal(calls, 1)
 	is.True(!dirExists(dir))
+}
+
+// Once the repository was deleted, a new repository created with the same
+// name before the leftover directory is removed is left alone.
+func TestRemoveFailedPushRepoLeavesRecreatedRepository(t *testing.T) {
+	is := is.New(t)
+	dir := emptyBareRepo(t)
+	recreated := false
+	calls := 0
+	ops := failedPushRepoOps{
+		del: func(context.Context, string) error {
+			calls++
+			if calls > 1 {
+				// Deleting again would delete the new repository.
+				return os.RemoveAll(dir)
+			}
+			// The row is gone and the directory was left behind. Another
+			// session then removes the leftover and pushes a new repository
+			// with the name.
+			is.NoErr(os.RemoveAll(dir))
+			if out, err := exec.CommandContext(t.Context(), "git", "init", "--bare", dir).CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v: %s", err, out)
+			}
+			writeRef(t, dir)
+			recreated = true
+			return nil
+		},
+		rowExists: func(context.Context, string) (bool, error) { return recreated, nil },
+	}
+
+	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, ops, fastRetry)
+	is.Equal(calls, 1)
+	is.True(dirExists(dir))
+	out, err := exec.CommandContext(t.Context(), "git", "--git-dir="+dir, "for-each-ref").Output()
+	is.NoErr(err)
+	is.True(len(out) > 0) // the new repository keeps its refs
 }
 
 // Refs written between attempts, while the repository still exists, keep it.
@@ -214,7 +256,7 @@ func TestRemoveFailedPushRepoKeepsRefsWrittenBetweenAttempts(t *testing.T) {
 		return errors.New("directory in use")
 	}
 
-	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, del, fastRetry)
+	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, noRowOps(del), fastRetry)
 	is.Equal(calls, 1)
 	is.True(dirExists(dir))
 }
@@ -230,7 +272,7 @@ func TestRemoveFailedPushRepoGivesUp(t *testing.T) {
 	}
 
 	start := time.Now()
-	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, del, fastRetry)
+	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, noRowOps(del), fastRetry)
 	is.True(calls > 1)
 	is.True(time.Since(start) < 5*time.Second)
 	is.True(dirExists(dir))
