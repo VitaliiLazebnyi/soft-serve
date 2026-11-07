@@ -133,7 +133,7 @@ func TestCancelledPushKeepsCreatedRepositoryWithRefs(t *testing.T) {
 	_, err := be.Repository(ctx, "fresh")
 	is.NoErr(err) // the repository with pushed refs was kept
 
-	out, err := exec.Command("git", "-C", repoDir, "symbolic-ref", "HEAD").Output()
+	out, err := exec.CommandContext(t.Context(), "git", "-C", repoDir, "symbolic-ref", "HEAD").Output()
 	is.NoErr(err)
 	is.Equal(strings.TrimSpace(string(out)), "refs/heads/trunk") // HEAD points at the pushed branch
 }
