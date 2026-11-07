@@ -33,11 +33,11 @@ var (
 // written out in full. Only if exactly size bytes were read and their SHA-256
 // is oid is the file renamed into objects/ and recorded. A concurrent upload
 // of the same object renames identical bytes over the same path; where that
-// rename fails, as it can on Windows, a file of the expected size already in
-// place is taken to be the object. If the object is already recorded, by an
-// earlier or concurrent upload, that counts as success, but only once the row
-// reads back: db.WrapError maps foreign key violations to db.ErrDuplicateKey
-// too. The temporary file is always removed.
+// rename fails, as it can on Windows, a file already in place is taken to be
+// the object if it is size bytes long and hashes to oid. If the object is
+// already recorded, by an earlier or concurrent upload, that counts as
+// success, but only once the row reads back: db.WrapError maps foreign key
+// violations to db.ErrDuplicateKey too. The temporary file is always removed.
 //
 // A mismatch is reported as ErrObjectSizeMismatch or ErrObjectOidMismatch;
 // any other error is a storage or database failure. size must not be
@@ -68,12 +68,12 @@ func StoreObject(ctx context.Context, strg storage.Storage, dbx db.Handler, data
 	pointer := Pointer{Oid: oid, Size: size}
 	objPath := path.Join("objects", pointer.RelativePath())
 	if err := strg.Rename(tempName, objPath); err != nil {
-		// On Windows, renaming onto a file that a concurrent upload of the
-		// same object is renaming or has open fails. The data was checked
-		// against the oid that names objPath, so a regular file of the
-		// expected size there is the same object.
-		fi, serr := strg.Stat(objPath)
-		if serr != nil || !fi.Mode().IsRegular() || fi.Size() != size {
+		// On Windows, renaming onto a file that another upload is renaming
+		// or a download has open fails. If objPath already holds the object,
+		// the rename counts as done. Not everything that writes objects/
+		// verifies the content, so the existing file must hash to the oid;
+		// otherwise the caller gets the error and the client retries.
+		if !isObject(strg, objPath, oid, size) {
 			return fmt.Errorf("rename object: %w", err)
 		}
 	}
@@ -88,4 +88,23 @@ func StoreObject(ctx context.Context, strg storage.Storage, dbx db.Handler, data
 	}
 
 	return nil
+}
+
+// isObject reports whether objPath is a regular file of size bytes whose
+// SHA-256 is oid.
+func isObject(strg storage.Storage, objPath, oid string, size int64) bool {
+	f, err := strg.Open(objPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close() //nolint: errcheck
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() != size {
+		return false
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return false
+	}
+	return hex.EncodeToString(hash.Sum(nil)) == oid
 }

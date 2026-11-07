@@ -221,11 +221,11 @@ func (failRenameStorage) Rename(string, string) error {
 	return errors.New("rename: access is denied")
 }
 
-// When the rename into objects/ fails but a concurrent upload of the same
-// object has already put a file of the expected size there, the object is
-// stored and the upload succeeds. On Windows, one of two identical
-// concurrent uploads used to fail this way. Otherwise the rename error is
-// returned.
+// When the rename into objects/ fails but the object is already there, as
+// when a concurrent upload of it stored it first, the upload succeeds. On
+// Windows, one of two identical concurrent uploads used to fail this way. A
+// destination that is not the object, even one of the same size, is not
+// accepted.
 func TestLFSTransferUploadRenameOntoExistingObject(t *testing.T) {
 	const content = "hello lfs"
 	oid := oidOf(content)
@@ -239,6 +239,7 @@ func TestLFSTransferUploadRenameOntoExistingObject(t *testing.T) {
 		{"destination holds the object", content, false},
 		{"no destination", "", true},
 		{"destination of another size", content + "!", true},
+		{"destination of the same size but other content", "jello lfs", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
