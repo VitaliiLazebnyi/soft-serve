@@ -149,7 +149,7 @@ func newLFSTestWith(t *testing.T, objects int, extra func(work string, pointers 
 		{"commit", "-q", "-m", "add lfs pointers"},
 		{"push", "-q", be.repoPath("lfs-repo"), "main"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := exec.CommandContext(t.Context(), "git", args...)
 		cmd.Dir = work
 		cmd.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",

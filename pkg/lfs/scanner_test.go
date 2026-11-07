@@ -38,7 +38,7 @@ func TestSearchPointerBlobsCancel(t *testing.T) {
 		{"add", "."},
 		{"commit", "-q", "-m", "add lfs pointers"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := exec.CommandContext(t.Context(), "git", args...)
 		cmd.Dir = work
 		cmd.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
