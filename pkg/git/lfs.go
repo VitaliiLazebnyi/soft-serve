@@ -219,12 +219,12 @@ func (t *lfsTransfer) Upload(oid string, size int64, r io.Reader, _ transfer.Arg
 	pointer := transfer.Pointer{Oid: oid, Size: size}
 	expectedPath := path.Join("objects", pointer.RelativePath())
 	if err := t.storage.Rename(tempName, expectedPath); err != nil {
-		// On Windows, renaming onto a file that a concurrent upload of the
-		// same object is renaming or has open fails. The data was checked
-		// against the oid that names expectedPath, so a file of the expected
-		// size there is the same object.
-		fi, serr := t.storage.Stat(expectedPath)
-		if serr != nil || !fi.Mode().IsRegular() || fi.Size() != size {
+		// On Windows, renaming onto a file that another upload is renaming
+		// or a download has open fails. If expectedPath already holds the
+		// object, the rename counts as done. Not everything that writes
+		// objects/ verifies the content, so the existing file must hash to
+		// the oid; otherwise the client gets the error and retries.
+		if !isLFSObject(t.storage, expectedPath, oid, size) {
 			t.logger.Errorf("error renaming object: %v", err)
 			return err
 		}
@@ -244,6 +244,25 @@ func (t *lfsTransfer) Upload(oid string, size int64, r io.Reader, _ transfer.Arg
 	}
 
 	return nil
+}
+
+// isLFSObject reports whether objPath is a regular file of size bytes whose
+// SHA-256 is oid.
+func isLFSObject(strg storage.Storage, objPath, oid string, size int64) bool {
+	f, err := strg.Open(objPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close() //nolint: errcheck
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() != size {
+		return false
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return false
+	}
+	return hex.EncodeToString(hash.Sum(nil)) == oid
 }
 
 // Verify implements transfer.Backend.
