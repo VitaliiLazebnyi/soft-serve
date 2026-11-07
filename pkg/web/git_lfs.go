@@ -23,6 +23,31 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// Limits on LFS JSON request bodies. A batch request costs a storage stat and
+// a database lookup per object, so the number of objects is capped. git-lfs
+// sends 100 objects per batch by default (lfs.transfer.batchSize); the batch
+// body limit leaves room for 1000 objects with long ref names. Verify and lock
+// requests carry a single object or path.
+const (
+	maxLfsBatchObjects  = 1000
+	maxLfsBatchBodySize = 1 << 20  // 1 MiB
+	maxLfsJSONBodySize  = 64 << 10 // 64 KiB
+)
+
+// lfsBodyTooLarge answers 413 when err comes from a body limited with
+// http.MaxBytesReader, and reports whether it did.
+func lfsBodyTooLarge(w http.ResponseWriter, logger *log.Logger, err error) bool {
+	var maxErr *http.MaxBytesError
+	if !errors.As(err, &maxErr) {
+		return false
+	}
+	logger.Warn("request body too large", "limit", maxErr.Limit)
+	renderJSON(w, http.StatusRequestEntityTooLarge, lfs.ErrorResponse{
+		Message: "request too large",
+	})
+	return true
+}
+
 // serviceLfsBatch handles a Git LFS batch requests.
 // https://github.com/git-lfs/git-lfs/blob/main/docs/api/batch.md
 // TODO: support refname
@@ -39,7 +64,11 @@ func serviceLfsBatch(w http.ResponseWriter, r *http.Request) {
 
 	var batchRequest lfs.BatchRequest
 	defer r.Body.Close() //nolint: errcheck
-	if err := json.NewDecoder(r.Body).Decode(&batchRequest); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxLfsBatchBodySize)
+	if err := json.NewDecoder(body).Decode(&batchRequest); err != nil {
+		if lfsBodyTooLarge(w, logger, err) {
+			return
+		}
 		logger.Errorf("error decoding json: %s", err)
 		renderJSON(w, http.StatusUnprocessableEntity, lfs.ErrorResponse{
 			Message: "validation error in request: " + err.Error(),
@@ -69,6 +98,15 @@ func serviceLfsBatch(w http.ResponseWriter, r *http.Request) {
 	if len(batchRequest.Objects) == 0 {
 		renderJSON(w, http.StatusUnprocessableEntity, lfs.ErrorResponse{
 			Message: "no objects found",
+		})
+		return
+	}
+
+	// The batch API answers 413 when a request has too many objects.
+	if len(batchRequest.Objects) > maxLfsBatchObjects {
+		logger.Warn("too many objects in batch request", "objects", len(batchRequest.Objects))
+		renderJSON(w, http.StatusRequestEntityTooLarge, lfs.ErrorResponse{
+			Message: fmt.Sprintf("too many objects in batch request: %d, the maximum is %d", len(batchRequest.Objects), maxLfsBatchObjects),
 		})
 		return
 	}
@@ -385,7 +423,11 @@ func serviceLfsBasicVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer r.Body.Close() //nolint: errcheck
-	if err := json.NewDecoder(r.Body).Decode(&pointer); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxLfsJSONBodySize)
+	if err := json.NewDecoder(body).Decode(&pointer); err != nil {
+		if lfsBodyTooLarge(w, logger, err) {
+			return
+		}
 		logger.Error("error decoding json", "err", err)
 		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
 			Message: "invalid request: " + err.Error(),
