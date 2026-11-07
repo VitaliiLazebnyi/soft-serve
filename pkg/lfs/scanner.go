@@ -98,7 +98,11 @@ loop:
 			continue
 		}
 
-		pointerChan <- PointerBlob{Hash: sha, Pointer: pointer}
+		select {
+		case pointerChan <- PointerBlob{Hash: sha, Pointer: pointer}:
+		case <-ctx.Done():
+			break loop
+		}
 	}
 }
 

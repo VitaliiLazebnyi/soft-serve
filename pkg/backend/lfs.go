@@ -24,15 +24,23 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 
 	// TODO: support S3 storage
 	strg := storage.NewLocalStorage(lfsRoot)
-	pointerChan := make(chan lfs.PointerBlob)
-	errChan := make(chan error, 1)
 	r, err := repo.Open()
 	if err != nil {
 		return err
 	}
 
+	// Cancel the scan when we return early so its goroutines and git
+	// processes don't stay blocked on pointerChan.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	pointerChan := make(chan lfs.PointerBlob)
+	errChan := make(chan error, 1)
 	go lfs.SearchPointerBlobs(ctx, r, pointerChan, errChan)
 
+	// recorded holds the objects that are already in the database but missing
+	// on disk. Those only need their content written.
+	recorded := make(map[string]bool)
 	download := func(pointers []lfs.Pointer) error {
 		return lfsClient.Download(ctx, pointers, func(p lfs.Pointer, content io.ReadCloser, objectError error) error {
 			if objectError != nil {
@@ -40,6 +48,11 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 			}
 
 			defer content.Close() //nolint: errcheck
+			if recorded[p.Oid] {
+				_, err := strg.Put(path.Join("objects", p.RelativePath()), content)
+				return err
+			}
+
 			return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
 				if err := store.CreateLFSObject(ctx, tx, repo.ID(), p.Oid, p.Size); err != nil {
 					return db.WrapError(err)
@@ -63,25 +76,41 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 			return err
 		}
 
-		if exist && obj.ID == 0 {
-			if err := store.CreateLFSObject(ctx, dbx, repo.ID(), pointer.Oid, pointer.Size); err != nil {
-				return db.WrapError(err)
-			}
-		} else {
-			batch = append(batch, pointer.Pointer)
-			// Limit batch requests to 20 objects
-			if len(batch) >= 20 {
-				if err := download(batch); err != nil {
-					return err
+		if exist {
+			// The object is on disk, make sure it's recorded.
+			if obj.ID == 0 {
+				if err := store.CreateLFSObject(ctx, dbx, repo.ID(), pointer.Oid, pointer.Size); err != nil {
+					// Someone else recorded it in the meantime.
+					if err := db.WrapError(err); !errors.Is(err, db.ErrDuplicateKey) {
+						return err
+					}
 				}
-
-				batch = nil
 			}
+			continue
+		}
+
+		if obj.ID != 0 {
+			recorded[pointer.Oid] = true
+		}
+
+		batch = append(batch, pointer.Pointer)
+		// Limit batch requests to 20 objects
+		if len(batch) >= 20 {
+			if err := download(batch); err != nil {
+				return err
+			}
+
+			batch = nil
 		}
 	}
 
 	if err, ok := <-errChan; ok {
 		return err
+	}
+
+	// Download whatever is left over from the last, partial batch.
+	if len(batch) > 0 {
+		return download(batch)
 	}
 
 	return nil
