@@ -261,9 +261,8 @@ func TestLFSUploadRejectsForgedServiceParam(t *testing.T) {
 		}
 	}
 
-	// The object must not exist on disk or in the database. The handler writes
-	// the body before it parses Content-Length, so an error status alone does
-	// not prove nothing was stored.
+	// The object must not exist on disk or in the database. An error status
+	// alone does not prove the handler stopped before storing anything.
 	objPath := filepath.Join(cfg.DataPath, "lfs", strconv.FormatInt(repo.ID(), 10),
 		"objects", oid[0:2], oid[2:4], oid)
 	if _, err := os.Stat(objPath); !os.IsNotExist(err) {
@@ -366,8 +365,8 @@ func TestLFSWriteStillWorksForAuthorizedUser(t *testing.T) {
 	is.NoErr(err)
 
 	router := lfsTestRouter(ctx)
-	oid := strings.Repeat("b", 64)
 	body := "payload"
+	oid := "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5" // sha256(body)
 
 	req := httptest.NewRequestWithContext(ctx, http.MethodPut,
 		"/owner-repo.git/info/lfs/objects/basic/"+oid, strings.NewReader(body))
