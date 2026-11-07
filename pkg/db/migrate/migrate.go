@@ -105,10 +105,18 @@ func Migrate(ctx context.Context, dbx *db.DB) error {
 func Rollback(ctx context.Context, dbx *db.DB) error {
 	logger := log.FromContext(ctx).WithPrefix("migrate")
 	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
+		ok, err := tableExists(tx, "migrations")
+		if err != nil {
+			return fmt.Errorf("look up migrations table: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("there are no migrations to rollback")
+		}
+
 		var migrs Migrations
 		if err := tx.Get(&migrs, tx.Rebind("SELECT * FROM migrations ORDER BY version DESC LIMIT 1")); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("there are no migrations to rollback: %w", err)
+				return fmt.Errorf("get latest migration: %w", err)
 			}
 		}
 
@@ -146,6 +154,13 @@ func Rollback(ctx context.Context, dbx *db.DB) error {
 }
 
 func hasTable(tx *db.Tx, tableName string) bool {
+	ok, _ := tableExists(tx, tableName)
+	return ok
+}
+
+// tableExists is like hasTable, but returns any error from the lookup other
+// than the table not being found.
+func tableExists(tx *db.Tx, tableName string) (bool, error) {
 	var query string
 	switch tx.DriverName() {
 	case "sqlite3", "sqlite":
@@ -161,6 +176,11 @@ func hasTable(tx *db.Tx, tableName string) bool {
 
 	query = tx.Rebind(query)
 	var name string
-	err := tx.Get(&name, query, tableName)
-	return err == nil
+	if err := tx.Get(&name, query, tableName); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
