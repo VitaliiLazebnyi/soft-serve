@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 
 	"charm.land/log/v2"
 )
@@ -137,7 +139,7 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 		go func() {
 			defer wg.Done()
 			if _, err := io.Copy(scmd.Stdout, stdout); err != nil {
-				log.Errorf("gitServiceHandler: failed to copy stdout: %v", err)
+				logCopyError(ctx, "stdout", err)
 			}
 		}()
 	}
@@ -148,7 +150,7 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 		go func() {
 			defer wg.Done()
 			if _, err := io.Copy(scmd.Stderr, stderr); err != nil {
-				log.Errorf("gitServiceHandler: failed to copy stderr: %v", err)
+				logCopyError(ctx, "stderr", err)
 			}
 		}()
 	}
@@ -199,4 +201,27 @@ func UploadArchive(ctx context.Context, cmd ServiceCommand) error {
 // ReceivePack runs the git receive-pack protocol against the provided repo.
 func ReceivePack(ctx context.Context, cmd ServiceCommand) error {
 	return gitServiceHandler(ctx, ReceivePackService, cmd)
+}
+
+// logCopyError logs a failure to copy git's output to the client. A client
+// that goes away, closing the SSH channel or the HTTP connection, makes the
+// copy fail, usually as the context is cancelled for it. That is expected,
+// so it is logged at Debug; any other failure is logged at Error.
+func logCopyError(ctx context.Context, stream string, err error) {
+	if ctx.Err() != nil || clientGone(err) {
+		log.Debugf("gitServiceHandler: failed to copy %s: %v", stream, err)
+		return
+	}
+	log.Errorf("gitServiceHandler: failed to copy %s: %v", stream, err)
+}
+
+// clientGone reports whether err, returned by a write to the client, means
+// the client closed its end. A closed SSH channel returns io.EOF, and a
+// closed network connection a closed, broken pipe or reset error.
+func clientGone(err error) bool {
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET)
 }
