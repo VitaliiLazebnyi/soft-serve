@@ -1,0 +1,80 @@
+# vi: set ft=conf
+
+# convert crlf to lf on windows
+[windows] dos2unix info1.txt info2.txt
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# an empty repository has no default branch, but its info is still shown
+soft repo create repo1
+soft repo info repo1
+cmp stdout info1.txt
+
+# commands that need a default branch say the repository is empty
+! soft repo branch default repo1
+stderr 'repository is empty'
+! soft repo tree repo1
+stderr 'repository is empty'
+! soft repo blob repo1 README.md
+stderr 'repository is empty'
+
+# push dev and feature branches, then point HEAD at a branch that does not
+# exist, as in a mirror whose remote renamed its default branch
+git clone ssh://localhost:$SSH_PORT/repo1 repo1
+mkfile ./repo1/README.md '# Hello'
+git -C repo1 add -A
+git -C repo1 commit -m 'first'
+git -C repo1 push origin HEAD:refs/heads/dev
+git -C repo1 push origin HEAD:refs/heads/feature
+git -C $DATA_PATH/repos/repo1.git symbolic-ref HEAD refs/heads/master
+
+# info lists the branches without a default branch
+soft repo info repo1
+cmp stdout info2.txt
+
+# commands that need a default branch name the missing one
+! soft repo branch default repo1
+stderr 'default branch "master" does not exist'
+! soft repo tree repo1
+stderr 'default branch "master" does not exist'
+
+# an explicit reference still works
+soft repo blob repo1 dev README.md
+stdout '# Hello'
+
+# other branches can still be deleted
+soft repo branch delete repo1 feature
+soft repo branch list repo1
+! stdout feature
+
+# the default branch can be set again
+soft repo branch default repo1 dev
+soft repo branch default repo1
+stdout 'dev'
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .
+
+-- info1.txt --
+Project Name:
+Repository: repo1
+Description:
+Private: false
+Hidden: false
+Mirror: false
+Owner: admin
+-- info2.txt --
+Project Name:
+Repository: repo1
+Description:
+Private: false
+Hidden: false
+Mirror: false
+Owner: admin
+Branches:
+  - dev
+  - feature
