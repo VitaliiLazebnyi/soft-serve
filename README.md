@@ -914,6 +914,11 @@ The entries are trusted differently:
   remaining reserved ranges can only be opened by an IP or CIDR entry inside
   that range, such as `169.254.169.254`; a broad entry such as `0.0.0.0/0`
   does not open them.
+- An entry in an IPv6 transition range, such as NAT64 (`64:ff9b::/96`) or
+  6to4 (`2002::/16`), also reaches the IPv4 addresses embedded in the
+  addresses it covers once a gateway translates them, metadata addresses
+  included: `64:ff9b::/96` reaches 169.254.169.254 as `64:ff9b::a9fe:a9fe`.
+  List such ranges only if you mean every IPv4 address behind them.
 
 Every address a name resolves to must be public or allowed, otherwise the
 webhook is refused. Existing webhooks follow the list in effect when they are

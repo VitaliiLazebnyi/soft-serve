@@ -81,7 +81,7 @@ func httpClient(ctx context.Context) *http.Client {
 	if len(allowed) == 0 {
 		return secureHTTPClient
 	}
-	key := fmt.Sprintf("%v", allowed)
+	key := allowed.String()
 	allowingClient.Lock()
 	defer allowingClient.Unlock()
 	if allowingClient.client == nil || allowingClient.key != key {

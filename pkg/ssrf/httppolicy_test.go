@@ -71,6 +71,24 @@ func TestAllowedHostsPermitsHTTP(t *testing.T) {
 		}
 	}
 
+	// An IPv4-mapped network entry opens the IPv4 addresses it maps, and is
+	// held to the same rules for metadata.
+	mapped := mustAllowedHosts(t, "::ffff:10.0.0.0/104", "[::ffff:0:0/96]:7000")
+	for _, tt := range []struct {
+		ip, port string
+		want     bool
+	}{
+		{"10.1.2.3", "80", true},
+		{"::ffff:10.1.2.3", "80", true},
+		{"192.168.1.1", "80", false},
+		{"192.168.1.1", "7000", true},
+		{"169.254.169.254", "7000", false},
+	} {
+		if got := mapped.permitsHTTP("x.example", tt.port, net.ParseIP(tt.ip)); got != tt.want {
+			t.Errorf("mapped entries: permitsHTTP(%s:%s) = %v, want %v", tt.ip, tt.port, got, tt.want)
+		}
+	}
+
 	var empty AllowedHosts
 	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "169.254.169.254", "fd00::1"} {
 		if empty.permitsHTTP("hooks.internal", "80", net.ParseIP(ip)) {
