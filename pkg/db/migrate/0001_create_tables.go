@@ -32,26 +32,33 @@ var createTables = Migration{
 		case "sqlite3", "sqlite":
 			insert += "OR IGNORE "
 
-			hasUserTable := hasTable(tx, "user")
-			if hasUserTable {
+			if ok, err := tableExists(tx, "user"); err != nil {
+				return err
+			} else if ok {
 				if _, err := tx.ExecContext(ctx, "ALTER TABLE user RENAME TO user_old"); err != nil {
 					return err
 				}
 			}
 
-			if hasTable(tx, "public_key") {
+			if ok, err := tableExists(tx, "public_key"); err != nil {
+				return err
+			} else if ok {
 				if _, err := tx.ExecContext(ctx, "ALTER TABLE public_key RENAME TO public_key_old"); err != nil {
 					return err
 				}
 			}
 
-			if hasTable(tx, "collab") {
+			if ok, err := tableExists(tx, "collab"); err != nil {
+				return err
+			} else if ok {
 				if _, err := tx.ExecContext(ctx, "ALTER TABLE collab RENAME TO collab_old"); err != nil {
 					return err
 				}
 			}
 
-			if hasTable(tx, "repo") {
+			if ok, err := tableExists(tx, "repo"); err != nil {
+				return err
+			} else if ok {
 				if _, err := tx.ExecContext(ctx, "ALTER TABLE repo RENAME TO repo_old"); err != nil {
 					return err
 				}
@@ -69,7 +76,9 @@ var createTables = Migration{
 				return err
 			}
 
-			if hasTable(tx, "user_old") {
+			if ok, err := tableExists(tx, "user_old"); err != nil {
+				return err
+			} else if ok {
 				sqlm := `
 				INSERT INTO users (id, username, admin, updated_at)
 					SELECT id, username, admin, updated_at FROM user_old;
@@ -79,7 +88,9 @@ var createTables = Migration{
 				}
 			}
 
-			if hasTable(tx, "public_key_old") {
+			if ok, err := tableExists(tx, "public_key_old"); err != nil {
+				return err
+			} else if ok {
 				// Check duplicate keys
 				pks := []struct {
 					ID        string `db:"id"`
@@ -106,7 +117,9 @@ var createTables = Migration{
 				}
 			}
 
-			if hasTable(tx, "repo_old") {
+			if ok, err := tableExists(tx, "repo_old"); err != nil {
+				return err
+			} else if ok {
 				sqlm := `
 				INSERT INTO repos (id, name, project_name, description, private,mirror, hidden, created_at, updated_at, user_id)
 					SELECT id, name, project_name, description, private, mirror, hidden, created_at, updated_at, (
@@ -118,7 +131,9 @@ var createTables = Migration{
 				}
 			}
 
-			if hasTable(tx, "collab_old") {
+			if ok, err := tableExists(tx, "collab_old"); err != nil {
+				return err
+			} else if ok {
 				sqlm := `
 				INSERT INTO collabs (id, user_id, repo_id, access_level, created_at, updated_at)
 					SELECT id, user_id, repo_id, ` + strconv.Itoa(int(access.ReadWriteAccess)) + `, created_at, updated_at FROM collab_old;

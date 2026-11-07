@@ -138,3 +138,34 @@ func TestRollbackByVersion(t *testing.T) {
 		t.Errorf("Rollback() at unknown version 2 rolled back %v, want nothing", rolledBack)
 	}
 }
+
+// Rollback must report a failure to read the migrations table as that
+// failure, not as "there are no migrations to rollback". A database that has
+// no migrations table at all still has nothing to roll back.
+func TestRollbackReportsQueryError(t *testing.T) {
+	ctx := config.WithContext(context.TODO(), config.DefaultConfig())
+	dbx, err := test.Open(ctx, t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = Rollback(ctx, dbx)
+	if err == nil || err.Error() != "there are no migrations to rollback" {
+		t.Errorf("Rollback() without a migrations table => %v, want %q", err, "there are no migrations to rollback")
+	}
+
+	// A migrations table the query cannot read: it has no version column.
+	if _, err := dbx.Exec("CREATE TABLE migrations (id INTEGER, name TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	err = Rollback(ctx, dbx)
+	if err == nil {
+		t.Fatal("Rollback() with an unreadable migrations table => nil error, want an error")
+	}
+	if strings.Contains(err.Error(), "no migrations to rollback") {
+		t.Errorf("Rollback() with an unreadable migrations table => %v, want the query error", err)
+	}
+	if !strings.Contains(err.Error(), "version") {
+		t.Errorf("Rollback() with an unreadable migrations table => %v, want an error about the version column", err)
+	}
+}
