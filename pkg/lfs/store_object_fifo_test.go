@@ -1,8 +1,11 @@
 //go:build unix
 
-package web
+package lfs
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,18 +19,14 @@ import (
 
 // A FIFO at the object path is not the object. Opening one blocks until a
 // writer shows up, so the fallback after a failed rename must check the type
-// before it opens the file, and return the rename error promptly.
-func TestRenameLFSObjectFIFODestination(t *testing.T) {
+// before it opens the file, and StoreObject must fail promptly.
+func TestStoreObjectRenameOntoFIFO(t *testing.T) {
 	const content = "hello lfs"
-	oid := sha256Hex(content)
+	sum := sha256.Sum256([]byte(content))
+	oid := hex.EncodeToString(sum[:])
 	objPath := path.Join("objects", oid[0:2], oid[2:4], oid)
-	tempName := path.Join("incomplete", oid+"temp")
 
 	root := t.TempDir()
-	local := storage.NewLocalStorage(root)
-	if _, err := local.Put(tempName, strings.NewReader(content)); err != nil {
-		t.Fatal(err)
-	}
 	fifo := filepath.Join(root, filepath.FromSlash(objPath))
 	if err := os.MkdirAll(filepath.Dir(fifo), 0o755); err != nil {
 		t.Fatal(err)
@@ -35,15 +34,17 @@ func TestRenameLFSObjectFIFODestination(t *testing.T) {
 	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	strg := failRenameStorage{storage.NewLocalStorage(root)}
+	datastore := &memLFSStore{objects: map[string]int64{}}
 
 	done := make(chan error, 1)
 	go func() {
-		done <- renameLFSObject(failRenameStorage{local}, tempName, objPath, oid, int64(len(content)))
+		done <- StoreObject(context.Background(), strg, nil, datastore, 1, oid, int64(len(content)), strings.NewReader(content))
 	}()
 	select {
 	case err := <-done:
 		if err == nil {
-			t.Error("renameLFSObject accepted a FIFO as the object")
+			t.Error("StoreObject accepted a FIFO as the object")
 		}
 	case <-time.After(5 * time.Second):
 		// Open the FIFO for writing so the blocked open returns.
@@ -51,6 +52,6 @@ func TestRenameLFSObjectFIFODestination(t *testing.T) {
 			f.Close() //nolint:errcheck
 		}
 		<-done
-		t.Fatal("renameLFSObject blocked on a FIFO at the object path")
+		t.Fatal("StoreObject blocked on a FIFO at the object path")
 	}
 }
