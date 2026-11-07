@@ -81,10 +81,13 @@ func TestCancelledPushRemovesCreatedRepository(t *testing.T) {
 // receive-pack updates the refs and reports success to the client before the
 // post-receive hooks run. A push cancelled after that, while the hooks run,
 // must keep the repository it created: the client was told the push
-// succeeded.
+// succeeded. Its HEAD must point at the pushed branch, as after a push that
+// finished, not at a branch that does not exist.
 func TestCancelledPushKeepsCreatedRepositoryWithRefs(t *testing.T) {
 	is := is.New(t)
+	var repoDir string
 	ctx, be := cancelledPushToCreate(t, func(dir string) {
+		repoDir = dir
 		git := func(stdin string, args ...string) string {
 			cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 			cmd.Stdin = strings.NewReader(stdin)
@@ -98,9 +101,14 @@ func TestCancelledPushKeepsCreatedRepositoryWithRefs(t *testing.T) {
 		}
 		tree := git("", "mktree")
 		commit := git("", "commit-tree", tree, "-m", "pushed")
-		git("", "update-ref", "refs/heads/main", commit)
+		// Neither main nor master, so HEAD cannot point at it already.
+		git("", "update-ref", "refs/heads/trunk", commit)
 	})
 
 	_, err := be.Repository(ctx, "fresh")
 	is.NoErr(err) // the repository with pushed refs was kept
+
+	out, err := exec.Command("git", "-C", repoDir, "symbolic-ref", "HEAD").Output()
+	is.NoErr(err)
+	is.Equal(strings.TrimSpace(string(out)), "refs/heads/trunk") // HEAD points at the pushed branch
 }
