@@ -153,7 +153,9 @@ func TestSSHAlgorithmDocsMatchDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := string(readme)
+	// Git may check README.md out with CRLF line endings (the windows CI
+	// runner does), so compare lines without the carriage returns.
+	doc := strings.ReplaceAll(string(readme), "\r\n", "\n")
 
 	// The bullet list of defaults.
 	for _, l := range []struct {
