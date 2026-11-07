@@ -213,11 +213,11 @@ func TestStoppedByContext(t *testing.T) {
 	if stoppedByContext(ctx, errors.New("some other failure"), false) {
 		t.Error("an unrelated error must not report a cancellation")
 	}
-	if !stoppedByContext(ctx, errors.New("exit status 1"), true) {
-		t.Error("a command killed for the context must report a cancellation")
-	}
 
 	if runtime.GOOS == "windows" {
+		if !stoppedByContext(ctx, errors.New("exit status 1"), true) {
+			t.Error("a command killed for the context must report a cancellation")
+		}
 		t.Skip("uses sh")
 	}
 
@@ -227,6 +227,11 @@ func TestStoppedByContext(t *testing.T) {
 	}
 	if stoppedByContext(ctx, exited, false) {
 		t.Errorf("a process that exited on its own must not report a cancellation: %v", exited)
+	}
+	// Killing a process that already exited but was not yet reaped succeeds
+	// on Unix, so the killed flag must not hide its exit status.
+	if stoppedByContext(ctx, exited, true) {
+		t.Errorf("a process that exited on its own must not report a cancellation even if killed: %v", exited)
 	}
 
 	killed := exec.CommandContext(t.Context(), "sh", "-c", "kill -9 $$").Run()
