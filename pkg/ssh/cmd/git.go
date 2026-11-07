@@ -265,7 +265,7 @@ func removeFailedPushRepo(ctx context.Context, logger *log.Logger, name, dir str
 	rowGone := false
 	// orig identifies the directory this push created, so a directory
 	// re-created at the same path is not removed as its leftover.
-	orig, _ := os.Lstat(dir)
+	orig, _ := dirIdentity(dir)
 	for {
 		var err error
 		if !rowGone {
@@ -295,15 +295,20 @@ func removeFailedPushRepo(ctx context.Context, logger *log.Logger, name, dir str
 				logger.Warn("repo created by a failed push was re-created, leaving it", "repo", name)
 				return
 			}
-			fi, serr := os.Lstat(dir)
-			if errors.Is(serr, fs.ErrNotExist) {
+			fi, serr := dirIdentity(dir)
+			switch {
+			case errors.Is(serr, fs.ErrNotExist):
 				return
-			}
-			if serr == nil && !os.SameFile(orig, fi) {
+			case serr != nil:
+				// The directory cannot be identified, so it is not removed
+				// on this attempt.
+				err = serr
+			case !os.SameFile(orig, fi):
 				logger.Warn("directory of repo created by a failed push was re-created, leaving it", "repo", name)
 				return
+			default:
+				err = os.RemoveAll(dir)
 			}
-			err = os.RemoveAll(dir)
 		}
 
 		if rowGone {
@@ -322,6 +327,23 @@ func removeFailedPushRepo(ctx context.Context, logger *log.Logger, name, dir str
 		time.Sleep(wait)
 		wait *= 2
 	}
+}
+
+// dirIdentity returns the FileInfo of the directory at dir with its identity
+// loaded, for os.SameFile. It stats an open handle rather than the path: on
+// Windows os.Lstat records only the path, and os.SameFile loads the volume
+// and file index from that path when it is called, so two Lstat results taken
+// at different times would both describe whatever is at the path at
+// comparison time. File.Stat reads the identity from the handle right away.
+// The handle is opened sharing read and write, so a process that has the
+// directory as its working directory does not make it fail.
+func dirIdentity(dir string) (os.FileInfo, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint: errcheck
+	return f.Stat()
 }
 
 func gitRunE(cmd *cobra.Command, args []string) error {
