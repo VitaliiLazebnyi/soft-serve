@@ -86,7 +86,7 @@ func captureLog(t *testing.T) func() map[string]string {
 // is.
 func TestGitServiceOutputCopyErrorLevel(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "repo.git")
-	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(t.Context(), "git", "init", "--bare", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
 
