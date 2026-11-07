@@ -285,7 +285,11 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 		if err := service.Handler(ctx, scmd); err != nil {
 			if created {
 				// If the repo was created, but the request failed, delete it.
-				be.DeleteRepository(ctx, name) //nolint: errcheck
+				// The request may have failed because the session context was
+				// cancelled, so the cleanup must not depend on it.
+				if derr := be.DeleteRepository(context.WithoutCancel(ctx), name); derr != nil {
+					logger.Error("failed to delete repo created by a failed push", "err", derr, "repo", name)
+				}
 			}
 
 			return gitServiceError(logger, service, name, err)
