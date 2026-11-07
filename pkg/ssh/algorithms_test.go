@@ -101,7 +101,7 @@ func startAlgorithmsServer(t *testing.T, cfg *config.Config) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
