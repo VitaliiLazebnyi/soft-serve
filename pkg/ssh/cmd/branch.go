@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"charm.land/log/v2"
@@ -78,7 +79,7 @@ func branchDefaultCommand() *cobra.Command {
 
 			switch len(args) {
 			case 1:
-				head, err := r.HEAD()
+				head, err := repoHead(r)
 				if err != nil {
 					return err
 				}
@@ -167,12 +168,14 @@ func branchDeleteCommand() *cobra.Command {
 				return git.ErrReferenceNotExist
 			}
 
+			// A HEAD that names a branch that does not exist cannot be
+			// the branch being deleted, which does exist.
 			head, err := r.HEAD()
-			if err != nil {
+			if err != nil && !errors.Is(err, git.ErrReferenceNotExist) {
 				return err
 			}
 
-			if head.Name().Short() == branch {
+			if head != nil && head.Name().Short() == branch {
 				return fmt.Errorf("cannot delete the default branch")
 			}
 
