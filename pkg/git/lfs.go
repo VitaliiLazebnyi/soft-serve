@@ -2,9 +2,6 @@ package git
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -183,57 +180,16 @@ func (t *lfsTransfer) Upload(oid string, size int64, r io.Reader, _ transfer.Arg
 		return fmt.Errorf("%w: invalid object size %d", transfer.ErrParseError, size)
 	}
 
-	tempDir := "incomplete"
-	randBytes := make([]byte, 12)
-	if _, err := rand.Read(randBytes); err != nil {
-		_, _ = io.Copy(io.Discard, r)
-		return err
-	}
-
-	tempName := fmt.Sprintf("%s%x", oid, randBytes)
-	tempName = path.Join(tempDir, tempName)
-	defer t.storage.Delete(tempName) //nolint: errcheck
-
-	// Hash the data while writing it to a temporary file, and read at most
-	// one byte past the declared size so an oversized object is not written
-	// out in full. Whatever is left is drained so the next command is read
-	// from the right place in the stream.
-	hash := sha256.New()
-	written, err := t.storage.Put(tempName, io.TeeReader(io.LimitReader(r, size+1), hash))
+	// Read at most one byte past the declared size, then drain whatever is
+	// left so the next command is read from the right place in the stream.
+	err := lfs.StoreObject(t.ctx, t.storage, t.dbx, t.store, t.repo.ID(), oid, size, r)
 	_, _ = io.Copy(io.Discard, r)
+	if errors.Is(err, lfs.ErrObjectSizeMismatch) || errors.Is(err, lfs.ErrObjectOidMismatch) {
+		return fmt.Errorf("%w: %w", transfer.ErrCorruptData, err)
+	}
 	if err != nil {
-		t.logger.Errorf("error putting object: %v", err)
+		t.logger.Errorf("error storing object: %v", err)
 		return err
-	}
-	if written != size {
-		return fmt.Errorf("%w: invalid object size, expected %d, got at least %d", transfer.ErrCorruptData, size, written)
-	}
-	if got := hex.EncodeToString(hash.Sum(nil)); got != oid {
-		return fmt.Errorf("%w: invalid object ID, expected %s, got %s", transfer.ErrCorruptData, oid, got)
-	}
-
-	// The content is verified, so move it into place before recording it. A
-	// concurrent upload of the same object renames identical bytes over the
-	// same path. Rename takes names relative to the storage root, not the
-	// absolute path the temp file happens to live at.
-	pointer := transfer.Pointer{Oid: oid, Size: size}
-	expectedPath := path.Join("objects", pointer.RelativePath())
-	if err := t.storage.Rename(tempName, expectedPath); err != nil {
-		t.logger.Errorf("error renaming object: %v", err)
-		return err
-	}
-
-	if err := t.store.CreateLFSObject(t.ctx, t.dbx, t.repo.ID(), pointer.Oid, pointer.Size); err != nil {
-		// The object may already be recorded, by an earlier or concurrent
-		// upload. WrapError also maps foreign key violations to
-		// ErrDuplicateKey, so only treat it as success if the row is there.
-		if !errors.Is(err, db.ErrDuplicateKey) {
-			return err
-		}
-		if _, gerr := t.store.GetLFSObjectByOid(t.ctx, t.dbx, t.repo.ID(), pointer.Oid); gerr != nil {
-			t.logger.Errorf("error recording object: %v (lookup: %v)", err, gerr)
-			return err
-		}
 	}
 
 	return nil
