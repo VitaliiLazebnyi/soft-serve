@@ -514,6 +514,40 @@ func TestMaxReposPerUser(t *testing.T) {
 	is.True(cfg.ParseEnv() != nil)
 }
 
+// Docker Compose's list syntax keeps quotes in the value, as in
+// "- SOFT_SERVE_INITIAL_ADMIN_KEYS='ssh-ed25519 AAAA...'". A key or key file
+// path wrapped in one pair of matching quotes is read without them.
+func TestQuotedInitAdminKeys(t *testing.T) {
+	k1 := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINMwLvyV3ouVrTysUYGoJdl5Vgn5BACKov+n9PlzfPwH"
+	k2 := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxIobhwtfdwN7m1TFt9wx3PsfvcAkISGPxmbmbauST8"
+	for _, tc := range []struct {
+		name string
+		env  string
+		want []string
+	}{
+		{"single quotes", "'" + k2 + " a@b'", []string{k2}},
+		{"double quotes", `"` + k2 + `"`, []string{k2}},
+		{"quoted key file", `"testdata/k1.pub"`, []string{k1}},
+		{"several quoted keys", "'testdata/k1.pub'\n \"" + k2 + "\" ", []string{k1, k2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			is := is.New(t)
+			t.Setenv("SOFT_SERVE_INITIAL_ADMIN_KEYS", tc.env)
+			t.Setenv("SOFT_SERVE_DATA_PATH", t.TempDir())
+			cfg := DefaultConfig()
+			is.NoErr(cfg.ParseEnv())
+			is.Equal(cfg.InitialAdminKeys, tc.want)
+			is.Equal(cfg.IgnoredAdminKeys(), 0)
+		})
+	}
+
+	// Unmatched or inner quotes are not stripped.
+	is := is.New(t)
+	cfg := &Config{InitialAdminKeys: []string{"'" + k2 + `"`, `"` + k2}}
+	is.Equal(len(cfg.AdminKeys()), 0)
+	is.Equal(cfg.IgnoredAdminKeys(), 2)
+}
+
 func TestWebhookAllowedHosts(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DataPath = t.TempDir()
