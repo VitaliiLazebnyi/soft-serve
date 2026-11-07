@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/config"
@@ -62,6 +63,25 @@ func sqliteImmediateTx(dsn string) string {
 		return dsn + "&_txlock=immediate"
 	}
 	return dsn + "?_txlock=immediate"
+}
+
+// SetPoolLimits applies the connection pool settings in c. A zero value
+// leaves the database/sql default for that setting: no limit on open
+// connections, two idle connections, and no limit on a connection's
+// lifetime or idle time.
+func (d *DB) SetPoolLimits(c config.DBConfig) {
+	if c.MaxOpenConns > 0 {
+		d.SetMaxOpenConns(c.MaxOpenConns)
+	}
+	if c.MaxIdleConns > 0 {
+		d.SetMaxIdleConns(c.MaxIdleConns)
+	}
+	if c.ConnMaxLifetime > 0 {
+		d.SetConnMaxLifetime(time.Duration(c.ConnMaxLifetime) * time.Second)
+	}
+	if c.ConnMaxIdleTime > 0 {
+		d.SetConnMaxIdleTime(time.Duration(c.ConnMaxIdleTime) * time.Second)
+	}
 }
 
 // Close implements db.DB.

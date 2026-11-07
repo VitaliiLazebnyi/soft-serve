@@ -299,6 +299,17 @@ db:
   # Make sure foreign key support is enabled when using SQLite.
   data_source: "soft-serve.db?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 
+  # Connection pool limits. 0 keeps the database/sql default: no limit on
+  # open connections, 2 idle connections, and no limit on how long a
+  # connection is reused or may sit idle. With Postgres, set max_open_conns
+  # below the server's max_connections (minus what other clients use) so a
+  # burst of requests waits for a free connection instead of failing.
+  # Durations are in seconds.
+  max_open_conns: 0
+  max_idle_conns: 0
+  conn_max_lifetime: 0
+  conn_max_idle_time: 0
+
 # Git LFS configuration.
 lfs:
   # Enable Git LFS.
@@ -396,6 +407,8 @@ name all in uppercase. Here are some examples:
 - `SOFT_SERVE_DEFAULT_PRIVATE`: Make repositories created without an explicit visibility (push-to-create, `repo create` and `repo import` without `--private`, `default_repo`) private. Defaults to `false`. When set, anonymous push-to-create is refused, and anonymous `repo create` and `repo import` need `--private=false`, since an anonymous user could not access the private repository.
 - `SOFT_SERVE_DEFAULT_REPO`: Repository name to create on boot if missing
 - `SOFT_SERVE_SSH_KEX_ALGORITHMS`, `SOFT_SERVE_SSH_CIPHERS`, `SOFT_SERVE_SSH_MACS`: Comma-separated lists of the SSH key exchange algorithms, ciphers and MACs to offer. Empty means the secure defaults (see [SSH Algorithms](#ssh-algorithms))
+- `SOFT_SERVE_DB_MAX_OPEN_CONNS`, `SOFT_SERVE_DB_MAX_IDLE_CONNS`: Database connection pool limits. `0` (the default) keeps the database/sql defaults: no limit on open connections and 2 idle connections
+- `SOFT_SERVE_DB_CONN_MAX_LIFETIME`, `SOFT_SERVE_DB_CONN_MAX_IDLE_TIME`: Seconds a database connection may be reused, or may sit idle, before it is closed. `0` (the default) means no limit
 - `SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS`: Comma-separated private or internal hosts, IP addresses or CIDR ranges (each with an optional port) that webhooks may be sent to (see [Repository webhooks](#repository-webhooks)). Defaults to empty: public addresses only.
 
 #### SSH Algorithms
@@ -479,6 +492,25 @@ soft serve
 ```
 
 You can specify a database connection password in the _data source_ url. For example, `postgres://myuser:dbpass@localhost:5432/my_soft_serve_db`.
+
+By default the connection pool has no limit on open connections, so a burst
+of requests can use up Postgres' `max_connections`. Set `db.max_open_conns`
+(and optionally `db.max_idle_conns`, `db.conn_max_lifetime` and
+`db.conn_max_idle_time`) to bound it; requests beyond the limit wait for a
+free connection:
+
+```
+db:
+  driver: "postgres"
+  data_source: "postgres://postgres@localhost:5432/soft_serve?sslmode=disable"
+  max_open_conns: 20
+  max_idle_conns: 5
+  conn_max_lifetime: 1800
+```
+
+The same settings apply to SQLite, whose defaults are unchanged: writers
+already take turns through `BEGIN IMMEDIATE` and `busy_timeout`, so SQLite
+needs no limit.
 
 #### LFS Configuration
 

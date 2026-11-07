@@ -169,6 +169,23 @@ type DBConfig struct {
 
 	// DataSource is the database data source name.
 	DataSource string `env:"DATA_SOURCE" yaml:"data_source"`
+
+	// MaxOpenConns is the maximum number of open connections to the
+	// database. 0 (the default) means no limit.
+	MaxOpenConns int `env:"MAX_OPEN_CONNS" yaml:"max_open_conns"`
+
+	// MaxIdleConns is the maximum number of idle connections kept in the
+	// pool. 0 (the default) keeps the database/sql default of 2. It is
+	// capped at MaxOpenConns when that is set.
+	MaxIdleConns int `env:"MAX_IDLE_CONNS" yaml:"max_idle_conns"`
+
+	// ConnMaxLifetime is the maximum number of seconds a connection may be
+	// reused. 0 (the default) means no limit.
+	ConnMaxLifetime int `env:"CONN_MAX_LIFETIME" yaml:"conn_max_lifetime"`
+
+	// ConnMaxIdleTime is the maximum number of seconds a connection may sit
+	// idle before it is closed. 0 (the default) means no limit.
+	ConnMaxIdleTime int `env:"CONN_MAX_IDLE_TIME" yaml:"conn_max_idle_time"`
 }
 
 // LFSConfig is the configuration for Git LFS.
@@ -356,6 +373,10 @@ func (c *Config) Environ() []string {
 		fmt.Sprintf("SOFT_SERVE_LOG_TIME_FORMAT=%s", c.Log.TimeFormat),
 		fmt.Sprintf("SOFT_SERVE_DB_DRIVER=%s", c.DB.Driver),
 		fmt.Sprintf("SOFT_SERVE_DB_DATA_SOURCE=%s", c.DB.DataSource),
+		fmt.Sprintf("SOFT_SERVE_DB_MAX_OPEN_CONNS=%d", c.DB.MaxOpenConns),
+		fmt.Sprintf("SOFT_SERVE_DB_MAX_IDLE_CONNS=%d", c.DB.MaxIdleConns),
+		fmt.Sprintf("SOFT_SERVE_DB_CONN_MAX_LIFETIME=%d", c.DB.ConnMaxLifetime),
+		fmt.Sprintf("SOFT_SERVE_DB_CONN_MAX_IDLE_TIME=%d", c.DB.ConnMaxIdleTime),
 		fmt.Sprintf("SOFT_SERVE_LFS_ENABLED=%t", c.LFS.Enabled),
 		fmt.Sprintf("SOFT_SERVE_LFS_SSH_ENABLED=%t", c.LFS.SSHEnabled),
 		fmt.Sprintf("SOFT_SERVE_JOBS_MIRROR_PULL=%s", c.Jobs.MirrorPull),
@@ -426,6 +447,9 @@ func parseEnv(cfg *Config) error {
 		Prefix: "SOFT_SERVE_",
 	}); err != nil {
 		return fmt.Errorf("parse environment variables: %w", err)
+	}
+	if _, ok := os.LookupEnv("SOFT_SERVE_INITIAL_ADMIN_KEYS"); ok {
+		cfg.InitialAdminKeys = trimOuterQuotes(cfg.InitialAdminKeys)
 	}
 
 	// The env parser leaves the list alone when the variable is unset and
@@ -602,6 +626,20 @@ func (c *Config) Validate() error {
 		c.SSH.ClientKeyPath = filepath.Join(c.DataPath, c.SSH.ClientKeyPath)
 	}
 
+	for _, v := range []struct {
+		name  string
+		value int
+	}{
+		{"db.max_open_conns", c.DB.MaxOpenConns},
+		{"db.max_idle_conns", c.DB.MaxIdleConns},
+		{"db.conn_max_lifetime", c.DB.ConnMaxLifetime},
+		{"db.conn_max_idle_time", c.DB.ConnMaxIdleTime},
+	} {
+		if v.value < 0 {
+			return fmt.Errorf("%s: %d is negative; use 0 for the default", v.name, v.value)
+		}
+	}
+
 	if c.MaxReposPerUser < 0 {
 		return fmt.Errorf("max_repos_per_user: %d is negative; use 0 for no limit", c.MaxReposPerUser)
 	}
@@ -756,6 +794,46 @@ func trimQuotes(s string) string {
 		return strings.TrimSpace(s[1 : len(s)-1])
 	}
 	return s
+}
+
+// trimOuterQuotes removes a pair of quotes that wraps the whole
+// SOFT_SERVE_INITIAL_ADMIN_KEYS value rather than one entry. The value is
+// split on newlines before trimQuotes sees the entries, so several keys in
+// one pair of quotes, as in "- SOFT_SERVE_INITIAL_ADMIN_KEYS='key1\nkey2'",
+// leave an unmatched quote at the start of the first entry and at the end of
+// the last one, and both keys would be ignored or misread. It strips them
+// only when both are unmatched and are the same quote, so entries that are
+// each quoted are left to trimQuotes. It runs before the config file's keys
+// are merged in, so the last entry is the environment's.
+func trimOuterQuotes(aks []string) []string {
+	first, last := -1, -1
+	for i, entry := range aks {
+		if strings.TrimSpace(entry) != "" {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first < 0 || first == last {
+		return aks
+	}
+	head := strings.TrimSpace(aks[first])
+	tail := strings.TrimSpace(aks[last])
+	q := head[0]
+	if q != '"' && q != '\'' {
+		return aks
+	}
+	if len(head) >= 2 && head[len(head)-1] == q {
+		return aks // the first entry is quoted on its own
+	}
+	if tail[len(tail)-1] != q || (len(tail) >= 2 && tail[0] == q) {
+		return aks // the last entry is not closed, or is quoted on its own
+	}
+	out := slices.Clone(aks)
+	out[first] = head[1:]
+	out[last] = tail[:len(tail)-1]
+	return out
 }
 
 // looksLikePath reports whether an entry that is not a key names a file. An
