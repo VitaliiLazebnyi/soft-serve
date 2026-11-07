@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -254,6 +255,31 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 		defer func() {
 			receivePackSeconds.WithLabelValues(name).Add(time.Since(start).Seconds())
 		}()
+		if repo != nil {
+			if err := gitAccess(user, repo, accessLevel, access.ReadWriteAccess); err != nil {
+				return err
+			}
+			// Hold off the removal of a repository an HTTP push created
+			// and left without refs while this push may write some.
+			done, err := beginPush(ctx, be, repo)
+			switch {
+			case err == nil:
+				defer done()
+			case errors.Is(err, proto.ErrRepoNotFound):
+				// It was removed while this push waited. Look the name
+				// up again, so the push creates it as a push to a
+				// missing name does.
+				repo, accessLevel = readableRepo(ctx, name)
+				ctx = proto.WithRepositoryContext(ctx, repo)
+				if repo != nil {
+					// Another repository took the name meanwhile.
+					return err
+				}
+			default:
+				return err
+			}
+		}
+
 		// A missing name is created for a caller who may write; anything
 		// else goes through the same check as every other service.
 		created := repo == nil && accessLevel >= access.ReadWriteAccess
@@ -263,17 +289,8 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 				return err
 			}
 			createRepoCounter.WithLabelValues(name).Inc()
-		} else {
-			if err := gitAccess(user, repo, accessLevel, access.ReadWriteAccess); err != nil {
-				return err
-			}
-			// Hold off the removal of a repository an HTTP push created
-			// and left without refs while this push may write some.
-			done, err := be.BeginPush(ctx, repo)
-			if err != nil {
-				return err
-			}
-			defer done()
+		} else if repo == nil {
+			return gitAccess(user, repo, accessLevel, access.ReadWriteAccess)
 		}
 
 		if err := service.Handler(ctx, scmd); err != nil {
@@ -349,6 +366,16 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
+		// An upload writes to the repository like a push, so it holds off
+		// the same removal.
+		if service == git.LFSTransferService && operation == lfs.OperationUpload {
+			done, err := beginPush(ctx, be, repo)
+			if err != nil {
+				return err
+			}
+			defer done()
+		}
+
 		scmd.Args = []string{
 			name,
 			args[1],
@@ -376,4 +403,17 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 	}
 
 	return errors.New("unsupported git service")
+}
+
+// testHookBeforeBeginPush, when set, runs in beginPush before the push is
+// marked as running.
+var testHookBeforeBeginPush func()
+
+// beginPush marks a push or LFS upload to repo as running; see
+// backend.BeginPush.
+func beginPush(ctx context.Context, be *backend.Backend, repo proto.Repository) (func(), error) {
+	if testHookBeforeBeginPush != nil {
+		testHookBeforeBeginPush()
+	}
+	return be.BeginPush(ctx, repo)
 }
