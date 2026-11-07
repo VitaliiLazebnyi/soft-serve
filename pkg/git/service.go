@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"charm.land/log/v2"
@@ -212,15 +214,28 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 	return nil
 }
 
-// logCopyError logs a failure to copy git's output. Once the context is done
-// the client is gone and the pipes are closed under the copy, so the failure
-// is expected and logged at Debug.
+// logCopyError logs a failure to copy git's output to the client. A client
+// that goes away, closing the SSH channel or the HTTP connection, makes the
+// copy fail: either the write to the client fails, or the context is
+// cancelled for it and the pipes are closed under the copy. That is
+// expected, so it is logged at Debug; any other failure is logged at Error.
 func logCopyError(ctx context.Context, stream string, err error) {
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || clientGone(err) {
 		log.Debugf("gitServiceHandler: failed to copy %s: %v", stream, err)
 		return
 	}
 	log.Errorf("gitServiceHandler: failed to copy %s: %v", stream, err)
+}
+
+// clientGone reports whether err, returned by a write to the client, means
+// the client closed its end. A closed SSH channel returns io.EOF, and a
+// closed network connection a closed, broken pipe or reset error.
+func clientGone(err error) bool {
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET)
 }
 
 // waitDelay is how long after the context is done git is killed as a
