@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"fmt"
-
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/access"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
@@ -40,11 +38,8 @@ func treeCommand() *cobra.Command {
 			}
 
 			if ref == "" {
-				head, err := r.HEAD()
+				head, err := repoHead(r)
 				if err != nil {
-					if bs, err := r.Branches(); err != nil && len(bs) == 0 {
-						return fmt.Errorf("repository is empty")
-					}
 					return err
 				}
 
