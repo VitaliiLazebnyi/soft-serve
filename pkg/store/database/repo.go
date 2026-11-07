@@ -101,6 +101,27 @@ func (*repoStore) GetRepoByName(ctx context.Context, tx db.Handler, name string)
 	return repo, db.WrapError(err)
 }
 
+// GetRepoByNameForUpdate implements store.RepositoryStore. See LockUserRepos
+// for the driver switch.
+func (*repoStore) GetRepoByNameForUpdate(ctx context.Context, h db.Handler, name string) (models.Repo, error) {
+	d, ok := h.(interface{ DriverName() string })
+	if !ok {
+		return models.Repo{}, fmt.Errorf("get repo for update: handler %T does not report its driver", h)
+	}
+	var query string
+	switch driver := d.DriverName(); driver {
+	case "postgres":
+		query = "SELECT * FROM repos WHERE name = $1 FOR UPDATE;"
+	case "sqlite", "sqlite3":
+		query = "SELECT * FROM repos WHERE name = ?;"
+	default:
+		return models.Repo{}, fmt.Errorf("get repo for update: unsupported database driver %q", driver)
+	}
+	var repo models.Repo
+	err := h.GetContext(ctx, &repo, query, utils.SanitizeRepo(name))
+	return repo, db.WrapError(err)
+}
+
 // GetRepoDescriptionByName implements store.RepositoryStore.
 func (*repoStore) GetRepoDescriptionByName(ctx context.Context, tx db.Handler, name string) (string, error) {
 	var description string

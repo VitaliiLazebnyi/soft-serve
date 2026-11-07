@@ -522,8 +522,12 @@ var errRepoKept = errors.New("repository kept")
 
 // deleteRepository is DeleteRepository with an optional check. A non-nil
 // keep runs in the transaction that deletes the repository's row, with that
-// row, so nothing can change between the check and the delete; if it
-// returns true the repository is kept and errRepoKept is returned. With
+// row, read and locked (see GetRepoByNameForUpdate) before the check; if it
+// returns true the repository is kept and errRepoKept is returned. The lock
+// holds off collaborator, webhook and LFS rows for the repository and
+// changes to the row itself until the transaction ends, so none of those
+// can land between the check and the delete. Anything not in the database,
+// such as refs, is the caller's to order. With
 // keep set, a directory with no row is left alone rather than removed as an
 // orphan: the row the caller meant is gone, and the directory may belong to
 // a repository being created.
@@ -560,7 +564,14 @@ func (d *Backend) deleteRepository(ctx context.Context, name string, keep func(t
 	}
 
 	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
-		repom, dberr := d.store.GetRepoByName(ctx, tx, name)
+		// With a keep check, the row is locked before the check, so
+		// nothing can be added for the repository between the check and
+		// the delete, only to go with the row by ON DELETE CASCADE.
+		getRepo := d.store.GetRepoByName
+		if keep != nil {
+			getRepo = d.store.GetRepoByNameForUpdate
+		}
+		repom, dberr := getRepo(ctx, tx, name)
 		if dberr != nil {
 			// A directory with no row is an orphan; remove it.
 			if keep == nil && d.repoPathExists(name) {
