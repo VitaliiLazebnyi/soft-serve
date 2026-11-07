@@ -13,10 +13,12 @@ import (
 	"net/http"
 	neturl "net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/git"
+	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
@@ -45,8 +47,52 @@ type Delivery struct {
 // that is not active. Activate the webhook first to send to it again.
 var ErrWebhookInactive = errors.New("webhook is not active")
 
-// secureHTTPClient is an HTTP client with SSRF protection.
+// secureHTTPClient is an HTTP client with SSRF protection. It is used when
+// webhook.allowed_hosts is empty, and for every request when
+// useOnlySecureHTTPClient is set.
 var secureHTTPClient = ssrf.NewSecureClient()
+
+// useOnlySecureHTTPClient makes every request use secureHTTPClient, whatever
+// webhook.allowed_hosts says. Only the webhooktest build sets it.
+var useOnlySecureHTTPClient bool
+
+// allowingClient caches the client for the last non-empty webhook allowlist
+// seen, so deliveries share its connection pool. The allowlist only changes
+// when the config does, so one entry is enough.
+var allowingClient struct {
+	sync.Mutex
+	key    string
+	client *http.Client
+}
+
+// httpClient returns the client a webhook request is sent with: an
+// SSRF-protected client that also lets through the private and internal
+// destinations webhook.allowed_hosts permits, read from ctx's config at send
+// time. A webhook saved under an older allowlist is held to the current one.
+func httpClient(ctx context.Context) *http.Client {
+	if useOnlySecureHTTPClient {
+		return secureHTTPClient
+	}
+	cfg := config.FromContext(ctx)
+	if cfg == nil {
+		return secureHTTPClient
+	}
+	allowed := cfg.Webhook.ParsedAllowedHosts()
+	if len(allowed) == 0 {
+		return secureHTTPClient
+	}
+	key := allowed.String()
+	allowingClient.Lock()
+	defer allowingClient.Unlock()
+	if allowingClient.client == nil || allowingClient.key != key {
+		if allowingClient.client != nil {
+			allowingClient.client.CloseIdleConnections()
+		}
+		allowingClient.key = key
+		allowingClient.client = ssrf.NewSecureClientAllowing(allowed)
+	}
+	return allowingClient.client
+}
 
 // do sends a webhook.
 // Caller must close the returned body.
@@ -59,7 +105,7 @@ func do(ctx context.Context, url string, method string, headers http.Header, bod
 	}
 
 	req.Header = headers
-	res, err := secureHTTPClient.Do(req)
+	res, err := httpClient(ctx).Do(req)
 	if err != nil {
 		return nil, redactURLError(err)
 	}
