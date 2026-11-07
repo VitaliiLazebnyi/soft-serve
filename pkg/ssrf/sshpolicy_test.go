@@ -263,7 +263,7 @@ func TestLookupsAreBounded(t *testing.T) {
 		validate func(lookupFunc) error
 	}{
 		{"ValidateURL", func(l lookupFunc) error {
-			return validateURL("https://hooks.example/x", l)
+			return validateURL("https://hooks.example/x", nil, l)
 		}},
 		{"ValidateGitRemote https", func(l lookupFunc) error {
 			_, err := ValidateGitRemote("https://git.example/x.git", GitRemotePolicy{lookup: l})
@@ -315,5 +315,65 @@ func TestLookupsAreBounded(t *testing.T) {
 				t.Errorf("lookup deadline %v is later than %v", deadline, limit)
 			}
 		})
+	}
+}
+
+// An IPv4-mapped network matches the IPv4 addresses it maps, the same as
+// the IPv4 network written plainly. Addresses are unmapped before matching,
+// so the mapped form used to match nothing.
+func TestAllowedHostsMappedNetworks(t *testing.T) {
+	t.Parallel()
+	lookup := fakeLookup(map[string][]string{
+		"inside.example":  {"10.1.2.3"},
+		"outside.example": {"192.168.0.1"},
+	})
+	for _, entry := range []string{"::ffff:10.0.0.0/104", "[::ffff:10.0.0.0/104]:22"} {
+		a := mustAllowedHosts(t, entry)
+		if got := a.String(); got != "10.0.0.0/8" && got != "10.0.0.0/8:22" {
+			t.Errorf("%q parsed as %q, want the IPv4 network", entry, got)
+		}
+		for _, host := range []string{"10.1.2.3", "::ffff:10.1.2.3", "inside.example"} {
+			if err := a.match(context.Background(), host, "22", lookup); err != nil {
+				t.Errorf("%q: Match(%q) = %v, want nil", entry, host, err)
+			}
+		}
+		for _, host := range []string{"11.0.0.1", "outside.example"} {
+			if err := a.match(context.Background(), host, "22", lookup); !errors.Is(err, ErrSSHHostNotAllowed) {
+				t.Errorf("%q: Match(%q) = %v, want ErrSSHHostNotAllowed", entry, host, err)
+			}
+		}
+	}
+
+	// The whole mapped range is all of IPv4.
+	all := mustAllowedHosts(t, "::ffff:0:0/96")
+	if got := all.String(); got != "0.0.0.0/0" {
+		t.Errorf("::ffff:0:0/96 parsed as %q, want 0.0.0.0/0", got)
+	}
+	if err := all.Match("203.0.113.9", ""); err != nil {
+		t.Errorf("::ffff:0:0/96 does not match an IPv4 address: %v", err)
+	}
+
+	// A wider IPv6 range is left an IPv6 range: it matches IPv6 only.
+	v6 := mustAllowedHosts(t, "::/0")
+	if got := v6.String(); got != "::/0" {
+		t.Errorf("::/0 parsed as %q", got)
+	}
+	if err := v6.Match("fd00::1", ""); err != nil {
+		t.Errorf("::/0 does not match an IPv6 address: %v", err)
+	}
+	if err := v6.Match("10.1.2.3", ""); !errors.Is(err, ErrSSHHostNotAllowed) {
+		t.Errorf("::/0 matched an IPv4 address: %v", err)
+	}
+}
+
+func TestAllowedHostsString(t *testing.T) {
+	t.Parallel()
+	a := mustAllowedHosts(t, "Git.Internal.Example.", "gitlab.corp:2222", "10.1.2.3/8", "::ffff:127.0.0.1", "[fd00::1]:22", "fd00::/8")
+	want := "git.internal.example,gitlab.corp:2222,10.0.0.0/8,127.0.0.1,[fd00::1]:22,fd00::/8"
+	if got := a.String(); got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+	if got := AllowedHosts(nil).String(); got != "" {
+		t.Errorf("empty String() = %q", got)
 	}
 }
