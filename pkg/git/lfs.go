@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -445,15 +444,6 @@ func (l *lfsLockBackend) FromPath(path string) (transfer.Lock, error) {
 	return &lock, nil
 }
 
-const (
-	// maxLocksLimit is the largest page of locks returned at once. A larger
-	// limit is lowered to it.
-	maxLocksLimit = 100
-	// maxLocksCursor bounds the page number so the row offset,
-	// (cursor-1)*limit, stays well within an int on any platform.
-	maxLocksCursor = math.MaxInt32 / maxLocksLimit
-)
-
 // Range implements transfer.LockBackend.
 //
 // The cursor is a page number handed out as next-cursor; empty means the
@@ -463,20 +453,11 @@ func (l *lfsLockBackend) Range(cursor string, limit int, fn func(transfer.Lock) 
 	var nextCursor string
 	var locks []*LFSLock
 
-	page := 1
-	if cursor != "" {
-		var err error
-		page, err = strconv.Atoi(cursor)
-		if err != nil || page < 1 || page > maxLocksCursor {
-			return "", fmt.Errorf("%w: invalid cursor %q", transfer.ErrParseError, cursor)
-		}
+	page, err := lfs.ParseLocksCursor(cursor)
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid cursor %q", transfer.ErrParseError, cursor)
 	}
-
-	if limit <= 0 {
-		limit = lfs.DefaultLocksLimit
-	} else if limit > maxLocksLimit {
-		limit = maxLocksLimit
-	}
+	limit = lfs.ClampLocksLimit(limit)
 
 	if err := l.dbx.TransactionContext(l.ctx, func(tx *db.Tx) error {
 		l.logger.Debug("getting locks", "limit", limit, "page", page)
@@ -485,9 +466,7 @@ func (l *lfsLockBackend) Range(cursor string, limit int, fn func(transfer.Lock) 
 			return db.WrapError(err)
 		}
 
-		if len(mlocks) == limit {
-			nextCursor = strconv.Itoa(page + 1)
-		}
+		nextCursor = lfs.NextLocksCursor(page, limit, len(mlocks))
 
 		users := make(map[int64]models.User, 0)
 		for _, mlock := range mlocks {

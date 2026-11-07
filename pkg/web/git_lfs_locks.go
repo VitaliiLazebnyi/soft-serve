@@ -3,7 +3,6 @@ package web
 import (
 	"encoding/json"
 	"errors"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -137,41 +136,13 @@ func serviceLfsLocksCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-const (
-	// maxLocksLimit is the largest page of locks returned at once. A larger
-	// limit is lowered to it.
-	maxLocksLimit = 100
-	// maxLocksCursor bounds the page number so the row offset,
-	// (cursor-1)*limit, stays well within an int on any platform.
-	maxLocksCursor = math.MaxInt32 / maxLocksLimit
-)
-
-// parseLocksCursor parses the cursor of a lock list or verify request. The
-// cursor is a page number handed out as next_cursor; empty means the first
-// page.
-func parseLocksCursor(s string) (int, error) {
-	if s == "" {
-		return 1, nil
-	}
-	cursor, err := strconv.Atoi(s)
-	if err != nil || cursor < 1 || cursor > maxLocksCursor {
-		return 0, errors.New("invalid cursor")
-	}
-	return cursor, nil
-}
-
-// locksLimit checks the limit of a lock list or verify request. Zero means
-// the default, and a limit above maxLocksLimit is lowered to it.
+// locksLimit checks the limit of a lock list or verify request. A negative
+// limit is refused; otherwise lfs.ClampLocksLimit applies.
 func locksLimit(limit int) (int, error) {
-	switch {
-	case limit < 0:
+	if limit < 0 {
 		return 0, errors.New("invalid limit")
-	case limit == 0:
-		return lfs.DefaultLocksLimit, nil
-	case limit > maxLocksLimit:
-		return maxLocksLimit, nil
 	}
-	return limit, nil
+	return lfs.ClampLocksLimit(limit), nil
 }
 
 // GET: /<repo>.git/info/lfs/objects/locks
@@ -197,7 +168,7 @@ func serviceLfsLocksGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	cursor, err := parseLocksCursor(values.Get("cursor"))
+	cursor, err := lfs.ParseLocksCursor(values.Get("cursor"))
 	if err != nil {
 		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
 			Message: err.Error(),
@@ -346,9 +317,7 @@ func serviceLfsLocksGet(w http.ResponseWriter, r *http.Request) {
 	resp := lfs.LockListResponse{
 		Locks: lockList,
 	}
-	if len(locks) == limit {
-		resp.NextCursor = strconv.Itoa(cursor + 1)
-	}
+	resp.NextCursor = lfs.NextLocksCursor(cursor, limit, len(locks))
 
 	renderJSON(w, http.StatusOK, resp)
 }
@@ -381,7 +350,7 @@ func serviceLfsLocksVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// TODO: refspec
-	cursor, err := parseLocksCursor(req.Cursor)
+	cursor, err := lfs.ParseLocksCursor(req.Cursor)
 	if err != nil {
 		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
 			Message: err.Error(),
@@ -446,9 +415,7 @@ func serviceLfsLocksVerify(w http.ResponseWriter, r *http.Request) {
 	resp.Ours = ours
 	resp.Theirs = theirs
 
-	if len(locks) == limit {
-		resp.NextCursor = strconv.Itoa(cursor + 1)
-	}
+	resp.NextCursor = lfs.NextLocksCursor(cursor, limit, len(locks))
 
 	renderJSON(w, http.StatusOK, resp)
 }

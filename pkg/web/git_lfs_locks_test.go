@@ -3,14 +3,18 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/soft-serve/pkg/db"
+	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/charmbracelet/soft-serve/pkg/lfs"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/matryer/is"
 )
 
@@ -155,5 +159,70 @@ func TestLFSLocksVerifyRejectsInvalidParams(t *testing.T) {
 	}
 	if len(resp.Ours) != 1 || len(resp.Theirs) != 0 || resp.NextCursor != "3" {
 		t.Errorf("got ours %d, theirs %d, next_cursor %q; want 1, 0, \"3\"", len(resp.Ours), len(resp.Theirs), resp.NextCursor)
+	}
+}
+
+// fullPageLockStore returns a full page of the repository's first lock for
+// any page, standing in for a repository with more locks than the last page
+// can reach.
+type fullPageLockStore struct{ store.Store }
+
+func (s fullPageLockStore) GetLFSLocks(ctx context.Context, h db.Handler, repoID int64, _ int, limit int) ([]models.LFSLock, error) {
+	first, err := s.Store.GetLFSLocks(ctx, h, repoID, 1, 1)
+	if err != nil || len(first) == 0 {
+		return first, err
+	}
+	locks := make([]models.LFSLock, limit)
+	for i := range locks {
+		locks[i] = first[0]
+	}
+	return locks, nil
+}
+
+// TestLFSLocksLastPage checks that a full page at the largest cursor the
+// server accepts hands out no next_cursor, on both the list and the verify
+// endpoint. It used to hand out lfs.MaxLocksCursor+1, which the next request
+// was then refused for.
+func TestLFSLocksLastPage(t *testing.T) {
+	ctx := newLocksParamsContext(t)
+	ctx = store.WithContext(ctx, fullPageLockStore{store.FromContext(ctx)})
+
+	for cursor, want := range map[int]string{
+		lfs.MaxLocksCursor - 1: strconv.Itoa(lfs.MaxLocksCursor),
+		lfs.MaxLocksCursor:     "",
+	} {
+		t.Run(strconv.Itoa(cursor), func(t *testing.T) {
+			req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/repo.git/info/lfs/locks?limit=1&cursor="+strconv.Itoa(cursor), nil)
+			req.Header.Set("Accept", lfs.MediaType)
+			w := httptest.NewRecorder()
+			serviceLfsLocks(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("list status = %d, want %d: %s", w.Code, http.StatusOK, w.Body)
+			}
+			var list lfs.LockListResponse
+			if err := json.NewDecoder(w.Body).Decode(&list); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(list.Locks) != 1 || list.NextCursor != want {
+				t.Errorf("list got %d locks, next_cursor %q; want 1, %q", len(list.Locks), list.NextCursor, want)
+			}
+
+			body := fmt.Sprintf(`{"cursor":"%d","limit":1}`, cursor)
+			req = httptest.NewRequestWithContext(ctx, http.MethodPost, "/repo.git/info/lfs/locks/verify", strings.NewReader(body))
+			req.Header.Set("Content-Type", lfs.MediaType)
+			req.Header.Set("Accept", lfs.MediaType)
+			w = httptest.NewRecorder()
+			serviceLfsLocksVerify(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("verify status = %d, want %d: %s", w.Code, http.StatusOK, w.Body)
+			}
+			var verify lfs.LockVerifyResponse
+			if err := json.NewDecoder(w.Body).Decode(&verify); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(verify.Ours) != 1 || verify.NextCursor != want {
+				t.Errorf("verify got %d ours, next_cursor %q; want 1, %q", len(verify.Ours), verify.NextCursor, want)
+			}
+		})
 	}
 }
