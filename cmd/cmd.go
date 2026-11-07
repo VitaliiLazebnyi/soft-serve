@@ -29,6 +29,7 @@ func InitBackendContext(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
+	dbx.SetPoolLimits(cfg.DB)
 
 	ctx = db.WithContext(ctx, dbx)
 	dbstore := database.New(ctx, dbx)

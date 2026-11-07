@@ -162,6 +162,17 @@ db:
   # Make sure foreign key support is enabled when using SQLite.
   data_source: "{{ .DB.DataSource }}"
 
+  # Connection pool limits. 0 keeps the database/sql default: no limit on
+  # open connections, 2 idle connections, and no limit on how long a
+  # connection is reused or may sit idle. With Postgres, set max_open_conns
+  # below the server's max_connections (minus what other clients use) so a
+  # burst of requests waits for a free connection instead of failing.
+  # Durations are in seconds.
+  max_open_conns: {{ .DB.MaxOpenConns }}
+  max_idle_conns: {{ .DB.MaxIdleConns }}
+  conn_max_lifetime: {{ .DB.ConnMaxLifetime }}
+  conn_max_idle_time: {{ .DB.ConnMaxIdleTime }}
+
 # Git LFS configuration.
 lfs:
   # Enable Git LFS.

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/spf13/cobra"
 )
@@ -43,5 +44,26 @@ func TestCloseDBOnError(t *testing.T) {
 				t.Fatalf("database ping returned %v, want closed=%v", err, tc.wantClosed)
 			}
 		})
+	}
+}
+
+// InitBackendContext applies the db pool settings from the config to the
+// database it opens.
+func TestInitBackendContextAppliesPoolLimits(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DataPath = t.TempDir()
+	cfg.DB.MaxOpenConns = 7
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c := &cobra.Command{}
+	c.SetContext(config.WithContext(context.Background(), cfg))
+	if err := InitBackendContext(c, nil); err != nil {
+		t.Fatal(err)
+	}
+	dbx := db.FromContext(c.Context())
+	t.Cleanup(func() { _ = dbx.Close() })
+	if got := dbx.Stats().MaxOpenConnections; got != 7 {
+		t.Errorf("MaxOpenConnections = %d, want 7", got)
 	}
 }
