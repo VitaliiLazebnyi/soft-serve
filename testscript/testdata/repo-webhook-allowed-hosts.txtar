@@ -55,6 +55,10 @@ stdout -count=1 '❌.*push'
 ! soft repo webhook create repo-internal http://$RCV/hooks/again -e push
 stderr 'private or internal'
 
+# end on a command that succeeds: on windows, the stderr check after
+# stopping the server sees the stderr of the last command
+soft repo webhook list repo-internal
+
 # stop the server
 [windows] stopserver
 [windows] ! stderr .
