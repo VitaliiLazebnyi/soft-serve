@@ -3,8 +3,8 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -47,7 +47,11 @@ func serviceLfsLocksCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req lfs.LockCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxLfsJSONBodySize)
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		if lfsBodyTooLarge(w, logger, err) {
+			return
+		}
 		logger.Error("error decoding json", "err", err)
 		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
 			Message: "invalid request: " + err.Error(),
@@ -139,6 +143,43 @@ func serviceLfsLocksCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const (
+	// maxLocksLimit is the largest page of locks returned at once. A larger
+	// limit is lowered to it.
+	maxLocksLimit = 100
+	// maxLocksCursor bounds the page number so the row offset,
+	// (cursor-1)*limit, stays well within an int on any platform.
+	maxLocksCursor = math.MaxInt32 / maxLocksLimit
+)
+
+// parseLocksCursor parses the cursor of a lock list or verify request. The
+// cursor is a page number handed out as next_cursor; empty means the first
+// page.
+func parseLocksCursor(s string) (int, error) {
+	if s == "" {
+		return 1, nil
+	}
+	cursor, err := strconv.Atoi(s)
+	if err != nil || cursor < 1 || cursor > maxLocksCursor {
+		return 0, errors.New("invalid cursor")
+	}
+	return cursor, nil
+}
+
+// locksLimit checks the limit of a lock list or verify request. Zero means
+// the default, and a limit above maxLocksLimit is lowered to it.
+func locksLimit(limit int) (int, error) {
+	switch {
+	case limit < 0:
+		return 0, errors.New("invalid limit")
+	case limit == 0:
+		return lfs.DefaultLocksLimit, nil
+	case limit > maxLocksLimit:
+		return maxLocksLimit, nil
+	}
+	return limit, nil
+}
+
 // GET: /<repo>.git/info/lfs/objects/locks
 func serviceLfsLocksGet(w http.ResponseWriter, r *http.Request) {
 	accept := r.Header.Get("Accept")
@@ -147,36 +188,44 @@ func serviceLfsLocksGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parseLocksQuery := func(values url.Values) (path string, id int64, cursor int, limit int, refspec string) {
-		path = values.Get("path")
-		idStr := values.Get("id")
-		if idStr != "" {
-			id, _ = strconv.ParseInt(idStr, 10, 64)
-		}
-		cursorStr := values.Get("cursor")
-		if cursorStr != "" {
-			cursor, _ = strconv.Atoi(cursorStr)
-		}
-		limitStr := values.Get("limit")
-		if limitStr != "" {
-			limit, _ = strconv.Atoi(limitStr)
-		}
-		refspec = values.Get("refspec")
-		return
-	}
-
 	ctx := r.Context()
 	// TODO: respect refspec
-	path, id, cursor, limit, _ := parseLocksQuery(r.URL.Query())
-	if limit > 100 {
-		limit = 100
-	} else if limit <= 0 {
-		limit = lfs.DefaultLocksLimit
+	values := r.URL.Query()
+	path := values.Get("path")
+	var id int64
+	if idStr := values.Get("id"); idStr != "" {
+		var err error
+		id, err = strconv.ParseInt(idStr, 10, 64)
+		if err != nil || id <= 0 {
+			renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
+				Message: "invalid lock id",
+			})
+			return
+		}
 	}
-
-	// cursor is the page number
-	if cursor <= 0 {
-		cursor = 1
+	cursor, err := parseLocksCursor(values.Get("cursor"))
+	if err != nil {
+		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
+	}
+	var limit int
+	if limitStr := values.Get("limit"); limitStr != "" {
+		limit, err = strconv.Atoi(limitStr)
+		if err != nil {
+			renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
+				Message: "invalid limit",
+			})
+			return
+		}
+	}
+	limit, err = locksLimit(limit)
+	if err != nil {
+		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
 	}
 
 	logger := log.FromContext(ctx).WithPrefix("http.lfs-locks")
@@ -325,7 +374,11 @@ func serviceLfsLocksVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req lfs.LockVerifyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxLfsJSONBodySize)
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		if lfsBodyTooLarge(w, logger, err) {
+			return
+		}
 		logger.Error("error decoding request", "err", err)
 		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
 			Message: "invalid request: " + err.Error(),
@@ -334,16 +387,19 @@ func serviceLfsLocksVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// TODO: refspec
-	cursor, _ := strconv.Atoi(req.Cursor)
-	if cursor <= 0 {
-		cursor = 1
+	cursor, err := parseLocksCursor(req.Cursor)
+	if err != nil {
+		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
 	}
-
-	limit := req.Limit
-	if limit > 100 {
-		limit = 100
-	} else if limit <= 0 {
-		limit = lfs.DefaultLocksLimit
+	limit, err := locksLimit(req.Limit)
+	if err != nil {
+		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
+			Message: err.Error(),
+		})
+		return
 	}
 
 	dbx := db.FromContext(ctx)
@@ -431,7 +487,11 @@ func serviceLfsLocksDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req lfs.LockDeleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxLfsJSONBodySize)
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		if lfsBodyTooLarge(w, logger, err) {
+			return
+		}
 		logger.Error("error decoding request", "err", err)
 		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
 			Message: "invalid request: " + err.Error(),

@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -183,6 +185,44 @@ func gitAccess(user proto.User, repo proto.Repository, have, need access.AccessL
 	return nil
 }
 
+// gitServiceError logs a failed git service and returns the error for the
+// client. A client that goes away early, such as one that only reads the ref
+// advertisement, cancels the session context and git is killed for it. That
+// is not a server failure, so it is logged at Debug and not reported as one.
+func gitServiceError(logger *log.Logger, service git.Service, repo string, err error) error {
+	if errors.Is(err, context.Canceled) {
+		logger.Debug("git service cancelled", "service", service, "err", err, "repo", repo)
+		return err
+	}
+
+	logger.Error("failed to handle git service", "service", service, "err", err, "repo", repo)
+	return git.ErrSystemMalfunction
+}
+
+// deleteFailedPushRepo deletes a repository created by a push that failed,
+// unless the push already wrote refs to it. receive-pack updates the refs and
+// reports success to the client before the post-receive hooks run, so a push
+// can fail after the client was told it succeeded, for example when the client
+// goes away while the hooks run. Such a repository is kept.
+//
+// The push may have failed because the session context was cancelled, so ctx
+// must not be the cancelled one.
+func deleteFailedPushRepo(ctx context.Context, be *backend.Backend, logger *log.Logger, name, dir string) {
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "for-each-ref", "--count=1").Output()
+	if err != nil {
+		logger.Error("failed to check refs of repo created by a failed push, keeping it", "err", err, "repo", name)
+		return
+	}
+	if len(bytes.TrimSpace(out)) > 0 {
+		logger.Warn("keeping repo created by a failed push, it already has refs", "repo", name)
+		return
+	}
+
+	if err := be.DeleteRepository(ctx, name); err != nil {
+		logger.Error("failed to delete repo created by a failed push", "err", err, "repo", name)
+	}
+}
+
 func gitRunE(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	cfg := config.FromContext(ctx)
@@ -294,13 +334,11 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 		}
 
 		if err := service.Handler(ctx, scmd); err != nil {
-			logger.Error("failed to handle git service", "service", service, "err", err, "repo", name)
 			if created {
-				// If the repo was created, but the request failed, delete it.
-				be.DeleteRepository(ctx, name) //nolint: errcheck
+				deleteFailedPushRepo(context.WithoutCancel(ctx), be, logger, name, repoPath)
 			}
 
-			return git.ErrSystemMalfunction
+			return gitServiceError(logger, service, name, err)
 		}
 
 		if err := git.EnsureDefaultBranch(ctx, scmd.Dir); err != nil {
@@ -330,8 +368,7 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 		}
 
 		if err := service.Handler(ctx, scmd); err != nil {
-			logger.Error("failed to handle git service", "service", service, "err", err, "repo", name)
-			return git.ErrSystemMalfunction
+			return gitServiceError(logger, service, name, err)
 		}
 
 		return nil

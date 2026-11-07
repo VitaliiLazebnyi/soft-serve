@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/access"
 	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
@@ -58,8 +60,10 @@ func RepoCommand() *cobra.Command {
 					return err
 				}
 
+				// An empty repository, or one whose HEAD names a branch
+				// that does not exist, has no default branch to show.
 				head, err := r.HEAD()
-				if err != nil {
+				if err != nil && !errors.Is(err, git.ErrReferenceNotExist) {
 					return err
 				}
 
@@ -85,7 +89,9 @@ func RepoCommand() *cobra.Command {
 				if owner != nil {
 					cmd.Println(strings.TrimSpace(fmt.Sprint("Owner: ", owner.Username())))
 				}
-				cmd.Println("Default Branch:", head.Name().Short())
+				if head != nil {
+					cmd.Println("Default Branch:", head.Name().Short())
+				}
 				if len(branches) > 0 {
 					cmd.Println("Branches:")
 					for _, b := range branches {
@@ -105,4 +111,24 @@ func RepoCommand() *cobra.Command {
 	)
 
 	return cmd
+}
+
+// errRepoEmpty is returned for an empty repository by commands that need a
+// default branch.
+var errRepoEmpty = errors.New("repository is empty")
+
+// repoHead returns the repository's HEAD reference, the default branch. An
+// empty repository, or a HEAD that names a branch that does not exist, such
+// as in a mirror whose remote renamed its default branch, gets an error that
+// says so rather than "reference does not exist".
+func repoHead(r *git.Repository) (*git.Reference, error) {
+	head, err := r.HEAD()
+	if !errors.Is(err, git.ErrReferenceNotExist) {
+		return head, err
+	}
+	if bs, _ := r.Branches(); len(bs) == 0 {
+		return nil, errRepoEmpty
+	}
+	name, _ := r.SymbolicRef(git.HEAD, "")
+	return nil, fmt.Errorf("default branch %q does not exist", git.ReferenceName(name).Short())
 }

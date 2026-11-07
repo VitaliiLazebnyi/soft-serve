@@ -21,6 +21,7 @@ var migrations = []Migration{
 	webhookDeliverySeq,
 	webhookDeliveryRetention,
 	repoAnonymous,
+	lfsObjectSizeBigint,
 }
 
 func execMigration(ctx context.Context, tx *db.Tx, version int, name string, down bool) error {

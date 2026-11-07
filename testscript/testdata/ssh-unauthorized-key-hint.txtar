@@ -1,0 +1,30 @@
+# vi: set ft=conf
+
+# The server accepts any public key, so a session can use a key that is not
+# the admin key passed with -i, for example an agent key ssh offered first.
+# Server admin commands say which key was used and how to make ssh offer
+# only the chosen key (charmbracelet/soft-serve#720).
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# user1's key belongs to no user yet
+! usoft user list
+stderr 'unauthorized: this command needs a server admin, and the key this session authenticated with \(SHA256:[A-Za-z0-9+/]+\) is not an admin''s; if you passed -i to ssh, also pass -o IdentitiesOnly=yes'
+
+# user1's key belongs to a non-admin user
+soft user create user1 -k "$USER1_AUTHORIZED_KEY"
+! usoft user list
+stderr 'SHA256:[A-Za-z0-9+/]+.*IdentitiesOnly=yes'
+! usoft settings anon-access
+stderr 'SHA256:[A-Za-z0-9+/]+.*IdentitiesOnly=yes'
+
+# the admin key still works
+soft user list
+stdout user1
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .
