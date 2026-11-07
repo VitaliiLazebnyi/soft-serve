@@ -77,6 +77,32 @@ ssh:
   # A value of 0 means no timeout.
   idle_timeout: {{ .SSH.IdleTimeout }}
 
+  # The key exchange algorithms, ciphers and MACs the SSH server offers, in
+  # order of preference. When a list is empty, the server offers every
+  # algorithm golang.org/x/crypto/ssh considers secure, which leaves out the
+  # SHA-1 based diffie-hellman-group14-sha1, diffie-hellman-group1-sha1,
+  # diffie-hellman-group-exchange-sha1, hmac-sha1 and hmac-sha1-96. Names
+  # x/crypto does not implement are rejected at startup. To let an old client
+  # that only speaks SHA-1 connect, list the defaults and add the legacy
+  # algorithm, for example:
+  #   kex_algorithms: ["curve25519-sha256", "diffie-hellman-group14-sha1"]
+  #   macs: ["hmac-sha2-256-etm@openssh.com", "hmac-sha2-256", "hmac-sha1"]
+  kex_algorithms:
+{{- range .SSH.KexAlgorithms }}
+    - "{{ . }}"
+{{- else }} []
+{{- end }}
+  ciphers:
+{{- range .SSH.Ciphers }}
+    - "{{ . }}"
+{{- else }} []
+{{- end }}
+  macs:
+{{- range .SSH.MACs }}
+    - "{{ . }}"
+{{- else }} []
+{{- end }}
+
 # The Git daemon configuration.
 git:
   # Enable the Git daemon.
