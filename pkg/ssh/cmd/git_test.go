@@ -261,6 +261,28 @@ func TestRemoveFailedPushRepoKeepsRefsWrittenBetweenAttempts(t *testing.T) {
 	is.True(dirExists(dir))
 }
 
+// Once the repository was deleted, a directory re-created at its path is
+// left alone even while no repository with the name is listed yet.
+func TestRemoveFailedPushRepoLeavesRecreatedDirectory(t *testing.T) {
+	is := is.New(t)
+	dir := emptyBareRepo(t)
+	calls := 0
+	del := func(context.Context, string) error {
+		calls++
+		// The row is gone and the directory was left behind. Another session
+		// then replaces the leftover with a new directory. The leftover is
+		// moved away rather than removed, so the new directory cannot reuse
+		// its inode.
+		is.NoErr(os.Rename(dir, dir+".old"))
+		is.NoErr(os.Mkdir(dir, 0o700))
+		return nil
+	}
+
+	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, noRowOps(del), fastRetry)
+	is.Equal(calls, 1)
+	is.True(dirExists(dir))
+}
+
 // A delete that keeps failing is given up after the retry policy's total.
 func TestRemoveFailedPushRepoGivesUp(t *testing.T) {
 	is := is.New(t)

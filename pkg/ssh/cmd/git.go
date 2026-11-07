@@ -256,12 +256,16 @@ type retryPolicy struct {
 // row exists, since the surviving receive-pack could still write them. Once
 // the row is gone the repository is deleted, and later attempts only remove
 // the leftover directory, and only while no repository with the name is
-// listed: another session may have removed the leftover and created a new
-// repository with the name, which must be left alone.
+// listed and the directory is still the one this push created: another
+// session may have removed the leftover and created a new repository with
+// the name, which must be left alone.
 func removeFailedPushRepo(ctx context.Context, logger *log.Logger, name, dir string, ops failedPushRepoOps, policy retryPolicy) {
 	deadline := time.Now().Add(policy.total)
 	wait := policy.first
 	rowGone := false
+	// orig identifies the directory this push created, so a directory
+	// re-created at the same path is not removed as its leftover.
+	orig, _ := os.Lstat(dir)
 	for {
 		var err error
 		if !rowGone {
@@ -289,6 +293,14 @@ func removeFailedPushRepo(ctx context.Context, logger *log.Logger, name, dir str
 			}
 			if exists {
 				logger.Warn("repo created by a failed push was re-created, leaving it", "repo", name)
+				return
+			}
+			fi, serr := os.Lstat(dir)
+			if errors.Is(serr, fs.ErrNotExist) {
+				return
+			}
+			if serr == nil && !os.SameFile(orig, fi) {
+				logger.Warn("directory of repo created by a failed push was re-created, leaving it", "repo", name)
 				return
 			}
 			err = os.RemoveAll(dir)
