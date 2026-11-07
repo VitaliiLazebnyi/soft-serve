@@ -102,7 +102,7 @@ func parseAllowedHost(raw string) (allowedHost, error) {
 		if err != nil {
 			return allowedHost{}, fmt.Errorf("allowed host %q: invalid network", raw)
 		}
-		return allowedHost{prefix: p.Masked(), port: port}, nil
+		return allowedHost{prefix: unmapPrefix(p).Masked(), port: port}, nil
 	}
 	if addr, err := netip.ParseAddr(host); err == nil {
 		return allowedHost{prefix: netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen()), port: port}, nil
@@ -111,6 +111,49 @@ func parseAllowedHost(raw string) (allowedHost, error) {
 		return allowedHost{}, fmt.Errorf("allowed host %q: not a hostname, address, or network", raw)
 	}
 	return allowedHost{name: canonicalHostname(host), port: port}, nil
+}
+
+// String returns the entry in the form ParseAllowedHosts reads, normalised:
+// a lower-case hostname, an address, or a masked network, with its port.
+func (h allowedHost) String() string {
+	host := h.name
+	if host == "" {
+		if h.prefix.IsSingleIP() {
+			host = h.prefix.Addr().String()
+		} else {
+			host = h.prefix.String()
+		}
+	}
+	if h.port == "" {
+		return host
+	}
+	if strings.Contains(host, ":") {
+		return "[" + host + "]:" + h.port
+	}
+	return host + ":" + h.port
+}
+
+// String returns the normalised entries, comma separated. Two lists that
+// allow the same thing written the same way give the same string.
+func (a AllowedHosts) String() string {
+	parts := make([]string, len(a))
+	for i, h := range a {
+		parts[i] = h.String()
+	}
+	return strings.Join(parts, ",")
+}
+
+// unmapPrefix turns a prefix inside the IPv4-mapped range ::ffff:0:0/96,
+// such as ::ffff:10.0.0.0/104, into the IPv4 prefix it covers (10.0.0.0/8).
+// Addresses are unmapped before they are matched, so the mapped form would
+// otherwise never match anything. A shorter prefix that merely contains the
+// mapped range (::/0, ::/80) is an IPv6 range and is left alone: it matches
+// IPv6 addresses only, as before.
+func unmapPrefix(p netip.Prefix) netip.Prefix {
+	if !p.Addr().Is4In6() || p.Bits() < 96 {
+		return p
+	}
+	return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 }
 
 // lookupFunc resolves a hostname to its addresses, with the signature of
