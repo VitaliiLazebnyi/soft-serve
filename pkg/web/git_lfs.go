@@ -397,7 +397,7 @@ func serviceLfsBasicUpload(w http.ResponseWriter, r *http.Request) {
 	// The content is verified, so a concurrent upload of the same object
 	// renames identical bytes over the same path.
 	pointer := lfs.Pointer{Oid: oid}
-	if err := strg.Rename(tempName, path.Join("objects", pointer.RelativePath())); err != nil {
+	if err := renameLFSObject(strg, tempName, path.Join("objects", pointer.RelativePath()), size); err != nil {
 		logger.Error("error renaming object", "oid", oid, "err", err)
 		renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
 			Message: "internal server error",
@@ -426,6 +426,22 @@ func serviceLfsBasicUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	renderStatus(http.StatusOK)(w, nil)
+}
+
+// renameLFSObject moves the verified temporary file tempName to objPath. On
+// Windows, renaming onto a file that a concurrent upload of the same object
+// is renaming or has open fails. The temporary file was checked against the
+// oid that names objPath, so if objPath now holds a file of the expected
+// size it is the same object, and the rename counts as done.
+func renameLFSObject(strg storage.Storage, tempName, objPath string, size int64) error {
+	err := strg.Rename(tempName, objPath)
+	if err == nil {
+		return nil
+	}
+	if fi, serr := strg.Stat(objPath); serr == nil && fi.Mode().IsRegular() && fi.Size() == size {
+		return nil
+	}
+	return err
 }
 
 // POST: /<repo>.git/info/lfs/objects/basic/verify

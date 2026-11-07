@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/lfs"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/storage"
 	"github.com/charmbracelet/soft-serve/pkg/store"
 )
 
@@ -264,3 +267,52 @@ func TestLFSUploadRepoDeletedMidUpload(t *testing.T) {
 	}
 	e.assertNoTempFiles(t)
 }
+
+// failRenameStorage is a storage whose Rename always fails, as renaming onto
+// a file another upload is renaming or has open does on Windows.
+type failRenameStorage struct{ storage.Storage }
+
+func (failRenameStorage) Rename(string, string) error {
+	return errors.New("rename: access is denied")
+}
+
+// TestRenameLFSObjectExistingDestination checks the rename into objects/
+// when it fails. If a concurrent upload of the same object has already put
+// a file of the expected size there, the object is stored and the upload
+// succeeds; on Windows, one of two identical concurrent uploads used to get
+// a 500. Otherwise the rename error is returned.
+func TestRenameLFSObjectExistingDestination(t *testing.T) {
+	const content = "hello lfs"
+	oid := sha256Hex(content)
+	objPath := path.Join("objects", oid[0:2], oid[2:4], oid)
+	tempName := path.Join("incomplete", oid+"temp")
+
+	cases := []struct {
+		name    string
+		dest    *string // content already at objPath, nil for none
+		wantErr bool
+	}{
+		{"destination holds the object", ptr(content), false},
+		{"no destination", nil, true},
+		{"destination of another size", ptr(content + "!"), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			local := storage.NewLocalStorage(t.TempDir())
+			if _, err := local.Put(tempName, strings.NewReader(content)); err != nil {
+				t.Fatal(err)
+			}
+			if tc.dest != nil {
+				if _, err := local.Put(objPath, strings.NewReader(*tc.dest)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := renameLFSObject(failRenameStorage{local}, tempName, objPath, int64(len(content)))
+			if gotErr := err != nil; gotErr != tc.wantErr {
+				t.Errorf("renameLFSObject => %v, want error %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
