@@ -397,7 +397,8 @@ func (d *Backend) ImportRepository(ctx context.Context, name string, user proto.
 	}
 
 	// LFS objects are fetched only when asked for (--lfs or --lfs-endpoint);
-	// a failure there then fails the import, since the user asked for it.
+	// a failure there then fails the import, since the user asked for it,
+	// except for objects the remote doesn't have (see fetchImportLFSObjects).
 	// The endpoint is resolved before anything is created, so a remote that
 	// has no usable one (scp syntax, IPv6 literals) imports without LFS
 	// instead of being cloned and then torn down.
@@ -526,12 +527,34 @@ func (d *Backend) importRepository(ctx context.Context, user proto.User, imp imp
 		return r, nil
 	}
 
-	if err := StoreRepoMissingLFSObjects(ctx, r, d.db, d.store, client); err != nil {
+	if err := d.fetchImportLFSObjects(ctx, r, client); err != nil {
 		d.logger.Error("failed to store missing lfs objects", "err", err, "path", imp.path)
 		return nil, err
 	}
 
 	return r, nil
+}
+
+// fetchImportLFSObjects fetches the LFS objects of an imported repository.
+// Like git lfs fetch, it only warns about objects the remote can't provide,
+// so one missing object doesn't throw the whole import away. For a mirror,
+// the mirror job tries them again on every sync; a plain import never
+// fetches them again, so they stay missing until someone pushes them. Any
+// other failure fails the import.
+func (d *Backend) fetchImportLFSObjects(ctx context.Context, r proto.Repository, client lfs.Client) error {
+	err := StoreRepoMissingLFSObjects(ctx, r, d.db, d.store, client)
+	var unavailable *lfsObjectsUnavailableError
+	if errors.As(err, &unavailable) {
+		if r.IsMirror() {
+			d.logger.Warn("imported mirror without some lfs objects, mirror syncs will retry them",
+				"repo", r.Name(), "missing", unavailable.count)
+		} else {
+			d.logger.Warn("imported repository without some lfs objects, they will not be fetched again",
+				"repo", r.Name(), "missing", unavailable.count)
+		}
+		return nil
+	}
+	return err
 }
 
 // DeleteRepository deletes a repository.
@@ -572,6 +595,9 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 	// repoID is set once the repository's row is found, and names its LFS
 	// directory.
 	var repoID int64
+	// rowDeleted is set once the repository's row is deleted, and says the
+	// directory is to be removed after the commit.
+	var rowDeleted bool
 	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
 		repom, dberr := d.store.GetRepoByName(ctx, tx, name)
 		if dberr != nil {
@@ -597,9 +623,23 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 			return db.WrapError(err)
 		}
 
-		return os.RemoveAll(rp)
+		rowDeleted = true
+		return nil
 	}); err != nil {
 		return wrapRepoError(err)
+	}
+
+	// Remove the directory only now that the row is gone. Removing it inside
+	// the transaction could leave a repository with a row but a partly
+	// removed directory when the removal failed, or a row with no directory
+	// when the commit failed. The delete has happened once the row is gone,
+	// so a failure here is logged rather than returned. The leftover
+	// directory has no row: it cannot be created, imported or renamed over,
+	// and deleting the repository again removes it.
+	if rowDeleted {
+		if err := os.RemoveAll(rp); err != nil {
+			d.logger.Error("failed to delete repository directory", "repo", name, "path", rp, "err", err)
+		}
 	}
 
 	// Remove the repository's LFS storage only now that its row is gone, so

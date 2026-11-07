@@ -24,6 +24,26 @@ stdout 'ghost3'
 ! stdout 'ghost1'
 ! stdout 'ghost2'
 
+# a push that fails removes the repository its advertisement created
+curl http://localhost:$HTTP_PORT/ghost4.git/info/refs?service=git-receive-pack
+soft repo list
+stdout 'ghost4'
+curl -X POST -H 'Content-Type: application/x-git-receive-pack-request' -d 'garbage' http://localhost:$HTTP_PORT/ghost4.git/git-receive-pack
+soft repo list
+! stdout 'ghost4'
+
+# a push that succeeds keeps the repository
+mkdir ./repo5
+git -c init.defaultBranch=master -C repo5 init
+mkfile ./repo5/README.md '# Hello'
+git -C repo5 add -A
+git -C repo5 commit -m 'first'
+git -C repo5 push http://127.0.0.1:$HTTP_PORT/ghost5 HEAD:refs/heads/master
+soft repo list
+stdout 'ghost5'
+soft repo tree ghost5
+stdout 'README.md'
+
 # stop the server
 [windows] stopserver
 [windows] ! stderr .
