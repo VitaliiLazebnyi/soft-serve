@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -249,13 +250,20 @@ func (t *lfsTransfer) Upload(oid string, size int64, r io.Reader, _ transfer.Arg
 // isLFSObject reports whether objPath is a regular file of size bytes whose
 // SHA-256 is oid.
 func isLFSObject(strg storage.Storage, objPath, oid string, size int64) bool {
+	// Check the type before opening: opening a FIFO blocks until a writer
+	// shows up. The file is checked again once open, in case it changed.
+	regularOfSize := func(fi fs.FileInfo, err error) bool {
+		return err == nil && fi.Mode().IsRegular() && fi.Size() == size
+	}
+	if !regularOfSize(strg.Stat(objPath)) {
+		return false
+	}
 	f, err := strg.Open(objPath)
 	if err != nil {
 		return false
 	}
 	defer f.Close() //nolint: errcheck
-	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() != size {
+	if !regularOfSize(f.Stat()) {
 		return false
 	}
 	hash := sha256.New()
