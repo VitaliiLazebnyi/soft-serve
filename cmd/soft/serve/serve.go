@@ -33,19 +33,17 @@ var (
 		PersistentPostRunE: cmd.CloseDBContext,
 		RunE: cmd.CloseDBOnError(func(c *cobra.Command, _ []string) error {
 			ctx := c.Context()
-			cfg := config.DefaultConfig()
-			if cfg.Exist() {
-				if err := cfg.ParseFile(); err != nil {
-					return fmt.Errorf("parse config file: %w", err)
-				}
-			} else {
-				if err := cfg.WriteConfig(); err != nil {
+			// Use the config the database and backend were set up with,
+			// so hooks and directories land under the same data path.
+			cfg := config.FromContext(ctx)
+			if !cfg.Exist() {
+				// Write the defaults, not cfg, so environment overrides
+				// are not saved to the file.
+				def := config.DefaultConfig()
+				def.DataPath = cfg.DataPath
+				if err := def.WriteConfig(); err != nil {
 					return fmt.Errorf("write config file: %w", err)
 				}
-			}
-
-			if err := cfg.ParseEnv(); err != nil {
-				return fmt.Errorf("parse environment variables: %w", err)
 			}
 
 			// Create custom hooks directory if it doesn't exist
