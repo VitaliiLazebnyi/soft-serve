@@ -17,4 +17,7 @@ type Repo struct {
 	UserID      sql.NullInt64 `db:"user_id"`
 	CreatedAt   time.Time     `db:"created_at"`
 	UpdatedAt   time.Time     `db:"updated_at"`
+	// Anonymous is set when the repository was created without an
+	// account; UserID is then the default admin's.
+	Anonymous bool `db:"anonymous"`
 }

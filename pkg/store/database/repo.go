@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
@@ -14,16 +15,16 @@ type repoStore struct{}
 var _ store.RepositoryStore = (*repoStore)(nil)
 
 // CreateRepo implements store.RepositoryStore.
-func (*repoStore) CreateRepo(ctx context.Context, tx db.Handler, name string, userID int64, projectName string, description string, isPrivate bool, isHidden bool, isMirror bool) error {
+func (*repoStore) CreateRepo(ctx context.Context, tx db.Handler, name string, userID int64, projectName string, description string, isPrivate bool, isHidden bool, isMirror bool, isAnonymous bool) error {
 	name = utils.SanitizeRepo(name)
 	values := []interface{}{
-		name, projectName, description, isPrivate, isMirror, isHidden,
+		name, projectName, description, isPrivate, isMirror, isHidden, isAnonymous,
 	}
-	query := `INSERT INTO repos (name, project_name, description, private, mirror, hidden, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP);`
+	query := `INSERT INTO repos (name, project_name, description, private, mirror, hidden, anonymous, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP);`
 	if userID > 0 {
-		query = `INSERT INTO repos (name, project_name, description, private, mirror, hidden, updated_at, user_id)
-			VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?);`
+		query = `INSERT INTO repos (name, project_name, description, private, mirror, hidden, anonymous, updated_at, user_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?);`
 		values = append(values, userID)
 	}
 
@@ -54,6 +55,41 @@ func (*repoStore) GetUserRepos(ctx context.Context, tx db.Handler, userID int64)
 	query := tx.Rebind("SELECT * FROM repos WHERE user_id = ?;")
 	err := tx.SelectContext(ctx, &repos, query, userID)
 	return repos, db.WrapError(err)
+}
+
+// CountUserRepos implements store.RepositoryStore.
+func (*repoStore) CountUserRepos(ctx context.Context, tx db.Handler, userID int64) (int64, error) {
+	var n int64
+	query := tx.Rebind("SELECT COUNT(*) FROM repos WHERE user_id = ? AND anonymous = ?;")
+	err := tx.GetContext(ctx, &n, query, userID, false)
+	return n, db.WrapError(err)
+}
+
+// CountAnonymousRepos implements store.RepositoryStore.
+func (*repoStore) CountAnonymousRepos(ctx context.Context, tx db.Handler) (int64, error) {
+	var n int64
+	query := tx.Rebind("SELECT COUNT(*) FROM repos WHERE anonymous = ?;")
+	err := tx.GetContext(ctx, &n, query, true)
+	return n, db.WrapError(err)
+}
+
+// LockUserRepos implements store.RepositoryStore. See LockAndCountWebhooks
+// for why FOR NO KEY UPDATE: it does not block the key-share lock that
+// inserting a repository owned by the user takes.
+func (*repoStore) LockUserRepos(ctx context.Context, h db.Handler, userID int64) error {
+	d, ok := h.(interface{ DriverName() string })
+	if !ok {
+		return fmt.Errorf("lock user repos: handler %T does not report its driver", h)
+	}
+	switch driver := d.DriverName(); driver {
+	case "postgres":
+		_, err := h.ExecContext(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE;`, userID)
+		return db.WrapError(err)
+	case "sqlite", "sqlite3":
+		return nil
+	default:
+		return fmt.Errorf("lock user repos: unsupported database driver %q", driver)
+	}
 }
 
 // GetRepoByName implements store.RepositoryStore.

@@ -412,6 +412,12 @@ func withAccess(next http.Handler) http.HandlerFunc {
 		case createThenServe:
 			var cerr error
 			repo, cerr = be.CreateRepository(ctx, repoName, user, proto.RepositoryOptions{})
+			if errors.Is(cerr, proto.ErrRepoLimitReached) {
+				logger.Info("refusing push-to-create", "repo", repoName, "err", cerr)
+				// git shows a text/plain error body to the user.
+				http.Error(w, cerr.Error(), http.StatusForbidden)
+				return
+			}
 			if cerr != nil {
 				logger.Error("failed to create repository", "repo", repoName, "err", cerr)
 				renderInternalServerError(w, r)

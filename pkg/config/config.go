@@ -234,6 +234,15 @@ type Config struct {
 	// upstream Soft Serve: registered users may create repositories.
 	AdminOnlyCreate bool `env:"ADMIN_ONLY_CREATE" yaml:"admin_only_create"`
 
+	// MaxReposPerUser caps how many repositories each user may create, for
+	// every way of creating one: repo create, repo import and
+	// push-to-create. Server admins (admin accounts or initial_admin_keys)
+	// are exempt. Repositories created without an account all count
+	// together as one user. A user at the limit is refused; the
+	// repositories they already have are kept. 0 (the default) means no
+	// limit.
+	MaxReposPerUser int `env:"MAX_REPOS_PER_USER" yaml:"max_repos_per_user"`
+
 	// DefaultRepo is a repository name to create on boot if it does not
 	// already exist. Leave empty to disable.
 	DefaultRepo string `env:"DEFAULT_REPO" yaml:"default_repo"`
@@ -313,6 +322,7 @@ func (c *Config) Environ() []string {
 	}
 
 	envs = append(envs, fmt.Sprintf("SOFT_SERVE_ADMIN_ONLY_CREATE=%t", c.AdminOnlyCreate))
+	envs = append(envs, fmt.Sprintf("SOFT_SERVE_MAX_REPOS_PER_USER=%d", c.MaxReposPerUser))
 
 	return envs
 }
@@ -537,6 +547,10 @@ func (c *Config) Validate() error {
 
 	if c.SSH.ClientKeyPath != "" && !filepath.IsAbs(c.SSH.ClientKeyPath) {
 		c.SSH.ClientKeyPath = filepath.Join(c.DataPath, c.SSH.ClientKeyPath)
+	}
+
+	if c.MaxReposPerUser < 0 {
+		return fmt.Errorf("max_repos_per_user: %d is negative; use 0 for no limit", c.MaxReposPerUser)
 	}
 
 	switch c.SSH.ClientStrictHostKeyChecking {
