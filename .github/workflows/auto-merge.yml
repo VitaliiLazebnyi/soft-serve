@@ -1,0 +1,100 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: auto-merge
+
+# Turns on squash auto-merge for the owner's pull requests into main, so they
+# merge once the main ruleset is met (required checks, CodeQL, resolved review
+# threads). Pull requests that touch CI, build or dependency files are left for
+# a manual merge.
+#
+# Security notes:
+# - pull_request_target runs this file as it is on the default branch, never
+#   the copy in the pull request. The job never checks out or runs PR code.
+# - Acts only when the owner opened the PR from a branch of this repository,
+#   the owner triggered the event, and the PR targets the default branch.
+#   `gh pr merge --auto` merges at once if the PR is already mergeable, so a PR
+#   into an unprotected branch would merge with no checks.
+# - AUTOMERGE_TOKEN is a secret of the `automerge` environment, which only
+#   deploys from main. It is a fine-grained token of the owner for this
+#   repository only, with "Contents" and "Pull requests" read and write.
+#   GITHUB_TOKEN is not used because a merge it starts does not trigger the
+#   push workflows on main.
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - ready_for_review
+      - synchronize
+
+# Runs for the same PR one at a time, in order, so a check of a new push never
+# overlaps with an earlier run that is enabling auto-merge.
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions: {} # the job uses AUTOMERGE_TOKEN, not GITHUB_TOKEN
+
+jobs:
+  auto-merge:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.actor == github.repository_owner &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: automerge
+    timeout-minutes: 5
+    steps:
+      - name: Enable or disable squash auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          ACTION: ${{ github.event.action }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::The AUTOMERGE_TOKEN secret is not set in the automerge environment."
+            exit 1
+          fi
+
+          # Changed paths, including the old path of renamed files. The API
+          # lists at most 3000 files; a longer list counts as sensitive.
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          sensitive=""
+          if [ "$(printf '%s\n' "$files" | grep -c .)" -ge 3000 ]; then
+            sensitive="(3000 or more changed files)"
+          fi
+          while IFS= read -r f; do
+            case "$f" in
+              .github/* | .golangci.yml | .goreleaser* | \
+              go.mod | */go.mod | go.sum | */go.sum | \
+              Dockerfile* | */Dockerfile* | Makefile | */Makefile)
+                sensitive="$sensitive $f"
+                ;;
+            esac
+          done <<< "$files"
+
+          if [ "$ACTION" = "synchronize" ]; then
+            # A new push only turns auto-merge off. It never turns it on, so
+            # a choice the owner made by hand stays in place; a PR that was
+            # left for a manual merge stays that way.
+            if [ -n "$sensitive" ]; then
+              enabled=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')
+              if [ "$enabled" = "true" ]; then
+                gh pr merge "$PR_URL" --disable-auto
+                echo "::notice::Auto-merge disabled: the PR now changes sensitive files and needs a manual merge:$sensitive"
+              fi
+            fi
+            exit 0
+          fi
+
+          if [ -n "$sensitive" ]; then
+            echo "::notice::Auto-merge not enabled: the PR changes sensitive files and needs a manual merge:$sensitive"
+            exit 0
+          fi
+          gh pr merge "$PR_URL" --auto --squash

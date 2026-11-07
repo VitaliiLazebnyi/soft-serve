@@ -28,7 +28,7 @@ func JWTCommand() *cobra.Command {
 
 			user := proto.UserFromContext(ctx)
 			if user == nil {
-				return proto.ErrUserNotFound
+				return errUnknownKey(ctx)
 			}
 
 			// Mint the spelling the HTTP router checks against.
