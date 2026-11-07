@@ -343,11 +343,14 @@ func serviceLfsBasicUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	size, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
-	if err != nil || size < 0 {
-		logger.Error("error parsing content length", "err", err)
-		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
-			Message: "invalid content length",
+	// The declared size is the content length. net/http has already rejected
+	// an invalid Content-Length header; -1 means the length is unknown, as
+	// with a chunked body, and the object cannot be checked against it.
+	size := r.ContentLength
+	if size < 0 {
+		logger.Error("missing content length", "oid", oid)
+		renderJSON(w, http.StatusLengthRequired, lfs.ErrorResponse{
+			Message: "content length required",
 		})
 		return
 	}

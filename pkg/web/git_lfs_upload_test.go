@@ -17,6 +17,7 @@ import (
 
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
+	"github.com/charmbracelet/soft-serve/pkg/lfs"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/store"
 )
@@ -126,6 +127,39 @@ func TestLFSUploadRejectsMismatchedContent(t *testing.T) {
 			e.assertNoTempFiles(t)
 		})
 	}
+}
+
+// TestLFSUploadRequiresContentLength checks an upload whose length is unknown,
+// such as a chunked body. net/http drops the Content-Length header then, so
+// the handler must not rely on the header: it answers 411, since the object
+// cannot be checked against a declared size, and stores nothing.
+func TestLFSUploadRequiresContentLength(t *testing.T) {
+	e := newLFSUploadEnv(t)
+	const content = "hello lfs"
+	oid := sha256Hex(content)
+
+	req := httptest.NewRequestWithContext(e.ctx, http.MethodPut,
+		"/repo.git/info/lfs/objects/basic/"+oid, strings.NewReader(content))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Authorization", "token "+e.token)
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	w := httptest.NewRecorder()
+	e.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusLengthRequired {
+		t.Fatalf("got status %d, want 411: %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, lfs.MediaType) {
+		t.Errorf("Content-Type = %q, want an LFS JSON error", ct)
+	}
+	if _, err := os.Stat(e.objectPath(oid)); !os.IsNotExist(err) {
+		t.Errorf("object stored without a content length (stat err: %v)", err)
+	}
+	if _, err := e.datastore.GetLFSObjectByOid(e.ctx, db.FromContext(e.ctx), e.repo.ID(), oid); err == nil {
+		t.Error("object recorded without a content length")
+	}
+	e.assertNoTempFiles(t)
 }
 
 // TestLFSUploadStoresVerifiedObject checks the happy path, including a
