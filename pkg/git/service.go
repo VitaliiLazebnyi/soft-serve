@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,9 +83,11 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 		cmd.Env = append(cmd.Env, scmd.Env...)
 	}
 
-	// killed records that git was killed because the context was done, which
-	// the exit status cannot tell on every platform: on Windows a killed
-	// process exits with status 1.
+	// killed records that git was killed because the context was done. On
+	// Windows a killed process exits with status 1, so the exit status cannot
+	// tell a kill from a failure there. It is not used on Unix: killing a git
+	// that already exited but was not yet reaped also succeeds, and there the
+	// signal in the exit status tells the two apart.
 	var killed atomic.Bool
 	cmd.Cancel = func() error {
 		err := cmd.Process.Kill()
@@ -93,7 +96,8 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 		}
 		return err
 	}
-	// If git does not exit after it was killed, stop waiting for it.
+	// Kill git as a fallback if it is still running this long after the
+	// context is done, for when CmdFunc replaces Cancel.
 	cmd.WaitDelay = waitDelay
 
 	if scmd.CmdFunc != nil {
@@ -219,23 +223,26 @@ func logCopyError(ctx context.Context, stream string, err error) {
 	log.Errorf("gitServiceHandler: failed to copy %s: %v", stream, err)
 }
 
-// waitDelay bounds how long Wait waits for git to exit after it was killed.
+// waitDelay is how long after the context is done git is killed as a
+// fallback if Cancel did not stop it.
 const waitDelay = 5 * time.Second
 
 // stoppedByContext reports whether err, returned by Wait for a command run
 // with ctx, comes from the command being stopped because ctx was done rather
-// than from the command failing on its own. killed reports that the command
-// was killed for the context. A command killed for the context was also
-// terminated by a signal on Unix; one that exited with a status, even after
-// the context was done, failed on its own and its error is the one to
-// report. Wait returns the context error itself when the command exits
-// successfully after it was told to stop.
+// than from the command failing on its own. Wait returns the context error
+// itself when the command exits successfully after it was told to stop.
+//
+// killed reports that the command was killed for the context, and is only
+// trusted on Windows, where a killed process exits with a status. On Unix a
+// command killed for the context was terminated by a signal; one that exited
+// with a status, even after the context was done, failed on its own and its
+// error is the one to report.
 func stoppedByContext(ctx context.Context, err error, killed bool) bool {
 	ctxErr := ctx.Err()
 	if ctxErr == nil {
 		return false
 	}
-	if killed || errors.Is(err, ctxErr) {
+	if (killed && runtime.GOOS == "windows") || errors.Is(err, ctxErr) {
 		return true
 	}
 	var exitErr *exec.ExitError
