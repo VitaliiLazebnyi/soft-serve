@@ -8,13 +8,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/matryer/is"
 )
+
+// gitTestTimeout bounds the waits in these tests, so a handler that never
+// returns fails the test instead of hanging it.
+const gitTestTimeout = 30 * time.Second
 
 // cancelledPushToCreate runs a push to the missing repository "fresh" as an
 // admin, which creates it, and cancels the session once receive-pack has sent
@@ -50,9 +56,18 @@ func cancelledPushToCreate(t *testing.T, beforeCancel func(dir string)) (context
 	}()
 
 	// The repository exists once the advertisement starts.
-	_, err := bufio.NewReader(stdout).ReadString('\n')
-	is.NoErr(err)
-	_, err = be.Repository(ctx, "fresh")
+	lc := make(chan error, 1)
+	go func() {
+		_, err := bufio.NewReader(stdout).ReadString('\n')
+		lc <- err
+	}()
+	select {
+	case err := <-lc:
+		is.NoErr(err)
+	case <-time.After(gitTestTimeout):
+		t.Fatal("timed out reading the advertisement")
+	}
+	_, err := be.Repository(ctx, "fresh")
 	is.NoErr(err)
 
 	if beforeCancel != nil {
@@ -62,7 +77,11 @@ func cancelledPushToCreate(t *testing.T, beforeCancel func(dir string)) (context
 	cancel()
 	go io.Copy(io.Discard, stdout) //nolint: errcheck
 
-	err = <-errc
+	select {
+	case err = <-errc:
+	case <-time.After(gitTestTimeout):
+		t.Fatal("timed out waiting for receive-pack to return")
+	}
 	is.True(errors.Is(err, context.Canceled))
 
 	return ctx, be
@@ -71,6 +90,12 @@ func cancelledPushToCreate(t *testing.T, beforeCancel func(dir string)) (context
 // A push that creates a repository and is then cancelled, because the client
 // went away, must not leave the new repository behind.
 func TestCancelledPushRemovesCreatedRepository(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The git wrapper on Windows runs receive-pack in a child process
+		// that outlives the killed wrapper for a moment and holds the
+		// repository directory, so the delete can fail there.
+		t.Skip("the killed git's child can still hold the repository on windows")
+	}
 	is := is.New(t)
 	ctx, be := cancelledPushToCreate(t, nil)
 
@@ -86,7 +111,7 @@ func TestCancelledPushKeepsCreatedRepositoryWithRefs(t *testing.T) {
 	is := is.New(t)
 	ctx, be := cancelledPushToCreate(t, func(dir string) {
 		git := func(stdin string, args ...string) string {
-			cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+			cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", dir}, args...)...)
 			cmd.Stdin = strings.NewReader(stdin)
 			cmd.Env = append(os.Environ(),
 				"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
