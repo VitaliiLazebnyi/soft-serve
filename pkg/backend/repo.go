@@ -177,7 +177,10 @@ func (d *Backend) createRepository(ctx context.Context, name string, user proto.
 	}
 
 	if _, err := git.Init(rp, true); err != nil {
-		d.logger.Debug("failed to create repository", "err", err)
+		if !errors.Is(err, git.ErrNotAGitRepository) {
+			// openRepoError logs the other case.
+			d.logger.Debug("failed to create repository", "err", err)
+		}
 		os.RemoveAll(rp) //nolint:errcheck
 		return nil, openRepoError(d.logger, err, rp)
 	}

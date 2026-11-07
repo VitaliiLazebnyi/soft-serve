@@ -104,8 +104,11 @@ func TestOpenReportsGitReason(t *testing.T) {
 	}
 
 	// Makes git treat the repository as owned by someone else, as it would
-	// on a volume owned by another user.
+	// on a volume owned by another user. System and global config are not
+	// read, so a machine-wide safe.directory cannot accept the repository.
 	t.Setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 
 	_, err := Open(repoPath)
 	if !errors.Is(err, ErrNotAGitRepository) {
