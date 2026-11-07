@@ -17,7 +17,8 @@ import (
 // it.
 //
 // When SOFT_SERVE_TEST_WEBHOOK_ADDR is set, every webhook request is dialed to
-// that address instead of the webhook's host. Webhook URLs are still validated
+// that address instead of the webhook's host, whatever
+// webhook.allowed_hosts says. Webhook URLs are still validated
 // as usual, so the tests use public addresses, but nothing leaves the machine:
 // the requests reach a receiver the test runs on loopback.
 //
@@ -32,6 +33,7 @@ func init() {
 	if addr == "" {
 		return
 	}
+	useOnlySecureHTTPClient = true
 	secureHTTPClient = &http.Client{
 		Timeout: ssrf.ClientTimeout,
 		Transport: &http.Transport{

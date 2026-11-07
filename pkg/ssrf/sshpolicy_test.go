@@ -263,7 +263,7 @@ func TestLookupsAreBounded(t *testing.T) {
 		validate func(lookupFunc) error
 	}{
 		{"ValidateURL", func(l lookupFunc) error {
-			return validateURL("https://hooks.example/x", l)
+			return validateURL("https://hooks.example/x", nil, l)
 		}},
 		{"ValidateGitRemote https", func(l lookupFunc) error {
 			_, err := ValidateGitRemote("https://git.example/x.git", GitRemotePolicy{lookup: l})

@@ -173,6 +173,30 @@ lfs:
 jobs:
   mirror_pull: "{{ .Jobs.MirrorPull }}"
 
+# Repository webhook configuration.
+webhook:
+  # Private and internal destinations webhooks may be sent to. Webhooks to
+  # loopback, private networks and other internal addresses are refused
+  # unless listed here. Entries are hostnames, IP addresses, or CIDR ranges,
+  # each with an optional port (a URL without a port uses 80 for http and
+  # 443 for https). An IP or CIDR entry allows the addresses it covers,
+  # whatever hostname the webhook URL names. A hostname entry allows that
+  # name to resolve to loopback, RFC1918, CGNAT or IPv6 unique local
+  # addresses, and the name is resolved again for every delivery, so list
+  # only names whose DNS you trust. Link-local and cloud metadata addresses
+  # (such as 169.254.169.254) are reachable only through an IP or CIDR entry
+  # inside their own range; a broad range such as 0.0.0.0/0 does not open
+  # them. The list is checked when a webhook is created or updated, and
+  # again on every delivery, so existing webhooks follow the current list.
+  allowed_hosts:
+{{- range .Webhook.AllowedHosts }}
+    - "{{ . }}"
+{{- else }} []
+    # - "jenkins.internal.example"
+    # - "10.0.0.0/8"
+    # - "127.0.0.1:8080"
+{{- end }}
+
 # Additional admin keys.
 #initial_admin_keys:
 #  - "ssh-rsa AAAAB3NzaC1yc2..."

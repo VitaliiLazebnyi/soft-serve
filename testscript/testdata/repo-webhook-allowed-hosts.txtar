@@ -1,0 +1,63 @@
+# vi: set ft=conf
+
+# webhook.allowed_hosts lets webhooks reach the internal addresses it lists.
+# The requests go straight to the script's loopback receiver through the
+# SSRF-protected client, so the test dial override is turned off.
+env RCV=$SOFT_SERVE_TEST_WEBHOOK_ADDR
+env SOFT_SERVE_TEST_WEBHOOK_ADDR=
+env SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS=127.0.0.1
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+soft repo create repo-internal
+
+# a listed address can be used; unlisted internal ones and the metadata
+# service are still refused
+soft repo webhook create repo-internal http://$RCV/hooks/internal -e push
+! soft repo webhook create repo-internal http://10.0.0.1/hook -e push
+stderr 'private or internal'
+! soft repo webhook create repo-internal http://169.254.169.254/latest/meta-data/ -e push
+stderr 'private or internal'
+! soft repo webhook create repo-internal http://localhost:8080/hook -e push
+stderr 'private or internal'
+soft repo webhook list repo-internal
+stdout -count=1 'hooks/internal'
+
+# a push is delivered to the internal receiver
+git clone ssh://localhost:$SSH_PORT/repo-internal repo-internal
+mkfile ./repo-internal/README.md 'foobar'
+git -C repo-internal add -A
+git -C repo-internal commit -m 'first'
+git -C repo-internal push origin HEAD
+webhook-received
+[windows] dos2unix received-first.txt
+cmp stdout received-first.txt
+
+# restart with the list empty: the stored webhook is refused at send time
+stopserver
+env SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS=
+exec soft serve &
+ensureserverrunning SSH_PORT
+
+mkfile ./repo-internal/README.md 'second'
+git -C repo-internal commit -am 'second'
+git -C repo-internal push origin HEAD
+webhook-received
+cmp stdout received-first.txt
+soft repo webhook deliver list repo-internal 1
+stdout -count=1 '✅.*push'
+stdout -count=1 '❌.*push'
+
+# and a new webhook to it is refused at create
+! soft repo webhook create repo-internal http://$RCV/hooks/again -e push
+stderr 'private or internal'
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .
+
+-- received-first.txt --
+push /hooks/internal
