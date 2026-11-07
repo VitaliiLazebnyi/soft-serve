@@ -437,6 +437,9 @@ func parseEnv(cfg *Config) error {
 	}); err != nil {
 		return fmt.Errorf("parse environment variables: %w", err)
 	}
+	if _, ok := os.LookupEnv("SOFT_SERVE_INITIAL_ADMIN_KEYS"); ok {
+		cfg.InitialAdminKeys = trimOuterQuotes(cfg.InitialAdminKeys)
+	}
 
 	// The env parser leaves the list alone when the variable is unset and
 	// replaces it otherwise. Either way, the env keys come first, followed
@@ -780,6 +783,46 @@ func trimQuotes(s string) string {
 		return strings.TrimSpace(s[1 : len(s)-1])
 	}
 	return s
+}
+
+// trimOuterQuotes removes a pair of quotes that wraps the whole
+// SOFT_SERVE_INITIAL_ADMIN_KEYS value rather than one entry. The value is
+// split on newlines before trimQuotes sees the entries, so several keys in
+// one pair of quotes, as in "- SOFT_SERVE_INITIAL_ADMIN_KEYS='key1\nkey2'",
+// leave an unmatched quote at the start of the first entry and at the end of
+// the last one, and both keys would be ignored or misread. It strips them
+// only when both are unmatched and are the same quote, so entries that are
+// each quoted are left to trimQuotes. It runs before the config file's keys
+// are merged in, so the last entry is the environment's.
+func trimOuterQuotes(aks []string) []string {
+	first, last := -1, -1
+	for i, entry := range aks {
+		if strings.TrimSpace(entry) != "" {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first < 0 || first == last {
+		return aks
+	}
+	head := strings.TrimSpace(aks[first])
+	tail := strings.TrimSpace(aks[last])
+	q := head[0]
+	if q != '"' && q != '\'' {
+		return aks
+	}
+	if len(head) >= 2 && head[len(head)-1] == q {
+		return aks // the first entry is quoted on its own
+	}
+	if tail[len(tail)-1] != q || (len(tail) >= 2 && tail[0] == q) {
+		return aks // the last entry is not closed, or is quoted on its own
+	}
+	out := slices.Clone(aks)
+	out[first] = head[1:]
+	out[last] = tail[:len(tail)-1]
+	return out
 }
 
 // looksLikePath reports whether an entry that is not a key names a file. An
