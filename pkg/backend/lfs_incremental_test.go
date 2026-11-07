@@ -405,3 +405,59 @@ func TestSyncRepoLFSObjectsPeriodicFullScan(t *testing.T) {
 	is.Equal(len(got), 1)
 	is.Equal(got[0].exclude, nil)
 }
+
+// TestSyncRepoLFSObjectsRewrittenHistory verifies that a scan of the new
+// history after upstream replaced it with unrelated history only finds and
+// fetches the objects of the new history.
+func TestSyncRepoLFSObjectsRewrittenHistory(t *testing.T) {
+	is := is.New(t)
+	lt := newLFSTest(t, 2)
+	scans := recordLFSScans(t)
+	is.NoErr(lt.sync())
+	tip1 := lt.git(t, "rev-parse", "HEAD")
+	scans()
+
+	// Force-push an orphan branch over main.
+	lt.git(t, "checkout", "-q", "--orphan", "rewritten")
+	lt.git(t, "rm", "-rqf", ".")
+	p := lt.commitObject(t)
+	lt.git(t, "push", "-q", "--force", lt.be.repoPath("lfs-repo"), "HEAD:main")
+	tip2 := lt.git(t, "rev-parse", "HEAD")
+
+	is.NoErr(lt.sync())
+	got := scans()
+	is.Equal(len(got), 1)
+	is.Equal(got[0].include, []string{tip2})
+	is.Equal(got[0].exclude, []string{tip1})
+	is.Equal(got[0].oids, oids(p))
+	is.Equal(lt.client.requested, oids(p))
+	_, err := os.Stat(lt.path(p))
+	is.NoErr(err)
+
+	is.NoErr(lt.sync())
+	is.Equal(len(scans()), 0)
+}
+
+// TestSyncRepoLFSObjectsTagOnly verifies that the objects of history only
+// a tag reaches are scanned and fetched.
+func TestSyncRepoLFSObjectsTagOnly(t *testing.T) {
+	is := is.New(t)
+	lt := newLFSTest(t, 1)
+	scans := recordLFSScans(t)
+	is.NoErr(lt.sync())
+	scans()
+
+	lt.git(t, "checkout", "-q", "-b", "side")
+	p := lt.commitObject(t)
+	lt.git(t, "tag", "-a", "-m", "release", "v1")
+	lt.git(t, "push", "-q", lt.be.repoPath("lfs-repo"), "refs/tags/v1")
+
+	is.NoErr(lt.sync())
+	got := scans()
+	is.Equal(len(got), 1)
+	is.True(got[0].exclude != nil)
+	is.Equal(got[0].oids, oids(p))
+	is.Equal(lt.client.requested, oids(p))
+	_, err := os.Stat(lt.path(p))
+	is.NoErr(err)
+}
