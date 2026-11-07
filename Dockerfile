@@ -21,10 +21,13 @@ EXPOSE 23233/tcp
 # Git
 EXPOSE 9418/tcp
 
-# Run soft under tini so it is not PID 1. Git detaches background children
-# (e.g. "git maintenance run --auto --detach" after a push or fetch) that are
-# re-parented to PID 1 when they finish; tini reaps them, soft would not.
-ENTRYPOINT [ "/sbin/tini", "--", "/usr/local/bin/soft", "serve" ]
+# Run soft under tini so it is not PID 1. Git starts detached background
+# processes (e.g. "git maintenance run --auto --detach" after a push or fetch).
+# When the git process that started one exits, the orphan is re-parented to
+# PID 1, which must reap it when it exits in turn; tini does, soft would not.
+# -s registers tini as a child subreaper, so it still reaps them (and does not
+# warn) when the container is started with --init and tini is not PID 1.
+ENTRYPOINT [ "/sbin/tini", "-s", "--", "/usr/local/bin/soft", "serve" ]
 
 RUN apk update && apk add --update git bash openssh tini && rm -rf /var/cache/apk/*
 
