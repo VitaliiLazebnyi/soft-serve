@@ -14,7 +14,8 @@ import (
 	"github.com/charmbracelet/soft-serve/git"
 )
 
-// SearchPointerBlobs scans the whole repository for LFS pointer files
+// SearchPointerBlobs scans the whole repository for LFS pointer files. It
+// sends at most one error on errChan, which must have room for it.
 func SearchPointerBlobs(ctx context.Context, repo *git.Repository, pointerChan chan<- PointerBlob, errChan chan<- error) {
 	basePath := repo.Path
 
@@ -44,6 +45,16 @@ func SearchPointerBlobs(ctx context.Context, repo *git.Repository, pointerChan c
 	go blobsFromRevListObjects(revListReader, shasToCheckWriter, &wg)
 	go revListAllObjects(ctx, revListWriter, &wg, basePath, errChan)
 	wg.Wait()
+
+	// A canceled scan stops early, possibly after git rev-list finished
+	// cleanly, so report it rather than let it pass for a complete one.
+	// Don't block if rev-list already reported an error.
+	if err := ctx.Err(); err != nil {
+		select {
+		case errChan <- err:
+		default:
+		}
+	}
 
 	close(pointerChan)
 	close(errChan)
@@ -98,7 +109,11 @@ loop:
 			continue
 		}
 
-		pointerChan <- PointerBlob{Hash: sha, Pointer: pointer}
+		select {
+		case pointerChan <- PointerBlob{Hash: sha, Pointer: pointer}:
+		case <-ctx.Done():
+			break loop
+		}
 	}
 }
 
