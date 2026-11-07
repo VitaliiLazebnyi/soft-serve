@@ -580,7 +580,10 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 	// files of unfinished uploads and objects without a row along with the
 	// recorded ones. Repository ids are never reused, so no other repository
 	// can have written here. The row is already gone, so a failure is logged
-	// rather than returned.
+	// rather than returned. An LFS upload, import or mirror sync still running
+	// for this repository can recreate the directory after it is removed,
+	// leaving an orphan; since the id is not reused, no other repository can
+	// reach it.
 	if repoID != 0 {
 		lfsPath := filepath.Join(d.cfg.DataPath, "lfs", strconv.FormatInt(repoID, 10))
 		if err := os.RemoveAll(lfsPath); err != nil {

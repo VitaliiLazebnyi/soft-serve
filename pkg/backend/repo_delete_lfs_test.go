@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -98,6 +99,11 @@ func TestDeleteRepositoryFailureKeepsLFSObjects(t *testing.T) {
 // Once the row is gone the delete has happened, so a directory that cannot be
 // removed is logged rather than reported as a failed delete.
 func TestDeleteRepositoryLogsLFSRemovalFailure(t *testing.T) {
+	// As in os/removeall_test.go: on Windows a mode only sets the read-only
+	// attribute, which does not stop removal, and root ignores the mode.
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not prevent removal on Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root can remove the directory regardless of its mode")
 	}
