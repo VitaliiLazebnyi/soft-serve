@@ -14,7 +14,7 @@ func renameCommand() *cobra.Command {
 		Aliases:           []string{"mv", "move"},
 		Short:             "Rename an existing repository",
 		Args:              cobra.ExactArgs(2),
-		PersistentPreRunE: requireRepo(access.ReadWriteAccess),
+		PersistentPreRunE: requireRepo(access.AdminAccess),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			be := backend.FromContext(ctx)

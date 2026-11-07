@@ -29,11 +29,29 @@ func (l cronLogger) Error(err error, msg string, keysAndValues ...interface{}) {
 	l.logger.Error(msg, append(keysAndValues, "err", err)...)
 }
 
+// skipLogger logs the runs skipped by cron.SkipIfStillRunning. Unlike
+// cronLogger it logs them at Info: a skipped run means a job is taking longer
+// than its interval, which an operator should be able to see.
+type skipLogger struct {
+	cronLogger
+}
+
+// Info logs a skipped run.
+func (l skipLogger) Info(_ string, keysAndValues ...interface{}) {
+	l.logger.Info("skipping job run, the previous run is still in progress", keysAndValues...)
+}
+
 // NewScheduler returns a new Cron.
+//
+// A job run is skipped while the previous run of the same job is still going,
+// so a job that takes longer than its interval does not pile up runs.
 func NewScheduler(ctx context.Context) *Scheduler {
 	logger := cronLogger{log.FromContext(ctx).WithPrefix("cron")}
 	return &Scheduler{
-		Cron: cron.New(cron.WithLogger(logger)),
+		Cron: cron.New(
+			cron.WithLogger(logger),
+			cron.WithChain(cron.SkipIfStillRunning(skipLogger{logger})),
+		),
 	}
 }
 
