@@ -1,6 +1,9 @@
 package web
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -340,17 +343,8 @@ func serviceLfsBasicUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pointer := lfs.Pointer{Oid: oid}
-	if _, err := strg.Put(path.Join("objects", pointer.RelativePath()), r.Body); err != nil {
-		logger.Error("error writing object", "oid", oid, "err", err)
-		renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
-			Message: "internal server error",
-		})
-		return
-	}
-
 	size, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
-	if err != nil {
+	if err != nil || size < 0 {
 		logger.Error("error parsing content length", "err", err)
 		renderJSON(w, http.StatusBadRequest, lfs.ErrorResponse{
 			Message: "invalid content length",
@@ -358,12 +352,74 @@ func serviceLfsBasicUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := datastore.CreateLFSObject(ctx, dbx, repo.ID(), oid, size); err != nil {
-		logger.Error("error creating object", "oid", oid, "err", err)
+	// Write to a temporary file first and only move it into place once the
+	// content matches the oid and the declared size. Reading one byte past
+	// the declared size is enough to tell an oversized body apart.
+	randBytes := make([]byte, 12)
+	if _, err := rand.Read(randBytes); err != nil {
+		logger.Error("error generating temp name", "err", err)
 		renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
 			Message: "internal server error",
 		})
 		return
+	}
+	tempName := path.Join("incomplete", fmt.Sprintf("%s%x", oid, randBytes))
+	defer strg.Delete(tempName) //nolint: errcheck
+
+	hash := sha256.New()
+	written, err := strg.Put(tempName, io.TeeReader(io.LimitReader(r.Body, size+1), hash))
+	if err != nil {
+		logger.Error("error writing object", "oid", oid, "err", err)
+		renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
+			Message: "internal server error",
+		})
+		return
+	}
+
+	if written != size {
+		logger.Error("object size mismatch", "oid", oid, "size", size, "written", written)
+		renderJSON(w, http.StatusUnprocessableEntity, lfs.ErrorResponse{
+			Message: "object size does not match content length",
+		})
+		return
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != oid {
+		logger.Error("object hash mismatch", "oid", oid)
+		renderJSON(w, http.StatusUnprocessableEntity, lfs.ErrorResponse{
+			Message: "object content does not match oid",
+		})
+		return
+	}
+
+	// The content is verified, so a concurrent upload of the same object
+	// renames identical bytes over the same path.
+	pointer := lfs.Pointer{Oid: oid}
+	if err := strg.Rename(tempName, path.Join("objects", pointer.RelativePath())); err != nil {
+		logger.Error("error renaming object", "oid", oid, "err", err)
+		renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
+			Message: "internal server error",
+		})
+		return
+	}
+
+	if err := datastore.CreateLFSObject(ctx, dbx, repo.ID(), oid, size); err != nil {
+		// A concurrent upload of the same object may have recorded it first.
+		// WrapError also maps foreign key violations to ErrDuplicateKey, so
+		// only treat it as success if the row is really there.
+		if !errors.Is(err, db.ErrDuplicateKey) {
+			logger.Error("error creating object", "oid", oid, "err", err)
+			renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
+				Message: "internal server error",
+			})
+			return
+		}
+		if _, gerr := datastore.GetLFSObjectByOid(ctx, dbx, repo.ID(), oid); gerr != nil {
+			logger.Error("error creating object", "oid", oid, "err", err, "lookup_err", gerr)
+			renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
+				Message: "internal server error",
+			})
+			return
+		}
 	}
 
 	renderStatus(http.StatusOK)(w, nil)
