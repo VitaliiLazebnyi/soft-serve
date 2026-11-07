@@ -49,6 +49,10 @@ stderr 'accepts 1 arg\(s\), received 2'
 stderr 'invalid public key'
 ! soft user info foo
 
+# end on a command that succeeds: on windows, `! stderr .` after stopserver
+# checks the stderr of the last command
+soft user list
+
 # stop the server
 [windows] stopserver
 [windows] ! stderr .
