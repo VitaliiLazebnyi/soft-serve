@@ -1,0 +1,60 @@
+# vi: set ft=conf
+
+# The ssh client sends the remote command as one string and the server
+# splits it on spaces. In testscript only single quotes group words, so
+# $USER1_AUTHORIZED_KEY below reaches the server as two unquoted words,
+# while "$USER1_AUTHORIZED_KEY" keeps its double quotes and arrives as one
+# quoted argument.
+
+# convert crlf to lf on windows
+[windows] dos2unix info.txt
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# unquoted key after the username
+soft user create foo -k $USER1_AUTHORIZED_KEY
+soft user info foo
+cmpenv stdout info.txt
+soft user delete foo
+
+# unquoted key before the username
+soft user create -k $USER1_AUTHORIZED_KEY foo
+soft user info foo
+cmpenv stdout info.txt
+soft user delete foo
+
+# unquoted key with a comment, after the username
+soft user create foo --key $USER1_AUTHORIZED_KEY some comment
+soft user info foo
+cmpenv stdout info.txt
+soft user delete foo
+
+# quoted key still works
+soft user create foo --key "$USER1_AUTHORIZED_KEY"
+soft user info foo
+cmpenv stdout info.txt
+soft user delete foo
+
+# extra arguments are still rejected without -k or with a complete key
+! soft user create foo bar
+stderr 'accepts 1 arg\(s\), received 2'
+! soft user create foo --key "$USER1_AUTHORIZED_KEY" bar
+stderr 'accepts 1 arg\(s\), received 2'
+
+# a key that does not parse either way is rejected
+! soft user create foo -k ssh-ed25519 notakey
+stderr 'invalid public key'
+! soft user info foo
+
+# stop the server
+[windows] stopserver
+[windows] ! stderr .
+
+-- info.txt --
+Username: foo
+Admin: false
+Public keys:
+  $USER1_AUTHORIZED_KEY
