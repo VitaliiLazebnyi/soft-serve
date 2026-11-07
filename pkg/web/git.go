@@ -383,7 +383,7 @@ func withCaller(next http.Handler) http.HandlerFunc {
 
 // withAccess authenticates the caller and authorizes them for the requested
 // repository. A repository created by push-to-create is recorded in pending,
-// which removes it if the push ends, or never arrives, without any ref.
+// which removes it if the push fails, or never arrives, without any ref.
 func withAccess(pending *pushCreates, next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r, err := identify(r)
@@ -432,7 +432,7 @@ func withAccess(pending *pushCreates, next http.Handler) http.HandlerFunc {
 
 			ctx = proto.WithRepositoryContext(ctx, repo)
 			r = r.WithContext(ctx)
-			pending.add(ctx, repoName, mux.Vars(r)["dir"])
+			pending.add(ctx, repoName, repo.ID(), mux.Vars(r)["dir"])
 		case denyUnreadable:
 			denyRead(w, r, err, lfsJSON)
 			return
@@ -448,8 +448,10 @@ func withAccess(pending *pushCreates, next http.Handler) http.HandlerFunc {
 			return
 		}
 
-		if done := pending.begin(repoName); done != nil {
-			defer done(service == git.ReceivePackService && file == git.ReceivePackService.String())
+		ctx, done := pending.begin(ctx, repoName)
+		if done != nil {
+			defer done()
+			r = r.WithContext(ctx)
 		}
 
 		next.ServeHTTP(w, r)
@@ -530,6 +532,9 @@ func serviceRpc(w http.ResponseWriter, r *http.Request) {
 
 	if err := service.Handler(ctx, cmd); err != nil {
 		logger.Errorf("failed to handle service: %v", err)
+		if service == git.ReceivePackService {
+			markPushFailed(ctx)
+		}
 		return
 	}
 

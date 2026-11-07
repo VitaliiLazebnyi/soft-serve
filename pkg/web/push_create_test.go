@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/soft-serve/pkg/access"
 	"github.com/charmbracelet/soft-serve/pkg/config"
+	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/matryer/is"
 )
 
@@ -43,9 +45,19 @@ func gitRun(t *testing.T, args ...string) {
 	}
 }
 
+// eventually waits until the repository name is gone, or a deadline.
+func (f *oracleFixture) eventuallyGone(name string) bool {
+	deadline := time.Now().Add(10 * time.Second)
+	for f.exists(name) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	return !f.exists(name)
+}
+
 // A repository created by an HTTP push advertisement is removed when the
 // push that follows fails, or never arrives, and leaves no ref. One that has
-// refs is kept.
+// refs is kept, and so is one that a push left without refs but without
+// failing, such as the probe git sends before a large pack.
 func TestHTTPPushCreateCleanup(t *testing.T) {
 	is := is.New(t)
 	f := newOracleFixture(t)
@@ -55,22 +67,26 @@ func TestHTTPPushCreateCleanup(t *testing.T) {
 		is.Equal(f.do(http.MethodGet, "/"+name+".git/info/refs?service=git-receive-pack", auth).Code, http.StatusOK)
 		is.True(f.exists(name))
 	}
+	old := pushCreateTimeout
+	pushCreateTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { pushCreateTimeout = old })
 
-	// The push fails.
+	// The push fails: the repository is removed at once.
 	advertise("failed")
 	is.Equal(f.push(t, "failed", auth, "garbage"), http.StatusOK)
 	is.True(!f.exists("failed"))
 
+	// A push that updates no ref and does not fail, like git's probe
+	// before a pack larger than http.postBuffer, keeps the repository for
+	// the real push. With no push after it, it goes after the timeout.
+	advertise("probed")
+	is.Equal(f.push(t, "probed", auth, "0000"), http.StatusOK)
+	is.True(f.exists("probed"))
+	is.True(f.eventuallyGone("probed"))
+
 	// The push never arrives.
-	old := pushCreateTimeout
-	pushCreateTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { pushCreateTimeout = old })
 	advertise("abandoned")
-	deadline := time.Now().Add(10 * time.Second)
-	for f.exists("abandoned") && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	is.True(!f.exists("abandoned"))
+	is.True(f.eventuallyGone("abandoned"))
 
 	// A repository that got refs is kept, even after a failed push and
 	// the timeout.
@@ -83,4 +99,24 @@ func TestHTTPPushCreateCleanup(t *testing.T) {
 	is.Equal(f.push(t, "kept", auth, "garbage"), http.StatusOK)
 	time.Sleep(3 * pushCreateTimeout)
 	is.True(f.exists("kept"))
+}
+
+// A repository created by an HTTP push and renamed before its push fails
+// leaves another, empty repository created under its old name alone.
+func TestHTTPPushCreateCleanupChecksID(t *testing.T) {
+	is := is.New(t)
+	f := newOracleFixture(t)
+	auth := "Token " + f.token
+	ownerCtx := proto.WithUserContext(f.ctx, f.owner)
+
+	is.Equal(f.do(http.MethodGet, "/name.git/info/refs?service=git-receive-pack", auth).Code, http.StatusOK)
+	is.NoErr(f.be.RenameRepository(ownerCtx, "name", "moved"))
+	_, err := f.be.CreateRepository(ownerCtx, "name", f.owner, proto.RepositoryOptions{})
+	is.NoErr(err)
+	is.NoErr(f.be.AddCollaborator(ownerCtx, "name", "stranger", access.ReadWriteAccess))
+
+	// The failed push reaches the new repository under the listed name.
+	is.Equal(f.push(t, "name", auth, "garbage"), http.StatusOK)
+	is.True(f.exists("name"))
+	is.True(f.exists("moved"))
 }
