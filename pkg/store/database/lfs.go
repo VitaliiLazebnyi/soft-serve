@@ -169,6 +169,13 @@ func (*lfsStore) DeleteLFSObjectByOid(ctx context.Context, tx db.Handler, repoID
 	return db.WrapError(err)
 }
 
+// UpdateLFSObjectSize implements store.LFSStore.
+func (*lfsStore) UpdateLFSObjectSize(ctx context.Context, tx db.Handler, repoID int64, oid string, size int64) error {
+	query := tx.Rebind(`UPDATE lfs_objects SET size = ?, updated_at = CURRENT_TIMESTAMP WHERE repo_id = ? AND oid = ?;`)
+	_, err := tx.ExecContext(ctx, query, size, repoID, oid)
+	return db.WrapError(err)
+}
+
 // GetLFSObjectByOid implements store.LFSStore.
 func (*lfsStore) GetLFSObjectByOid(ctx context.Context, tx db.Handler, repoID int64, oid string) (models.LFSObject, error) {
 	var obj models.LFSObject
