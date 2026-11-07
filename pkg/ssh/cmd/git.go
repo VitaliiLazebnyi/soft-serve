@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -208,19 +210,140 @@ func gitServiceError(logger *log.Logger, service git.Service, repo string, err e
 // The push may have failed because the session context was cancelled, so ctx
 // must not be the cancelled one.
 func deleteFailedPushRepo(ctx context.Context, be *backend.Backend, logger *log.Logger, name, dir string) {
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "for-each-ref", "--count=1").Output()
-	if err != nil {
-		logger.Error("failed to check refs of repo created by a failed push, keeping it", "err", err, "repo", name)
-		return
-	}
-	if len(bytes.TrimSpace(out)) > 0 {
-		logger.Warn("keeping repo created by a failed push, it already has refs", "repo", name)
-		return
-	}
+	removeFailedPushRepo(ctx, logger, name, dir, failedPushRepoOps{
+		del: be.DeleteRepository,
+		rowExists: func(ctx context.Context, name string) (bool, error) {
+			_, err := be.Repository(ctx, name)
+			if errors.Is(err, proto.ErrRepoNotFound) {
+				return false, nil
+			}
+			return err == nil, err
+		},
+	}, failedPushRetry)
+}
 
-	if err := be.DeleteRepository(ctx, name); err != nil {
-		logger.Error("failed to delete repo created by a failed push", "err", err, "repo", name)
+// failedPushRepoOps are the backend operations removeFailedPushRepo uses.
+type failedPushRepoOps struct {
+	// del deletes the repository, its row first and then its directory.
+	del func(ctx context.Context, name string) error
+	// rowExists reports whether a repository with the name is listed.
+	rowExists func(ctx context.Context, name string) (bool, error)
+}
+
+// failedPushRetry is how removeFailedPushRepo retries: a first wait of 100ms,
+// doubled after each attempt, within a 5s budget. The waits that fit add up
+// to 3.1s (100ms to 1.6s), since the next one would go past the budget.
+var failedPushRetry = retryPolicy{first: 100 * time.Millisecond, total: 5 * time.Second}
+
+// retryPolicy waits first, doubles the wait after each attempt, and gives up
+// once the next wait would go past total. The time spent waiting is the sum
+// of the waits that fit, which can be well short of total.
+type retryPolicy struct {
+	first, total time.Duration
+}
+
+// removeFailedPushRepo is deleteFailedPushRepo with the backend operations
+// and the retry policy passed in.
+//
+// The delete is retried until the repository's directory is gone. On
+// Windows the git wrapper runs receive-pack in a child process that outlives
+// the killed wrapper for a moment and holds the directory, so the first
+// removal can fail. The delete removes the repository's row before its
+// directory, and a failure to remove the directory leaves the directory
+// behind.
+//
+// The refs are checked again before each attempt as long as the repository's
+// row exists, since the surviving receive-pack could still write them. Once
+// the row is gone the repository is deleted, and later attempts only remove
+// the leftover directory, and only while no repository with the name is
+// listed and the directory is still the one this push created: another
+// session may have removed the leftover and created a new repository with
+// the name, which must be left alone.
+func removeFailedPushRepo(ctx context.Context, logger *log.Logger, name, dir string, ops failedPushRepoOps, policy retryPolicy) {
+	deadline := time.Now().Add(policy.total)
+	wait := policy.first
+	rowGone := false
+	// orig identifies the directory this push created, so a directory
+	// re-created at the same path is not removed as its leftover.
+	orig, _ := dirIdentity(dir)
+	for {
+		var err error
+		if !rowGone {
+			// --git-dir keeps git from looking for a repository in the
+			// parent directories if this one is not one.
+			out, cerr := exec.CommandContext(ctx, "git", "--git-dir="+dir, "for-each-ref", "--count=1").Output()
+			if cerr != nil {
+				logger.Error("failed to check refs of repo created by a failed push, keeping it", "err", cerr, "repo", name)
+				return
+			}
+			if len(bytes.TrimSpace(out)) > 0 {
+				logger.Warn("keeping repo created by a failed push, it already has refs", "repo", name)
+				return
+			}
+
+			err = ops.del(ctx, name)
+			if err == nil || errors.Is(err, proto.ErrRepoNotFound) {
+				rowGone = true
+			}
+		} else {
+			exists, rerr := ops.rowExists(ctx, name)
+			if rerr != nil {
+				logger.Error("failed to look up repo created by a failed push, leaving its directory", "err", rerr, "repo", name)
+				return
+			}
+			if exists {
+				logger.Warn("repo created by a failed push was re-created, leaving it", "repo", name)
+				return
+			}
+			fi, serr := dirIdentity(dir)
+			switch {
+			case errors.Is(serr, fs.ErrNotExist):
+				return
+			case serr != nil:
+				// The directory cannot be identified, so it is not removed
+				// on this attempt.
+				err = serr
+			case !os.SameFile(orig, fi):
+				logger.Warn("directory of repo created by a failed push was re-created, leaving it", "repo", name)
+				return
+			default:
+				err = os.RemoveAll(dir)
+			}
+		}
+
+		if rowGone {
+			if _, serr := os.Lstat(dir); errors.Is(serr, fs.ErrNotExist) {
+				return
+			}
+		}
+
+		if time.Now().Add(wait).After(deadline) {
+			if err == nil {
+				err = errors.New("repository directory still exists")
+			}
+			logger.Error("failed to delete repo created by a failed push", "err", err, "repo", name)
+			return
+		}
+		time.Sleep(wait)
+		wait *= 2
 	}
+}
+
+// dirIdentity returns the FileInfo of the directory at dir with its identity
+// loaded, for os.SameFile. It stats an open handle rather than the path: on
+// Windows os.Lstat records only the path, and os.SameFile loads the volume
+// and file index from that path when it is called, so two Lstat results taken
+// at different times would both describe whatever is at the path at
+// comparison time. File.Stat reads the identity from the handle right away.
+// The handle is opened sharing read and write, so a process that has the
+// directory as its working directory does not make it fail.
+func dirIdentity(dir string) (os.FileInfo, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint: errcheck
+	return f.Stat()
 }
 
 func gitRunE(cmd *cobra.Command, args []string) error {
