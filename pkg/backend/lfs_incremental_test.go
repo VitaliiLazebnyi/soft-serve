@@ -67,8 +67,17 @@ func (lt *lfsTest) sync() error {
 }
 
 // addObject commits a pointer to a new LFS object, which the client serves,
-// and pushes it.
+// and pushes it to main.
 func (lt *lfsTest) addObject(t *testing.T) lfs.Pointer {
+	t.Helper()
+	p := lt.commitObject(t)
+	lt.git(t, "push", "-q", lt.be.repoPath("lfs-repo"), "HEAD:main")
+	return p
+}
+
+// commitObject commits a pointer to a new LFS object, which the client
+// serves, without pushing it.
+func (lt *lfsTest) commitObject(t *testing.T) lfs.Pointer {
 	t.Helper()
 	i := len(lt.pointers)
 	content := []byte(fmt.Sprintf("lfs object %d", i))
@@ -83,15 +92,37 @@ func (lt *lfsTest) addObject(t *testing.T) lfs.Pointer {
 	}
 	lt.git(t, "add", ".")
 	lt.git(t, "commit", "-q", "-m", fmt.Sprintf("add lfs object %d", i))
-	lt.git(t, "push", "-q", lt.be.repoPath("lfs-repo"), "main")
+	return p
+}
+
+// detachHead commits a pointer to a new LFS object and points the
+// repository's HEAD straight at that commit, so no ref reaches it.
+func (lt *lfsTest) detachHead(t *testing.T) lfs.Pointer {
+	t.Helper()
+	p := lt.commitObject(t)
+	lt.git(t, "push", "-q", lt.be.repoPath("lfs-repo"), "HEAD:refs/tmp/detached")
+	lt.bareGit(t, "update-ref", "--no-deref", "HEAD", "refs/tmp/detached")
+	lt.bareGit(t, "update-ref", "-d", "refs/tmp/detached")
 	return p
 }
 
 // git runs git in the work tree and returns its output.
 func (lt *lfsTest) git(t *testing.T, args ...string) string {
 	t.Helper()
+	return lt.gitIn(t, lt.work, args...)
+}
+
+// bareGit runs git in the repository and returns its output.
+func (lt *lfsTest) bareGit(t *testing.T, args ...string) string {
+	t.Helper()
+	return lt.gitIn(t, lt.be.repoPath("lfs-repo"), args...)
+}
+
+// gitIn runs git in dir and returns its output.
+func (lt *lfsTest) gitIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
 	cmd := exec.Command("git", args...)
-	cmd.Dir = lt.work
+	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
@@ -284,5 +315,37 @@ func TestSyncRepoLFSObjectsRetry(t *testing.T) {
 
 		is.NoErr(lt.sync())
 		is.Equal(len(scans()), 0)
+	})
+}
+
+// TestSyncRepoLFSObjectsDetachedHead verifies that the history only a
+// detached HEAD reaches is scanned, like git rev-list --all does, in a full
+// scan and in a scan of the new history.
+func TestSyncRepoLFSObjectsDetachedHead(t *testing.T) {
+	t.Run("full scan", func(t *testing.T) {
+		is := is.New(t)
+		lt := newLFSTest(t, 1)
+		p := lt.detachHead(t)
+		is.NoErr(lt.sync())
+		is.Equal(lt.client.requested, oids(lt.pointers...))
+		_, err := os.Stat(lt.path(p))
+		is.NoErr(err)
+	})
+
+	t.Run("new history", func(t *testing.T) {
+		is := is.New(t)
+		lt := newLFSTest(t, 1)
+		scans := recordLFSScans(t)
+		is.NoErr(lt.sync())
+		scans()
+
+		p := lt.detachHead(t)
+		is.NoErr(lt.sync())
+		got := scans()
+		is.Equal(len(got), 1)
+		is.True(got[0].exclude != nil) // only the new history
+		is.Equal(lt.client.requested, oids(p))
+		_, err := os.Stat(lt.path(p))
+		is.NoErr(err)
 	})
 }

@@ -138,13 +138,21 @@ func storeRepoLFSObjects(ctx context.Context, repo proto.Repository, dbx *db.DB,
 	return nil
 }
 
-// refTips returns the sorted, distinct object ids the refs of r point to.
+// refTips returns the sorted, distinct object ids the refs and HEAD of r
+// point to, the tips git rev-list --all starts from.
 func refTips(ctx context.Context, r *git.Repository) ([]string, error) {
 	out, err := gitm.NewCommandWithContext(ctx, "for-each-ref", "--format=%(objectname)").RunInDir(r.Path)
 	if err != nil {
 		return nil, fmt.Errorf("listing refs: %w", err)
 	}
 	tips := strings.Fields(string(out))
+	// A detached HEAD, which git clone --mirror copies, can reach commits
+	// no ref does. An unborn HEAD doesn't resolve and adds nothing.
+	if head, err := gitm.NewCommandWithContext(ctx, "rev-parse", "-q", "--verify", "HEAD").RunInDir(r.Path); err == nil {
+		if id := strings.TrimSpace(string(head)); isObjectID(id) {
+			tips = append(tips, id)
+		}
+	}
 	slices.Sort(tips)
 	return slices.Compact(tips), nil
 }
