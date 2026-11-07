@@ -182,17 +182,20 @@ func TestSecureClientAllowing(t *testing.T) {
 		"rebind.internal": {"169.254.169.254"},
 	})
 
-	get := func(c *http.Client, rawURL string) (*http.Response, error) {
+	// get returns only the status code, closing the response body (which
+	// may be non-nil alongside an error) before it returns.
+	get := func(c *http.Client, rawURL string) (int, error) {
 		t.Helper()
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		res, err := c.Do(req)
-		if res != nil {
-			res.Body.Close()
+		if res == nil {
+			return 0, err
 		}
-		return res, err
+		_ = res.Body.Close()
+		return res.StatusCode, err
 	}
 
 	tests := []struct {
@@ -235,12 +238,12 @@ func TestSecureClientAllowing(t *testing.T) {
 	// Redirects are still not followed, so the allowlist only ever applies
 	// to the host the request names.
 	hits.Store(0)
-	res, err := get(NewSecureClientAllowing(mustAllowedHosts(t, "127.0.0.1")), srv.URL+"/redirect")
+	status, err := get(NewSecureClientAllowing(mustAllowedHosts(t, "127.0.0.1")), srv.URL+"/redirect")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.StatusCode != http.StatusFound || hits.Load() != 1 {
-		t.Fatalf("redirect: status %d after %d hits, want 302 after 1", res.StatusCode, hits.Load())
+	if status != http.StatusFound || hits.Load() != 1 {
+		t.Fatalf("redirect: status %d after %d hits, want 302 after 1", status, hits.Load())
 	}
 
 	// The default client is unaffected.
