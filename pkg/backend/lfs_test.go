@@ -441,3 +441,74 @@ func TestStoreRepoMissingLFSObjectsSameOidOtherSize(t *testing.T) {
 		})
 	}
 }
+
+// TestStoreRepoMissingLFSObjectsWrongStoredObject verifies that an object
+// whose file and record agree on a size other than the pointer's, as older
+// versions could leave behind, is checked and fetched again when its content
+// isn't the object.
+func TestStoreRepoMissingLFSObjectsWrongStoredObject(t *testing.T) {
+	is := is.New(t)
+	lt := newLFSTest(t, 1)
+	p := lt.pointers[0]
+	content := lt.client.objects[p.Oid]
+
+	// A cut short file, recorded with its size.
+	is.NoErr(os.MkdirAll(filepath.Dir(lt.path(p)), 0o755))
+	is.NoErr(os.WriteFile(lt.path(p), content[:len(content)-1], 0o600))
+	is.NoErr(lt.be.store.CreateLFSObject(lt.ctx, lt.be.db, lt.repo.ID(), p.Oid, p.Size-1))
+
+	is.NoErr(lt.store())
+	is.Equal(lt.client.requested, []string{p.Oid}) // fetched again
+	got, err := os.ReadFile(lt.path(p))
+	is.NoErr(err)
+	is.Equal(got, content) // stored in full
+	obj, err := lt.be.store.GetLFSObjectByOid(lt.ctx, lt.be.db, lt.repo.ID(), p.Oid)
+	is.NoErr(err)
+	is.Equal(obj.Size, p.Size) // and recorded with its size
+
+	lt.client.requested = nil
+	is.NoErr(lt.store())
+	is.Equal(len(lt.client.requested), 0)
+}
+
+// TestStoreRepoMissingLFSObjectsWrongRecordedSize verifies that an object
+// whose file is right but whose record holds the size of a malformed
+// pointer, as older versions could leave behind, gets its record corrected,
+// so later syncs neither fetch nor report anything.
+func TestStoreRepoMissingLFSObjectsWrongRecordedSize(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		file        string
+		unavailable bool
+	}{
+		{"bad pointer first", "a-bad.bin", true},
+		{"bad pointer last", "z-bad.bin", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			is := is.New(t)
+			var bad lfs.Pointer
+			lt := newLFSTestWith(t, 1, func(work string, pointers []lfs.Pointer) {
+				bad = lfs.Pointer{Oid: pointers[0].Oid, Size: pointers[0].Size + 1}
+				is.NoErr(os.WriteFile(filepath.Join(work, tc.file), []byte(bad.String()), 0o600))
+			})
+			p := lt.pointers[0]
+			is.NoErr(os.MkdirAll(filepath.Dir(lt.path(p)), 0o755))
+			is.NoErr(os.WriteFile(lt.path(p), lt.client.objects[p.Oid], 0o600))
+			is.NoErr(lt.be.store.CreateLFSObject(lt.ctx, lt.be.db, lt.repo.ID(), p.Oid, bad.Size))
+
+			err := lt.store()
+			if tc.unavailable {
+				is.True(errors.Is(err, ErrLFSObjectsUnavailable)) // the bad pointer was tried before the record was fixed
+			} else {
+				is.NoErr(err)
+			}
+			obj, err := lt.be.store.GetLFSObjectByOid(lt.ctx, lt.be.db, lt.repo.ID(), p.Oid)
+			is.NoErr(err)
+			is.Equal(obj.Size, p.Size) // the record is corrected
+
+			lt.client.requested = nil
+			is.NoErr(lt.store())                  // the next sync is clean
+			is.Equal(len(lt.client.requested), 0) // and fetches nothing
+		})
+	}
+}

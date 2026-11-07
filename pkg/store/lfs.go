@@ -14,6 +14,7 @@ type LFSStore interface {
 	GetLFSObjects(ctx context.Context, h db.Handler, repoID int64) ([]models.LFSObject, error)
 	GetLFSObjectsByName(ctx context.Context, h db.Handler, name string) ([]models.LFSObject, error)
 	DeleteLFSObjectByOid(ctx context.Context, h db.Handler, repoID int64, oid string) error
+	UpdateLFSObjectSize(ctx context.Context, h db.Handler, repoID int64, oid string, size int64) error
 
 	CreateLFSLockForUser(ctx context.Context, h db.Handler, repoID int64, userID int64, path string, refname string) error
 	GetLFSLocks(ctx context.Context, h db.Handler, repoID int64, page int, limit int) ([]models.LFSLock, error)

@@ -67,10 +67,35 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 	errChan := make(chan error, 1)
 	go lfs.SearchPointerBlobs(ctx, r, pointerChan, errChan)
 
-	// recorded holds the objects that are already in the database but missing
-	// on disk. Those only need their content written.
-	recorded := make(map[string]bool)
+	// recorded holds the recorded sizes of the objects that are already in
+	// the database but to be downloaded. Those only need their content
+	// written, and their record corrected if the size is wrong.
+	recorded := make(map[string]int64)
+	// verified caches whether the file on disk of an oid holds the object,
+	// so each one is hashed at most once per sync.
+	verified := make(map[string]bool)
 	logger := log.FromContext(ctx).WithPrefix("lfs")
+
+	// isObject reports whether the file on disk of oid holds the object. It
+	// is only checked when its size or its record disagrees with a pointer,
+	// as hashing every object on every sync would read all of them.
+	isObject := func(oid, name string) (bool, error) {
+		if ok, checked := verified[oid]; checked {
+			return ok, nil
+		}
+		f, err := strg.Open(name)
+		if err != nil {
+			return false, err
+		}
+		defer f.Close() //nolint: errcheck
+		hash := sha256.New()
+		if _, err := io.Copy(hash, f); err != nil {
+			return false, err
+		}
+		ok := hex.EncodeToString(hash.Sum(nil)) == oid
+		verified[oid] = ok
+		return ok, nil
+	}
 	var unavailable int
 	objectFailed := func(p lfs.Pointer, err error) {
 		logger.Warn("skipping lfs object", "repo", repo.Name(), "oid", p.Oid, "err", err)
@@ -130,8 +155,15 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 				return err
 			}
 
-			if recorded[p.Oid] {
-				return nil
+			verified[p.Oid] = true
+
+			if size, ok := recorded[p.Oid]; ok {
+				if size == p.Size {
+					return nil
+				}
+				// Older versions could record the size of a malformed
+				// pointer; the content now proves this one right.
+				return db.WrapError(store.UpdateLFSObjectSize(ctx, dbx, repo.ID(), p.Oid, p.Size))
 			}
 
 			// If recording fails, the object stays on disk and the next sync
@@ -157,9 +189,10 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 
 		// A file of the wrong size, such as one an interrupted download left
 		// behind, counts as missing and is downloaded again.
-		fi, err := strg.Stat(path.Join("objects", pointer.RelativePath()))
+		name := path.Join("objects", pointer.RelativePath())
+		fi, err := strg.Stat(name)
 		switch {
-		case err == nil && fi.Size() == pointer.Size:
+		case err == nil && fi.Size() == pointer.Size && (obj.ID == 0 || obj.Size == pointer.Size):
 			// The object is on disk, make sure it's recorded.
 			if obj.ID == 0 {
 				if err := recordLFSObject(ctx, dbx, store, repo.ID(), pointer); err != nil {
@@ -167,19 +200,38 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 				}
 			}
 			return false, nil
+		case err == nil && fi.Size() == pointer.Size:
+			// The object is on disk, but recorded with another size, which
+			// older versions could take from a malformed pointer. If the
+			// file is the object, its size is the right one.
+			ok, err := isObject(pointer.Oid, name)
+			if err != nil {
+				return false, err
+			}
+			if ok {
+				logger.Info("correcting the recorded size of lfs object", "repo", repo.Name(), "oid", pointer.Oid, "size", pointer.Size, "recorded", obj.Size)
+				return false, db.WrapError(store.UpdateLFSObjectSize(ctx, dbx, repo.ID(), pointer.Oid, pointer.Size))
+			}
 		case err == nil && obj.ID != 0 && obj.Size == fi.Size():
-			// The object is stored and recorded with another size, which
-			// a pointer with this oid can't have, so this pointer is
-			// malformed. Downloading it would only fail its verification
-			// on every sync.
-			logger.Debug("ignoring lfs pointer with the wrong size", "repo", repo.Name(), "oid", pointer.Oid, "size", pointer.Size, "stored", obj.Size)
-			return false, nil
+			// The file and its record agree on another size. If the file is
+			// the object, this pointer is malformed, and downloading it
+			// would only fail its verification on every sync. Older versions
+			// could store and record a file cut short, though, which this
+			// pointer may be the only right one for.
+			ok, err := isObject(pointer.Oid, name)
+			if err != nil {
+				return false, err
+			}
+			if ok {
+				logger.Debug("ignoring lfs pointer with the wrong size", "repo", repo.Name(), "oid", pointer.Oid, "size", pointer.Size, "stored", obj.Size)
+				return false, nil
+			}
 		case err != nil && !errors.Is(err, fs.ErrNotExist):
 			return false, err
 		}
 
 		if obj.ID != 0 {
-			recorded[pointer.Oid] = true
+			recorded[pointer.Oid] = obj.Size
 		}
 		return true, nil
 	}
