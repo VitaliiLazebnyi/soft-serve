@@ -169,6 +169,23 @@ type DBConfig struct {
 
 	// DataSource is the database data source name.
 	DataSource string `env:"DATA_SOURCE" yaml:"data_source"`
+
+	// MaxOpenConns is the maximum number of open connections to the
+	// database. 0 (the default) means no limit.
+	MaxOpenConns int `env:"MAX_OPEN_CONNS" yaml:"max_open_conns"`
+
+	// MaxIdleConns is the maximum number of idle connections kept in the
+	// pool. 0 (the default) keeps the database/sql default of 2. It is
+	// capped at MaxOpenConns when that is set.
+	MaxIdleConns int `env:"MAX_IDLE_CONNS" yaml:"max_idle_conns"`
+
+	// ConnMaxLifetime is the maximum number of seconds a connection may be
+	// reused. 0 (the default) means no limit.
+	ConnMaxLifetime int `env:"CONN_MAX_LIFETIME" yaml:"conn_max_lifetime"`
+
+	// ConnMaxIdleTime is the maximum number of seconds a connection may sit
+	// idle before it is closed. 0 (the default) means no limit.
+	ConnMaxIdleTime int `env:"CONN_MAX_IDLE_TIME" yaml:"conn_max_idle_time"`
 }
 
 // LFSConfig is the configuration for Git LFS.
@@ -346,6 +363,10 @@ func (c *Config) Environ() []string {
 		fmt.Sprintf("SOFT_SERVE_LOG_TIME_FORMAT=%s", c.Log.TimeFormat),
 		fmt.Sprintf("SOFT_SERVE_DB_DRIVER=%s", c.DB.Driver),
 		fmt.Sprintf("SOFT_SERVE_DB_DATA_SOURCE=%s", c.DB.DataSource),
+		fmt.Sprintf("SOFT_SERVE_DB_MAX_OPEN_CONNS=%d", c.DB.MaxOpenConns),
+		fmt.Sprintf("SOFT_SERVE_DB_MAX_IDLE_CONNS=%d", c.DB.MaxIdleConns),
+		fmt.Sprintf("SOFT_SERVE_DB_CONN_MAX_LIFETIME=%d", c.DB.ConnMaxLifetime),
+		fmt.Sprintf("SOFT_SERVE_DB_CONN_MAX_IDLE_TIME=%d", c.DB.ConnMaxIdleTime),
 		fmt.Sprintf("SOFT_SERVE_LFS_ENABLED=%t", c.LFS.Enabled),
 		fmt.Sprintf("SOFT_SERVE_LFS_SSH_ENABLED=%t", c.LFS.SSHEnabled),
 		fmt.Sprintf("SOFT_SERVE_JOBS_MIRROR_PULL=%s", c.Jobs.MirrorPull),
@@ -592,6 +613,20 @@ func (c *Config) Validate() error {
 
 	if c.SSH.ClientKeyPath != "" && !filepath.IsAbs(c.SSH.ClientKeyPath) {
 		c.SSH.ClientKeyPath = filepath.Join(c.DataPath, c.SSH.ClientKeyPath)
+	}
+
+	for _, v := range []struct {
+		name  string
+		value int
+	}{
+		{"db.max_open_conns", c.DB.MaxOpenConns},
+		{"db.max_idle_conns", c.DB.MaxIdleConns},
+		{"db.conn_max_lifetime", c.DB.ConnMaxLifetime},
+		{"db.conn_max_idle_time", c.DB.ConnMaxIdleTime},
+	} {
+		if v.value < 0 {
+			return fmt.Errorf("%s: %d is negative; use 0 for the default", v.name, v.value)
+		}
 	}
 
 	if c.MaxReposPerUser < 0 {
