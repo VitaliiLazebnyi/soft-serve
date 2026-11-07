@@ -72,6 +72,11 @@ func (c *SSHConfig) SSHMACs() []string {
 // names x/crypto does not implement. x/crypto silently ignores unknown
 // names, so without this a typo would quietly shrink the list, or leave it
 // empty and fail every handshake.
+//
+// In Go's FIPS 140 mode, x/crypto still drops the names it does not allow
+// there (for example the non-NIST key exchanges and chacha20-poly1305) when
+// it builds the server configuration. Such names pass this check but are
+// not offered.
 func (c *SSHConfig) validateAlgorithms() error {
 	supported := ssh.SupportedAlgorithms()
 	insecure := ssh.InsecureAlgorithms()

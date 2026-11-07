@@ -82,11 +82,26 @@ ssh:
   # algorithm golang.org/x/crypto/ssh considers secure, which leaves out the
   # SHA-1 based diffie-hellman-group14-sha1, diffie-hellman-group1-sha1,
   # diffie-hellman-group-exchange-sha1, hmac-sha1 and hmac-sha1-96. Names
-  # x/crypto does not implement are rejected at startup. To let an old client
-  # that only speaks SHA-1 connect, list the defaults and add the legacy
-  # algorithm, for example:
-  #   kex_algorithms: ["curve25519-sha256", "diffie-hellman-group14-sha1"]
-  #   macs: ["hmac-sha2-256-etm@openssh.com", "hmac-sha2-256", "hmac-sha1"]
+  # x/crypto does not implement are rejected at startup. A list replaces the
+  # default, so to let an old client that only speaks SHA-1 connect, copy the
+  # full default list and append the legacy algorithm. Listing fewer would
+  # drop the rest, such as the post-quantum mlkem768x25519-sha256:
+  #   kex_algorithms:
+  #     - "mlkem768x25519-sha256"
+  #     - "curve25519-sha256"
+  #     - "ecdh-sha2-nistp256"
+  #     - "ecdh-sha2-nistp384"
+  #     - "ecdh-sha2-nistp521"
+  #     - "diffie-hellman-group14-sha256"
+  #     - "diffie-hellman-group16-sha512"
+  #     - "diffie-hellman-group-exchange-sha256"
+  #     - "diffie-hellman-group14-sha1" # legacy, appended
+  #   macs:
+  #     - "hmac-sha2-256-etm@openssh.com"
+  #     - "hmac-sha2-512-etm@openssh.com"
+  #     - "hmac-sha2-256"
+  #     - "hmac-sha2-512"
+  #     - "hmac-sha1" # legacy, appended
   kex_algorithms:
 {{- range .SSH.KexAlgorithms }}
     - "{{ . }}"

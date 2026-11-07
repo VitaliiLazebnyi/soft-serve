@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/matryer/is"
+	"go.yaml.in/yaml/v4"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -142,4 +143,75 @@ func TestSSHAlgorithmsConfigFileRoundTrip(t *testing.T) {
 			is.Equal(got.SSH.MACs, want)
 		}
 	}
+}
+
+// TestSSHAlgorithmDocsMatchDefaults keeps the default lists and the legacy
+// examples in the README and the generated config file in step with the
+// defaults the server uses.
+func TestSSHAlgorithmDocsMatchDefaults(t *testing.T) {
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(readme)
+
+	// The bullet list of defaults.
+	for _, l := range []struct {
+		prefix string
+		want   []string
+	}{
+		{"- key exchange: ", DefaultSSHKexAlgorithms()},
+		{"- ciphers: ", DefaultSSHCiphers()},
+		{"- MACs: ", DefaultSSHMACs()},
+	} {
+		i := strings.Index(doc, l.prefix)
+		if i < 0 {
+			t.Fatalf("README has no %q line", l.prefix)
+		}
+		line := doc[i+len(l.prefix):]
+		line = line[:strings.IndexByte(line, '\n')]
+		line = strings.ReplaceAll(line, " (and its alias `curve25519-sha256@libssh.org`)", "")
+		var got []string
+		for _, n := range strings.Split(line, ", ") {
+			got = append(got, strings.Trim(n, "`"))
+		}
+		if !slices.Equal(got, l.want) {
+			t.Errorf("README %q lists %v, want %v", l.prefix, got, l.want)
+		}
+	}
+
+	wantKex := append(DefaultSSHKexAlgorithms(), ssh.InsecureKeyExchangeDH14SHA1)
+	wantMACs := append(DefaultSSHMACs(), ssh.HMACSHA1)
+	check := func(name, example string) {
+		t.Helper()
+		var cfg Config
+		if err := yaml.Unmarshal([]byte(example), &cfg); err != nil {
+			t.Fatalf("%s legacy example: %v", name, err)
+		}
+		if !slices.Equal(cfg.SSH.KexAlgorithms, wantKex) {
+			t.Errorf("%s legacy example kex_algorithms = %v, want %v", name, cfg.SSH.KexAlgorithms, wantKex)
+		}
+		if !slices.Equal(cfg.SSH.MACs, wantMACs) {
+			t.Errorf("%s legacy example macs = %v, want %v", name, cfg.SSH.MACs, wantMACs)
+		}
+	}
+
+	// The README legacy example is the yaml block after "Older clients".
+	rest := doc[strings.Index(doc, "**Older clients.**"):]
+	start := strings.Index(rest, "```yaml\n") + len("```yaml\n")
+	check("README", rest[start:start+strings.Index(rest[start:], "```")])
+
+	// The generated config file has it as comment lines after
+	// "append the legacy algorithm".
+	file := newConfigFile(DefaultConfig())
+	var b strings.Builder
+	b.WriteString("ssh:\n")
+	lines := strings.Split(file[strings.Index(file, "append the legacy algorithm"):], "\n")[2:]
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "  #   ") {
+			break
+		}
+		b.WriteString("  " + strings.TrimPrefix(l, "  #   ") + "\n")
+	}
+	check("config file", b.String())
 }

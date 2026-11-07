@@ -382,20 +382,41 @@ restrict the server further, for example to drop the NIST curves, set
 variables above). A list replaces the default rather than adding to it, and
 a name x/crypto does not implement stops the server at startup.
 
-**Older clients.** The server's host key is Ed25519, and the clients we
-checked that can verify an Ed25519 host key all agree on the defaults:
-OpenSSH 6.6 and later (Ed25519 arrived in 6.5), libssh2 1.10 (Ubuntu
-22.04), and the maintained JSch fork (`com.github.mwiede:jsch`) on Java 15
-or later. Clients without Ed25519 host key support could not connect before
-this change either and are not affected by it: OpenSSH before 6.5, libssh2
-1.8 (Ubuntu 18.04 and 20.04, used by libgit2 based tools there), and the
-original JCraft JSch up to 0.1.55. A client limited to SHA-1 key exchange or
-MACs is now refused. To let one in, add the legacy algorithm to the list:
+**Older clients.** The host key Soft Serve Plus generates by default is
+Ed25519, and the clients we checked that can verify an Ed25519 host key all
+agree on the defaults: OpenSSH 6.6 and later (Ed25519 arrived in 6.5),
+libssh2 1.10 (Ubuntu 22.04), and the maintained JSch fork
+(`com.github.mwiede:jsch`) on Java 15 or later. Clients without Ed25519 host
+key support cannot verify the default host key, with or without this
+setting: OpenSSH before 6.5, libssh2 1.8 (Ubuntu 18.04 and 20.04, used by
+libgit2 based tools there), and the original JCraft JSch up to 0.1.55. With
+an RSA host key (`ssh.key_path`), libssh2 1.8 and JSch 0.1.55 do connect
+with the defaults, using `diffie-hellman-group-exchange-sha256` (or ECDH for
+JSch), `aes128-ctr` and `hmac-sha2-256`.
+
+A client limited to SHA-1 key exchange or MACs is refused. To let one in,
+copy the default list above and append the legacy algorithm. Listing only a
+few algorithms would drop the rest, including the post-quantum
+`mlkem768x25519-sha256`, for every client:
 
 ```yaml
 ssh:
-  kex_algorithms: ["curve25519-sha256", "ecdh-sha2-nistp256", "diffie-hellman-group14-sha256", "diffie-hellman-group14-sha1"]
-  macs: ["hmac-sha2-256-etm@openssh.com", "hmac-sha2-256", "hmac-sha1"]
+  kex_algorithms:
+    - "mlkem768x25519-sha256"
+    - "curve25519-sha256"
+    - "ecdh-sha2-nistp256"
+    - "ecdh-sha2-nistp384"
+    - "ecdh-sha2-nistp521"
+    - "diffie-hellman-group14-sha256"
+    - "diffie-hellman-group16-sha512"
+    - "diffie-hellman-group-exchange-sha256"
+    - "diffie-hellman-group14-sha1" # legacy, appended
+  macs:
+    - "hmac-sha2-256-etm@openssh.com"
+    - "hmac-sha2-512-etm@openssh.com"
+    - "hmac-sha2-256"
+    - "hmac-sha2-512"
+    - "hmac-sha1" # legacy, appended
 ```
 
 #### Database Configuration
