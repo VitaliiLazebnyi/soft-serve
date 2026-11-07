@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -10,6 +12,41 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
+
+// splitUserCreateKey returns the username and public key for
+// "user create" when -k is given. args holds the positional arguments.
+//
+// When the key was not quoted, the server's command splitting leaves the
+// key type in the flag and the rest of the key in args, either after the
+// username ("create bob -k ssh-ed25519 AAAA") or before it ("create -k
+// ssh-ed25519 AAAA bob"). Both readings are tried; the one that gives a
+// valid key is used. Input that fits neither, or both, is rejected.
+func splitUserCreateKey(key string, args []string) (string, ssh.PublicKey, error) {
+	if len(args) == 1 {
+		pk, _, err := sshutils.ParseAuthorizedKey(key)
+		return args[0], pk, err
+	}
+
+	// A complete key in the flag leaves no key words in args, so the
+	// extra arguments are a mistake.
+	if _, _, err := sshutils.ParseAuthorizedKey(key); err == nil {
+		return "", nil, fmt.Errorf("accepts 1 arg(s), received %d", len(args))
+	}
+
+	last := len(args) - 1
+	pkFirst, _, errFirst := sshutils.ParseAuthorizedKey(key + " " + strings.Join(args[1:], " "))
+	pkLast, _, errLast := sshutils.ParseAuthorizedKey(key + " " + strings.Join(args[:last], " "))
+	switch {
+	case errFirst == nil && errLast == nil:
+		return "", nil, errors.New("cannot tell the username from the public key; quote the key, for example -k \"ssh-ed25519 AAAA...\"")
+	case errFirst == nil:
+		return args[0], pkFirst, nil
+	case errLast == nil:
+		return args[last], pkLast, nil
+	default:
+		return "", nil, fmt.Errorf("invalid public key: %w", errFirst)
+	}
+}
 
 // UserCommand returns the user subcommand.
 func UserCommand() *cobra.Command {
@@ -29,14 +66,25 @@ func UserCommand() *cobra.Command {
 	userCreateCommand := &cobra.Command{
 		Use:   "create USERNAME",
 		Short: "Create a new user",
-		Args:  cobra.ExactArgs(1),
+		// The SSH server splits the remote command on spaces, so an
+		// unquoted key such as "-k ssh-ed25519 AAAA..." leaves the rest
+		// of the key as extra arguments. Allow them when -k is given and
+		// put the key back together in RunE.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if key != "" {
+				return cobra.MinimumNArgs(1)(cmd, args)
+			}
+			return cobra.ExactArgs(1)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var pubkeys []ssh.PublicKey
 			ctx := cmd.Context()
 			be := backend.FromContext(ctx)
 			username := args[0]
 			if key != "" {
-				pk, _, err := sshutils.ParseAuthorizedKey(key)
+				var pk ssh.PublicKey
+				var err error
+				username, pk, err = splitUserCreateKey(key, args)
 				if err != nil {
 					return err
 				}

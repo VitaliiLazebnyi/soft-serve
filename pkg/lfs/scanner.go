@@ -47,6 +47,16 @@ func SearchPointerBlobs(ctx context.Context, repo *git.Repository, pointerChan c
 	go revListAllObjects(ctx, revListWriter, &wg, basePath, errChan)
 	wg.Wait()
 
+	// A canceled scan stops early, possibly after git rev-list finished
+	// cleanly, so report it rather than let it pass for a complete one.
+	// Don't block if rev-list already reported an error.
+	if err := ctx.Err(); err != nil {
+		select {
+		case errChan <- err:
+		default:
+		}
+	}
+
 	close(pointerChan)
 	close(errChan)
 }
@@ -122,7 +132,11 @@ loop:
 			continue
 		}
 
-		pointerChan <- PointerBlob{Hash: sha, Pointer: pointer}
+		select {
+		case pointerChan <- PointerBlob{Hash: sha, Pointer: pointer}:
+		case <-ctx.Done():
+			break loop
+		}
 	}
 }
 

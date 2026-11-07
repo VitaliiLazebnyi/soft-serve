@@ -40,8 +40,14 @@ RestrictSUIDSGID=true
 RemoveIPC=true
 CapabilityBoundingSet=
 AmbientCapabilities=
+# Fail a filtered system call with EPERM instead of killing the process with
+# SIGSYS, so git, hooks and soft report an error rather than dying or hanging.
+SystemCallErrorNumber=EPERM
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
+# @resources (nice, setpriority, setrlimit, sched_setaffinity, ...) is allowed:
+# git and repository hooks may use it, and without capabilities it cannot
+# raise priorities or hard limits anyway.
+SystemCallFilter=~@privileged
 SystemCallArchitectures=native
 
 [Install]

@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -262,7 +263,9 @@ func switchRefCmd(ref *git.Reference) tea.Cmd {
 	}
 }
 
-// UpdateRefCmd gets the repository's HEAD reference and sends a RefMsg.
+// UpdateRefCmd sends a RefMsg with the reference to show first: HEAD, or a
+// fallback branch when HEAD names a branch that does not exist (see
+// defaultRef). It sends EmptyRepoMsg when the repository has no branches.
 func UpdateRefCmd(repo proto.Repository) tea.Cmd {
 	return func() tea.Msg {
 		r, err := repo.Open()
@@ -273,10 +276,39 @@ func UpdateRefCmd(repo proto.Repository) tea.Cmd {
 		if len(bs) == 0 {
 			return EmptyRepoMsg{}
 		}
-		ref, err := r.HEAD()
+		ref, err := defaultRef(r)
 		if err != nil {
 			return common.ErrorMsg(err)
 		}
+		if ref == nil {
+			return EmptyRepoMsg{}
+		}
 		return RefMsg(ref)
 	}
+}
+
+// defaultRef returns the reference to show first: HEAD, or a branch when
+// HEAD names a branch that does not exist, such as in a mirror whose remote
+// renamed its default branch. It prefers "main" or "master", like
+// EnsureDefaultBranch does, and then the first branch. It returns nil when
+// there is no branch to show.
+func defaultRef(r *git.Repository) (*git.Reference, error) {
+	ref, err := r.HEAD()
+	if !errors.Is(err, git.ErrReferenceNotExist) {
+		return ref, err
+	}
+	refs, _ := r.References()
+	var first *git.Reference
+	for _, ref := range refs {
+		if !ref.IsBranch() {
+			continue
+		}
+		if b := ref.Name().Short(); b == "main" || b == "master" {
+			return ref, nil
+		}
+		if first == nil {
+			first = ref
+		}
+	}
+	return first, nil
 }
