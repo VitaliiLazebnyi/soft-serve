@@ -287,7 +287,7 @@ func TestValidateURLErrorsHideResolver(t *testing.T) {
 		lookups.Add(1)
 		return nil, &net.DNSError{Err: "no such host", Name: host, Server: "10.0.0.53:53", IsNotFound: true}
 	}
-	err := validateURL("https://does-not-exist.invalid/hook", lookup)
+	err := validateURL("https://does-not-exist.invalid/hook", nil, lookup)
 	if n := lookups.Load(); n != 1 {
 		t.Fatalf("fake resolver called %d times, want 1", n)
 	}
@@ -353,7 +353,7 @@ func TestValidateURLResolvesHostnames(t *testing.T) {
 			}
 			var lookups atomic.Int32
 			fake := fakeLookup(table)
-			err := validateURL("https://hooks.example/hook", func(ctx context.Context, host string) ([]net.IPAddr, error) {
+			err := validateURL("https://hooks.example/hook", nil, func(ctx context.Context, host string) ([]net.IPAddr, error) {
 				lookups.Add(1)
 				return fake(ctx, host)
 			})
