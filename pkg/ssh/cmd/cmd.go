@@ -238,9 +238,29 @@ func repoAccessLevel(ctx context.Context, repo string) access.AccessLevel {
 // including ones added later, is gated by default.
 func checkIfServerAdmin(cmd *cobra.Command, _ []string) error {
 	if !isServerAdmin(cmd.Context()) {
-		return proto.ErrUnauthorized
+		return errNotServerAdmin(cmd.Context())
 	}
 	return nil
+}
+
+// errNotServerAdmin returns proto.ErrUnauthorized for a command that only
+// server admins may run. The server accepts any key, so the session uses the
+// first key the client offers, which may be an agent or default key rather
+// than the admin key passed with -i. The error names the key's fingerprint
+// and how to make ssh offer only the chosen key. It still matches
+// proto.ErrUnauthorized.
+//
+// Use it only for gates that do not depend on repository state, such as
+// checkIfServerAdmin: repository gates must keep giving the same answer
+// for a private and a missing repository.
+func errNotServerAdmin(ctx context.Context) error {
+	pk := sshutils.PublicKeyFromContext(ctx)
+	if pk == nil {
+		return proto.ErrUnauthorized
+	}
+	return fmt.Errorf("%w: this command needs a server admin, and the key this session authenticated with (%s) is not an admin's; "+
+		"if you passed -i to ssh, also pass -o IdentitiesOnly=yes so ssh offers only that key",
+		proto.ErrUnauthorized, gossh.FingerprintSHA256(pk))
 }
 
 // checkIfRepoCollab gates create and import, which name a repository that
