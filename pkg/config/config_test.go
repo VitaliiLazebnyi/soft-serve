@@ -601,3 +601,59 @@ func TestOuterQuotedInitAdminKeys(t *testing.T) {
 		is.Equal(cfg.IgnoredAdminKeys(), 2)
 	})
 }
+
+func TestWebhookAllowedHosts(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataPath = t.TempDir()
+	if len(cfg.Webhook.ParsedAllowedHosts()) != 0 {
+		t.Fatal("webhook allowlist populated by default")
+	}
+
+	cfg.Webhook.AllowedHosts = []string{"hooks.internal", "", "10.0.0.0/8:8080", " "}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Webhook.AllowedHosts; len(got) != 2 {
+		t.Errorf("blank entries kept: %q", got)
+	}
+	if got := cfg.Webhook.ParsedAllowedHosts(); len(got) != 2 {
+		t.Errorf("parsed %d entries, want 2", len(got))
+	}
+	if !slices.Contains(cfg.Environ(), "SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS=hooks.internal,10.0.0.0/8:8080") {
+		t.Error("Environ does not pass the webhook allowlist on")
+	}
+
+	cfg.Webhook.AllowedHosts = []string{"10.0.0.0/99"}
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() accepted an invalid network")
+	}
+}
+
+func TestWebhookAllowedHostsFromEnvAndFile(t *testing.T) {
+	t.Setenv("SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS", "127.0.0.1,hooks.internal:9000")
+	cfg := DefaultConfig()
+	cfg.DataPath = t.TempDir()
+	if err := cfg.ParseEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.Webhook.AllowedHosts, []string{"127.0.0.1", "hooks.internal:9000"}) {
+		t.Fatalf("AllowedHosts = %q", cfg.Webhook.AllowedHosts)
+	}
+	if len(cfg.Webhook.ParsedAllowedHosts()) != 2 {
+		t.Fatal("env allowlist not parsed")
+	}
+
+	// The written config file round-trips the list.
+	if err := cfg.WriteConfig(); err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS") //nolint:errcheck // restored by t.Setenv above
+	t.Setenv("SOFT_SERVE_CONFIG_LOCATION", cfg.ConfigPath())
+	fromFile := &Config{DataPath: cfg.DataPath}
+	if err := fromFile.ParseFile(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(fromFile.Webhook.AllowedHosts, []string{"127.0.0.1", "hooks.internal:9000"}) {
+		t.Fatalf("AllowedHosts from file = %q", fromFile.Webhook.AllowedHosts)
+	}
+}

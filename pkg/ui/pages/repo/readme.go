@@ -106,6 +106,11 @@ func (r *Readme) Update(msg tea.Msg) (common.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		r.SetSize(msg.Width, msg.Height)
 	case EmptyRepoMsg:
+		// No readme will be loaded for an empty repository, so stop
+		// loading here and show the quick start text instead.
+		r.isLoading = false
+		r.readmePath = ""
+		r.code.GotoTop()
 		cmds = append(cmds,
 			r.code.SetContent(defaultEmptyRepoMsg(r.common.Config(),
 				r.repo.Name()), ".md"),

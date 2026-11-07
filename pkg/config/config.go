@@ -65,6 +65,18 @@ type SSHConfig struct {
 	// IdleTimeout is the number of seconds a connection can be idle before it is closed.
 	IdleTimeout int `env:"IDLE_TIMEOUT" yaml:"idle_timeout"`
 
+	// KexAlgorithms lists the key exchange algorithms the SSH server offers,
+	// in order of preference. When empty, DefaultSSHKexAlgorithms is used.
+	KexAlgorithms []string `env:"KEX_ALGORITHMS" yaml:"kex_algorithms"`
+
+	// Ciphers lists the ciphers the SSH server offers, in order of
+	// preference. When empty, DefaultSSHCiphers is used.
+	Ciphers []string `env:"CIPHERS" yaml:"ciphers"`
+
+	// MACs lists the message authentication codes the SSH server offers, in
+	// order of preference. When empty, DefaultSSHMACs is used.
+	MACs []string `env:"MACS" yaml:"macs"`
+
 	// allowedHosts is ClientAllowedHosts parsed by Validate.
 	allowedHosts ssrf.AllowedHosts
 }
@@ -174,6 +186,29 @@ type JobsConfig struct {
 	MirrorPull string `env:"MIRROR_PULL" yaml:"mirror_pull"`
 }
 
+// WebhookConfig is the configuration for repository webhooks.
+type WebhookConfig struct {
+	// AllowedHosts lists the private and internal destinations webhooks
+	// may be sent to, which are otherwise refused. Entries are hostnames,
+	// IP addresses, or CIDR ranges with an optional port. An IP or CIDR
+	// entry allows the addresses it covers for any hostname. A hostname
+	// entry allows that name to resolve to loopback, RFC1918, CGNAT or IPv6
+	// unique local addresses, whatever they are when a webhook is sent.
+	// Link-local and cloud metadata addresses need an IP or CIDR entry
+	// inside their own range. Empty (the default) allows public addresses
+	// only.
+	AllowedHosts []string `env:"ALLOWED_HOSTS" yaml:"allowed_hosts"`
+
+	// allowedHosts is AllowedHosts parsed by Validate.
+	allowedHosts ssrf.AllowedHosts
+}
+
+// ParsedAllowedHosts returns the parsed webhook allowlist. It is empty until
+// Validate has run.
+func (c *WebhookConfig) ParsedAllowedHosts() ssrf.AllowedHosts {
+	return c.allowedHosts
+}
+
 // Config is the configuration for Soft Serve.
 type Config struct {
 	// Name is the name of the server.
@@ -202,6 +237,9 @@ type Config struct {
 
 	// Jobs is the configuration for cron jobs
 	Jobs JobsConfig `envPrefix:"JOBS_" yaml:"jobs"`
+
+	// Webhook is the configuration for repository webhooks.
+	Webhook WebhookConfig `envPrefix:"WEBHOOK_" yaml:"webhook"`
 
 	// InitialAdminKeys is a list of public keys that will be added to the list of admins.
 	InitialAdminKeys []string `env:"INITIAL_ADMIN_KEYS" envSeparator:"\n" yaml:"initial_admin_keys"`
@@ -285,6 +323,9 @@ func (c *Config) Environ() []string {
 		fmt.Sprintf("SOFT_SERVE_SSH_CLIENT_ALLOWED_HOSTS=%s", strings.Join(c.SSH.ClientAllowedHosts, ",")),
 		fmt.Sprintf("SOFT_SERVE_SSH_MAX_TIMEOUT=%d", c.SSH.MaxTimeout),
 		fmt.Sprintf("SOFT_SERVE_SSH_IDLE_TIMEOUT=%d", c.SSH.IdleTimeout),
+		fmt.Sprintf("SOFT_SERVE_SSH_KEX_ALGORITHMS=%s", strings.Join(c.SSH.KexAlgorithms, ",")),
+		fmt.Sprintf("SOFT_SERVE_SSH_CIPHERS=%s", strings.Join(c.SSH.Ciphers, ",")),
+		fmt.Sprintf("SOFT_SERVE_SSH_MACS=%s", strings.Join(c.SSH.MACs, ",")),
 		fmt.Sprintf("SOFT_SERVE_GIT_ENABLED=%t", c.Git.Enabled),
 		fmt.Sprintf("SOFT_SERVE_GIT_LISTEN_ADDR=%s", c.Git.ListenAddr),
 		fmt.Sprintf("SOFT_SERVE_GIT_PUBLIC_URL=%s", c.Git.PublicURL),
@@ -308,6 +349,7 @@ func (c *Config) Environ() []string {
 		fmt.Sprintf("SOFT_SERVE_LFS_ENABLED=%t", c.LFS.Enabled),
 		fmt.Sprintf("SOFT_SERVE_LFS_SSH_ENABLED=%t", c.LFS.SSHEnabled),
 		fmt.Sprintf("SOFT_SERVE_JOBS_MIRROR_PULL=%s", c.Jobs.MirrorPull),
+		fmt.Sprintf("SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS=%s", strings.Join(c.Webhook.AllowedHosts, ",")),
 	}...)
 
 	// AnonAccess and AllowKeyless are tri-state overrides: only emit them
@@ -578,6 +620,19 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("ssh.client_allowed_hosts: %w", err)
 	}
 	c.SSH.allowedHosts = allowed
+
+	if err := c.SSH.validateAlgorithms(); err != nil {
+		return err
+	}
+
+	c.Webhook.AllowedHosts = slices.DeleteFunc(slices.Clone(c.Webhook.AllowedHosts), func(s string) bool {
+		return strings.TrimSpace(s) == ""
+	})
+	webhookAllowed, err := ssrf.ParseAllowedHosts(c.Webhook.AllowedHosts)
+	if err != nil {
+		return fmt.Errorf("webhook.allowed_hosts: %w", err)
+	}
+	c.Webhook.allowedHosts = webhookAllowed
 
 	if c.HTTP.TLSKeyPath != "" && !filepath.IsAbs(c.HTTP.TLSKeyPath) {
 		c.HTTP.TLSKeyPath = filepath.Join(c.DataPath, c.HTTP.TLSKeyPath)
