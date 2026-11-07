@@ -20,7 +20,7 @@ func (r openRepo) Open() (*git.Repository, error) { return git.Open(r.path) }
 // gitRun runs git in dir and fails the test on error.
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(cmd.Environ(),
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
 		"GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@b",
