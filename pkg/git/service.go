@@ -148,7 +148,7 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 		go func() {
 			defer stdin.Close() //nolint: errcheck
 			if _, err := io.Copy(stdin, scmd.Stdin); err != nil {
-				log.Errorf("gitServiceHandler: failed to copy stdin: %v", err)
+				logCopyError(ctx, "stdin", err, gitGone(err))
 			}
 		}()
 	}
@@ -159,7 +159,7 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 		go func() {
 			defer wg.Done()
 			if _, err := io.Copy(scmd.Stdout, stdout); err != nil {
-				logCopyError(ctx, "stdout", err)
+				logCopyError(ctx, "stdout", err, false)
 			}
 		}()
 	}
@@ -170,7 +170,7 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 		go func() {
 			defer wg.Done()
 			if _, err := io.Copy(scmd.Stderr, stderr); err != nil {
-				logCopyError(ctx, "stderr", err)
+				logCopyError(ctx, "stderr", err, false)
 			}
 		}()
 	}
@@ -214,28 +214,78 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 	return nil
 }
 
-// logCopyError logs a failure to copy git's output to the client. A client
+// logCopyError logs a failure to copy between git and the client. A client
 // that goes away, closing the SSH channel or the HTTP connection, makes the
-// copy fail: either the write to the client fails, or the context is
-// cancelled for it and the pipes are closed under the copy. That is
-// expected, so it is logged at Debug; any other failure is logged at Error.
-func logCopyError(ctx context.Context, stream string, err error) {
-	if ctx.Err() != nil || clientGone(err) {
+// copy fail: either the write to (or read from) the client fails, or the
+// context is cancelled for it and the pipes are closed under the copy. That
+// is expected, so it is logged at Debug, as is any failure the caller marks
+// as expected; any other failure is logged at Error.
+func logCopyError(ctx context.Context, stream string, err error, expected bool) {
+	if expected || ctx.Err() != nil || clientGone(err) {
 		log.Debugf("gitServiceHandler: failed to copy %s: %v", stream, err)
 		return
 	}
 	log.Errorf("gitServiceHandler: failed to copy %s: %v", stream, err)
 }
 
-// clientGone reports whether err, returned by a write to the client, means
-// the client closed its end. A closed SSH channel returns io.EOF, and a
-// closed network connection a closed, broken pipe or reset error.
+// gitGone reports whether err, returned by a write of the client's input to
+// git, means git no longer reads it. Git can exit before the client is done
+// sending, for example after a protocol error. The write then fails with a
+// broken pipe, which clientGone covers, or with os.ErrClosed once the pipe
+// was closed after git exited.
+func gitGone(err error) bool {
+	return errors.Is(err, os.ErrClosed)
+}
+
+// clientGone reports whether err, returned by a write to the client or a
+// read from it, means the client closed its end. A closed SSH channel
+// returns io.EOF, and a closed network connection a closed, broken pipe or
+// reset error. A broken pipe also covers git's input once git exited.
 func clientGone(err error) bool {
-	return errors.Is(err, io.EOF) ||
+	return clientGoneOn(runtime.GOOS, err)
+}
+
+// clientGoneOn is clientGone for the operating system goos. On Windows,
+// syscall.EPIPE and syscall.ECONNRESET are values Go made up, which the
+// system never returns, so the Windows error codes are checked as well.
+func clientGoneOn(goos string, err error) bool {
+	if errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrClosedPipe) ||
 		errors.Is(err, net.ErrClosed) ||
 		errors.Is(err, syscall.EPIPE) ||
-		errors.Is(err, syscall.ECONNRESET)
+		errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	if goos != "windows" {
+		return false
+	}
+	for _, errno := range windowsClientGoneErrnos {
+		if errors.Is(err, errno) {
+			return true
+		}
+	}
+	return false
+}
+
+// Windows error codes for a peer that closed its end. They are spelled out
+// as numbers so that clientGoneOn builds, and can be tested, on every
+// system; syscall does not define ERROR_NO_DATA at all.
+const (
+	windowsErrorBrokenPipe = syscall.Errno(109)   // ERROR_BROKEN_PIPE
+	windowsErrorNoData     = syscall.Errno(232)   // ERROR_NO_DATA
+	windowsWSAEConnAborted = syscall.Errno(10053) // WSAECONNABORTED
+	windowsWSAEConnReset   = syscall.Errno(10054) // WSAECONNRESET
+)
+
+// windowsClientGoneErrnos are the Windows error codes clientGoneOn treats
+// as the peer having gone away: a reset or aborted socket connection, a
+// pipe whose other end was closed (ERROR_BROKEN_PIPE) and a write to a
+// pipe that is being closed (ERROR_NO_DATA).
+var windowsClientGoneErrnos = []syscall.Errno{
+	windowsErrorBrokenPipe,
+	windowsErrorNoData,
+	windowsWSAEConnAborted,
+	windowsWSAEConnReset,
 }
 
 // waitDelay is how long after the context is done git is killed as a
