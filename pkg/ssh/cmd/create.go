@@ -69,7 +69,7 @@ func privateOrDefault(cmd *cobra.Command, private bool) (bool, error) {
 	ctx := cmd.Context()
 	private, err := backend.FromContext(ctx).DefaultPrivate(ctx, proto.UserFromContext(ctx))
 	if errors.Is(err, proto.ErrAnonymousPrivate) {
-		return false, fmt.Errorf("%w; sign in, or pass --private=false to create a public repository", err)
+		return false, fmt.Errorf("%w; use a key registered to an account, or pass --private=false to create a public repository", err)
 	}
 	return private, err
 }

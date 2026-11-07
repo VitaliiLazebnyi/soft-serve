@@ -127,8 +127,10 @@ mkfile ./anonwork/README.md '# anon'
 git -c init.defaultBranch=main -C anonwork init
 git -C anonwork add -A
 git -C anonwork commit -m 'first'
+# Over HTTP the refusal asks for credentials, so a git client with none
+# fails as it does for any push that needs them.
 ! git -C anonwork push http://localhost:$HTTP_PORT/onanonhttp HEAD
-stderr 'private by default'
+stderr 'could not read Username'
 curl http://localhost:$HTTP_PORT/onanonhttp2.git/info/refs?service=git-receive-pack
 stdout 'private by default.*authenticate'
 ! ksoft repo create onanonssh
@@ -137,6 +139,15 @@ stderr 'private by default.*--private=false'
 stderr 'private by default.*--private=false'
 soft repo list
 ! stdout 'onanon'
+
+# git sends credentials only after a 401, so a signed-in user can still
+# push-to-create over HTTP while anonymous users may write, and owns the
+# private repository.
+ugit -C work push http://user1:$UTOKEN@localhost:$HTTP_PORT/onauthpush HEAD:refs/heads/main
+usoft repo private onauthpush
+stdout 'true'
+soft repo info onauthpush
+stdout 'Owner: user1'
 
 # choosing public explicitly still works anonymously
 ksoft repo create -p=false onanonpublic
