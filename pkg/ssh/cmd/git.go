@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -208,18 +210,69 @@ func gitServiceError(logger *log.Logger, service git.Service, repo string, err e
 // The push may have failed because the session context was cancelled, so ctx
 // must not be the cancelled one.
 func deleteFailedPushRepo(ctx context.Context, be *backend.Backend, logger *log.Logger, name, dir string) {
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "for-each-ref", "--count=1").Output()
-	if err != nil {
-		logger.Error("failed to check refs of repo created by a failed push, keeping it", "err", err, "repo", name)
-		return
-	}
-	if len(bytes.TrimSpace(out)) > 0 {
-		logger.Warn("keeping repo created by a failed push, it already has refs", "repo", name)
-		return
-	}
+	removeFailedPushRepo(ctx, logger, name, dir, be.DeleteRepository, failedPushRetry)
+}
 
-	if err := be.DeleteRepository(ctx, name); err != nil {
-		logger.Error("failed to delete repo created by a failed push", "err", err, "repo", name)
+// failedPushRetry is how removeFailedPushRepo retries: first wait, and the
+// total time it keeps trying.
+var failedPushRetry = retryPolicy{first: 100 * time.Millisecond, total: 5 * time.Second}
+
+// retryPolicy waits first, doubles the wait after each attempt, and gives up
+// once the next wait would go past total.
+type retryPolicy struct {
+	first, total time.Duration
+}
+
+// removeFailedPushRepo is deleteFailedPushRepo with the delete and the retry
+// policy passed in.
+//
+// The delete is retried until the repository's directory is gone. On
+// Windows the git wrapper runs receive-pack in a child process that outlives
+// the killed wrapper for a moment and holds the directory, so the first
+// removal can fail. The delete removes the repository's row before its
+// directory, and a failure to remove the directory leaves the directory
+// behind, which a later delete removes.
+//
+// The refs are checked again before each attempt as long as the repository's
+// row exists, since the surviving receive-pack could still write them. Once
+// the row is gone the repository is deleted and only its leftover directory
+// is removed.
+func removeFailedPushRepo(ctx context.Context, logger *log.Logger, name, dir string, del func(context.Context, string) error, policy retryPolicy) {
+	deadline := time.Now().Add(policy.total)
+	wait := policy.first
+	rowGone := false
+	for {
+		if !rowGone {
+			// --git-dir keeps git from looking for a repository in the
+			// parent directories if this one is not one.
+			out, err := exec.CommandContext(ctx, "git", "--git-dir="+dir, "for-each-ref", "--count=1").Output()
+			if err != nil {
+				logger.Error("failed to check refs of repo created by a failed push, keeping it", "err", err, "repo", name)
+				return
+			}
+			if len(bytes.TrimSpace(out)) > 0 {
+				logger.Warn("keeping repo created by a failed push, it already has refs", "repo", name)
+				return
+			}
+		}
+
+		err := del(ctx, name)
+		if err == nil || errors.Is(err, proto.ErrRepoNotFound) {
+			rowGone = true
+			if _, serr := os.Lstat(dir); errors.Is(serr, fs.ErrNotExist) {
+				return
+			}
+		}
+
+		if time.Now().Add(wait).After(deadline) {
+			if err == nil {
+				err = errors.New("repository directory still exists")
+			}
+			logger.Error("failed to delete repo created by a failed push", "err", err, "repo", name)
+			return
+		}
+		time.Sleep(wait)
+		wait *= 2
 	}
 }
 

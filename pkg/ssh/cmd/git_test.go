@@ -8,11 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/matryer/is"
@@ -90,17 +90,13 @@ func cancelledPushToCreate(t *testing.T, beforeCancel func(dir string)) (context
 // A push that creates a repository and is then cancelled, because the client
 // went away, must not leave the new repository behind.
 func TestCancelledPushRemovesCreatedRepository(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// The git wrapper on Windows runs receive-pack in a child process
-		// that outlives the killed wrapper for a moment and holds the
-		// repository directory, so the delete can fail there.
-		t.Skip("the killed git's child can still hold the repository on windows")
-	}
 	is := is.New(t)
-	ctx, be := cancelledPushToCreate(t, nil)
+	var dir string
+	ctx, be := cancelledPushToCreate(t, func(d string) { dir = d })
 
 	_, err := be.Repository(ctx, "fresh")
-	is.True(err != nil) // the created repository was removed
+	is.True(err != nil)      // the created repository was removed
+	is.True(!dirExists(dir)) // and so was its directory
 }
 
 // receive-pack updates the refs and reports success to the client before the
@@ -128,4 +124,114 @@ func TestCancelledPushKeepsCreatedRepositoryWithRefs(t *testing.T) {
 
 	_, err := be.Repository(ctx, "fresh")
 	is.NoErr(err) // the repository with pushed refs was kept
+}
+
+// fastRetry keeps the retry tests quick.
+var fastRetry = retryPolicy{first: time.Millisecond, total: 200 * time.Millisecond}
+
+// emptyBareRepo creates an empty bare repository and returns its path.
+func emptyBareRepo(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "fresh.git")
+	if out, err := exec.CommandContext(t.Context(), "git", "init", "--bare", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	return dir
+}
+
+// writeRef points refs/heads/main at a new empty commit in the bare
+// repository dir.
+func writeRef(t *testing.T, dir string) {
+	t.Helper()
+	git := func(args ...string) string {
+		cmd := exec.CommandContext(t.Context(), "git", append([]string{"--git-dir=" + dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
+		)
+		cmd.Stdin = strings.NewReader("")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	commit := git("commit-tree", git("mktree"), "-m", "pushed")
+	git("update-ref", "refs/heads/main", commit)
+}
+
+func dirExists(dir string) bool {
+	_, err := os.Lstat(dir)
+	return err == nil
+}
+
+// The delete is retried while it fails, until the directory is gone.
+func TestRemoveFailedPushRepoRetries(t *testing.T) {
+	is := is.New(t)
+	dir := emptyBareRepo(t)
+	calls := 0
+	del := func(context.Context, string) error {
+		calls++
+		if calls < 3 {
+			return errors.New("directory in use")
+		}
+		return os.RemoveAll(dir)
+	}
+
+	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, del, fastRetry)
+	is.Equal(calls, 3)
+	is.True(!dirExists(dir))
+}
+
+// A delete that removes the row but leaves the directory behind is retried
+// until the directory is gone, without checking refs on what is left of it.
+func TestRemoveFailedPushRepoRetriesLeftoverDirectory(t *testing.T) {
+	is := is.New(t)
+	dir := emptyBareRepo(t)
+	calls := 0
+	del := func(context.Context, string) error {
+		calls++
+		if calls == 1 {
+			// The row is gone and the directory was partly removed.
+			return os.Remove(filepath.Join(dir, "HEAD"))
+		}
+		return os.RemoveAll(dir)
+	}
+
+	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, del, fastRetry)
+	is.Equal(calls, 2)
+	is.True(!dirExists(dir))
+}
+
+// Refs written between attempts, while the repository still exists, keep it.
+func TestRemoveFailedPushRepoKeepsRefsWrittenBetweenAttempts(t *testing.T) {
+	is := is.New(t)
+	dir := emptyBareRepo(t)
+	calls := 0
+	del := func(context.Context, string) error {
+		calls++
+		writeRef(t, dir)
+		return errors.New("directory in use")
+	}
+
+	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, del, fastRetry)
+	is.Equal(calls, 1)
+	is.True(dirExists(dir))
+}
+
+// A delete that keeps failing is given up after the retry policy's total.
+func TestRemoveFailedPushRepoGivesUp(t *testing.T) {
+	is := is.New(t)
+	dir := emptyBareRepo(t)
+	calls := 0
+	del := func(context.Context, string) error {
+		calls++
+		return errors.New("directory in use")
+	}
+
+	start := time.Now()
+	removeFailedPushRepo(t.Context(), log.New(io.Discard), "fresh", dir, del, fastRetry)
+	is.True(calls > 1)
+	is.True(time.Since(start) < 5*time.Second)
+	is.True(dirExists(dir))
 }
