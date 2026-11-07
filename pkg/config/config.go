@@ -663,7 +663,7 @@ func parseAuthKeys(aks []string) authKeys {
 	exist := make(map[string]struct{}, 0)
 	r.pks = make([]ssh.PublicKey, 0)
 	for _, entry := range aks {
-		key := strings.TrimSpace(entry)
+		key := trimQuotes(strings.TrimSpace(entry))
 		if key == "" || strings.HasPrefix(key, "#") {
 			continue
 		}
@@ -709,12 +709,23 @@ func parseAuthKeys(aks []string) authKeys {
 				exist[id] = struct{}{}
 			}
 		case looksLikePath(key):
-			r.unreadable = append(r.unreadable, strings.TrimSpace(entry))
+			r.unreadable = append(r.unreadable, key)
 		default:
 			r.ignored = append(r.ignored, key)
 		}
 	}
 	return r
+}
+
+// trimQuotes removes one pair of matching single or double quotes around
+// s. Docker Compose's list syntax, "- SOFT_SERVE_INITIAL_ADMIN_KEYS='ssh-ed25519
+// AAAA...'", keeps the quotes in the value, and a quoted key would otherwise
+// be ignored as malformed.
+func trimQuotes(s string) string {
+	if len(s) >= 2 && (s[0] == '"' || s[0] == '\'') && s[len(s)-1] == s[0] {
+		return strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return s
 }
 
 // looksLikePath reports whether an entry that is not a key names a file. An
