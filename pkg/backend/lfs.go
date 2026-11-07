@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"charm.land/log/v2"
 	gitm "github.com/aymanbagabas/git-module"
@@ -48,9 +49,21 @@ func (e *lfsObjectsUnavailableError) Unwrap() error {
 
 // lfsScannedRefsFile is the file in a repository's LFS directory that holds
 // the ref tips whose LFS objects were all stored by the last complete sync,
-// one object id per line. It lives next to the objects, so it goes away with
-// them if the directory is removed.
+// one object id per line, and when the whole history was last scanned. It
+// lives next to the objects, so it goes away with them if the directory is
+// removed. Deleting it makes the next mirror sync scan the whole history.
 const lfsScannedRefsFile = "scanned-refs"
+
+// lfsFullScanPrefix starts the line of lfsScannedRefsFile that holds the
+// Unix time of the last scan of the whole history.
+const lfsFullScanPrefix = "full-scan "
+
+// lfsFullScanInterval is how often a mirror sync scans the whole history
+// anyway. Only a full scan checks the objects of the history scanned
+// before, so this is how long an object file that went missing or was cut
+// short stays that way. Once a day keeps the cost of the full scan on a
+// large repository to one sync in 144 at the default mirror interval.
+var lfsFullScanInterval = 24 * time.Hour
 
 // searchPointerBlobs scans for pointers. Tests replace it to see what is
 // scanned.
@@ -78,8 +91,9 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 // SyncRepoLFSObjects is StoreRepoMissingLFSObjects for mirror syncs. It only
 // scans the history added since the last sync that stored every object, so a
 // sync that fetched nothing new scans nothing. It scans the whole history
-// when no sync completed yet, when the repository's LFS directory was
-// removed, or when the shorter scan fails. Objects that were unavailable
+// when no sync completed yet, once lfsFullScanInterval passed since the last
+// full scan, when the repository's LFS directory or its lfsScannedRefsFile
+// was removed, or when the shorter scan fails. Objects that were unavailable
 // keep the history they are in scanned on later syncs, until a sync stores
 // them all.
 func SyncRepoLFSObjects(ctx context.Context, repo proto.Repository, dbx *db.DB, store store.Store, lfsClient lfs.Client) error {
@@ -106,13 +120,22 @@ func storeRepoLFSObjects(ctx context.Context, repo proto.Repository, dbx *db.DB,
 
 	markerPath := filepath.Join(lfsRoot, lfsScannedRefsFile)
 	var since []string
+	var fullScan time.Time
 	if incremental {
-		since = readScannedRefs(markerPath)
+		since, fullScan = readScannedRefs(markerPath)
+		// A last full scan in the future means the clock went back, so
+		// don't count on it either.
+		if age := time.Since(fullScan); since != nil && (age < 0 || age >= lfsFullScanInterval) {
+			logger.Debug("scanning the whole repository for lfs objects, the last full scan is too old", "repo", repo.Name(), "full_scan", fullScan)
+			since = nil
+		}
 	}
 
+	start := time.Now()
 	switch {
 	case since == nil:
 		err = storeMissingLFSObjects(ctx, repo, r, dbx, store, lfsClient, lfsRoot, tips, nil)
+		fullScan = start
 	case slices.Equal(since, tips):
 		// Nothing changed since the last complete sync.
 		return nil
@@ -123,6 +146,7 @@ func storeRepoLFSObjects(ctx context.Context, repo proto.Repository, dbx *db.DB,
 			// For example, an old tip was pruned since the last sync.
 			logger.Warn("scanning the whole repository for lfs objects, scanning the new history failed", "repo", repo.Name(), "err", err)
 			err = storeMissingLFSObjects(ctx, repo, r, dbx, store, lfsClient, lfsRoot, tips, nil)
+			fullScan = start
 		}
 	}
 	if err != nil {
@@ -131,7 +155,7 @@ func storeRepoLFSObjects(ctx context.Context, repo proto.Repository, dbx *db.DB,
 		return err
 	}
 
-	if err := writeScannedRefs(markerPath, tips); err != nil {
+	if err := writeScannedRefs(markerPath, tips, fullScan); err != nil {
 		// The next sync scans more history than it needs to.
 		logger.Warn("failed to save the scanned refs", "repo", repo.Name(), "err", err)
 	}
@@ -158,26 +182,39 @@ func refTips(ctx context.Context, r *git.Repository) ([]string, error) {
 }
 
 // readScannedRefs returns the tips saved in the file at path, sorted and
-// distinct, or nil if there is no usable file.
-func readScannedRefs(path string) []string {
+// distinct, and when the whole history was last scanned, or nil tips if
+// there is no usable file. A file without the time of the full scan is
+// usable, with a zero time.
+func readScannedRefs(path string) ([]string, time.Time) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return nil, time.Time{}
 	}
 	tips := []string{}
-	for _, id := range strings.Fields(string(data)) {
-		if !isObjectID(id) {
-			return nil
+	var fullScan time.Time
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
+		case strings.HasPrefix(line, lfsFullScanPrefix):
+			sec, err := strconv.ParseInt(strings.TrimPrefix(line, lfsFullScanPrefix), 10, 64)
+			if err != nil {
+				return nil, time.Time{}
+			}
+			fullScan = time.Unix(sec, 0)
+		case isObjectID(line):
+			tips = append(tips, line)
+		default:
+			return nil, time.Time{}
 		}
-		tips = append(tips, id)
 	}
 	slices.Sort(tips)
-	return slices.Compact(tips)
+	return slices.Compact(tips), fullScan
 }
 
-// writeScannedRefs saves tips to the file at path, replacing it at once so
-// a sync never reads half of it.
-func writeScannedRefs(path string, tips []string) error {
+// writeScannedRefs saves tips and the time of the last full scan to the
+// file at path, replacing it at once so a sync never reads half of it.
+func writeScannedRefs(path string, tips []string, fullScan time.Time) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -187,6 +224,7 @@ func writeScannedRefs(path string, tips []string) error {
 	}
 	defer os.Remove(f.Name()) //nolint: errcheck
 	var data strings.Builder
+	data.WriteString(lfsFullScanPrefix + strconv.FormatInt(fullScan.Unix(), 10) + "\n")
 	for _, id := range tips {
 		data.WriteString(id + "\n")
 	}

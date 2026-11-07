@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/lfs"
@@ -140,6 +141,11 @@ func (lt *lfsTest) lfsDir() string {
 	return filepath.Join(lt.be.cfg.DataPath, "lfs", strconv.FormatInt(lt.repo.ID(), 10))
 }
 
+// markerPath returns where the tips of the last complete sync are saved.
+func (lt *lfsTest) markerPath() string {
+	return filepath.Join(lt.lfsDir(), lfsScannedRefsFile)
+}
+
 func oids(pointers ...lfs.Pointer) []string {
 	var s []string
 	for _, p := range pointers {
@@ -215,7 +221,7 @@ func TestSyncRepoLFSObjectsFullScan(t *testing.T) {
 		// A tip of the last sync that's no longer in the repository makes
 		// the shorter scan fail.
 		missing := strings.Repeat("1", 40)
-		is.NoErr(os.WriteFile(filepath.Join(lt.lfsDir(), lfsScannedRefsFile), []byte(missing+"\n"), 0o600))
+		is.NoErr(writeScannedRefs(lt.markerPath(), []string{missing}, time.Now()))
 		is.NoErr(os.Remove(lt.path(lt.pointers[0])))
 		is.NoErr(lt.sync())
 		got := scans()
@@ -237,7 +243,7 @@ func TestSyncRepoLFSObjectsFullScan(t *testing.T) {
 		is.NoErr(lt.sync())
 		scans()
 
-		is.NoErr(os.WriteFile(filepath.Join(lt.lfsDir(), lfsScannedRefsFile), []byte("not an object id\n"), 0o600))
+		is.NoErr(os.WriteFile(lt.markerPath(), []byte("not an object id\n"), 0o600))
 		is.NoErr(lt.sync())
 		got := scans()
 		is.Equal(len(got), 1)
@@ -348,4 +354,54 @@ func TestSyncRepoLFSObjectsDetachedHead(t *testing.T) {
 		_, err := os.Stat(lt.path(p))
 		is.NoErr(err)
 	})
+}
+
+// TestSyncRepoLFSObjectsPeriodicFullScan verifies that a mirror sync scans
+// the whole history again once the last full scan is lfsFullScanInterval
+// old, which fetches objects whose files went missing, and that scans of the
+// new history in between don't count as full scans.
+func TestSyncRepoLFSObjectsPeriodicFullScan(t *testing.T) {
+	is := is.New(t)
+	lt := newLFSTest(t, 1)
+	scans := recordLFSScans(t)
+	is.NoErr(lt.sync())
+	scans()
+	_, fullScan := readScannedRefs(lt.markerPath())
+	is.True(!fullScan.IsZero())
+
+	// A scan of the new history keeps the time of the last full scan.
+	p := lt.addObject(t)
+	is.NoErr(lt.sync())
+	got := scans()
+	is.Equal(len(got), 1)
+	is.True(got[0].exclude != nil)
+	tips, kept := readScannedRefs(lt.markerPath())
+	is.Equal(kept.Unix(), fullScan.Unix())
+
+	// A file that went missing isn't noticed while nothing is fetched.
+	is.NoErr(os.Remove(lt.path(p)))
+	is.NoErr(lt.sync())
+	is.Equal(len(scans()), 0)
+
+	// Until the last full scan is too old.
+	is.NoErr(writeScannedRefs(lt.markerPath(), tips, time.Now().Add(-lfsFullScanInterval-time.Minute)))
+	is.NoErr(lt.sync())
+	got = scans()
+	is.Equal(len(got), 1)
+	is.Equal(got[0].exclude, nil)          // the whole history is scanned
+	is.Equal(lt.client.requested, oids(p)) // and the missing file fetched
+	_, err := os.Stat(lt.path(p))
+	is.NoErr(err)
+	_, fullScan = readScannedRefs(lt.markerPath())
+	is.True(time.Since(fullScan) < time.Hour) // and the time of the full scan saved
+
+	is.NoErr(lt.sync())
+	is.Equal(len(scans()), 0)
+
+	// A full scan in the future means the clock went back.
+	is.NoErr(writeScannedRefs(lt.markerPath(), tips, time.Now().Add(time.Hour)))
+	is.NoErr(lt.sync())
+	got = scans()
+	is.Equal(len(got), 1)
+	is.Equal(got[0].exclude, nil)
 }

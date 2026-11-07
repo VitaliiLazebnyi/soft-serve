@@ -720,6 +720,8 @@ ssh -p 23231 localhost repo import soft-serve-plus https://github.com/VitaliiLaz
 
 Use `--mirror` or `-m` to mark the repository as a *pull* mirror.
 
+When a mirror uses Git LFS, each sync only scans the history it fetched since the last sync that stored every LFS object, and once a day it scans the whole history to fetch object files that went missing. Deleting `<data_path>/lfs/<repo id>/scanned-refs` makes the next sync scan the whole history.
+
 ### Deleting Repositories
 
 You can delete repositories using the `repo delete <repo>` command.
