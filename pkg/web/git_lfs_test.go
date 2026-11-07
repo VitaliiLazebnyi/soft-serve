@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -461,6 +462,93 @@ func TestLFSWriteDeniedAsksAnonymousForCredentials(t *testing.T) {
 					t.Errorf("WWW-Authenticate set=%v, want %v", challenged, anonymous)
 				}
 			})
+		}
+	}
+}
+
+// TestLFSBatchRejectsOversizedRequests checks the batch endpoint's limits. Each
+// object costs a storage stat and a database lookup, and anyone who can read a
+// repository may call the endpoint, so the number of objects and the body size
+// are capped.
+func TestLFSBatchRejectsOversizedRequests(t *testing.T) {
+	is := is.New(t)
+	ctx, be, _ := newLFSTestContext(t)
+
+	owner, err := be.CreateUser(ctx, "owner", proto.UserOptions{})
+	is.NoErr(err)
+	_, err = be.CreateRepository(ctx, "repo", owner, proto.RepositoryOptions{})
+	is.NoErr(err)
+
+	router := lfsTestRouter(ctx)
+	batch := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost,
+			"/repo.git/info/lfs/objects/batch", strings.NewReader(body))
+		req.Header.Set("Content-Type", lfs.MediaType)
+		req.Header.Set("Accept", lfs.MediaType)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+	objects := func(n int) string {
+		objs := make([]string, n)
+		for i := range objs {
+			objs[i] = fmt.Sprintf(`{"oid":"%064x","size":1}`, i)
+		}
+		return `{"operation":"download","objects":[` + strings.Join(objs, ",") + `]}`
+	}
+
+	w := batch(objects(maxLfsBatchObjects))
+	is.Equal(w.Code, http.StatusOK)
+
+	w = batch(objects(maxLfsBatchObjects + 1))
+	is.Equal(w.Code, http.StatusRequestEntityTooLarge)
+
+	big := `{"operation":"download","ref":{"name":"` + strings.Repeat("a", maxLfsBatchBodySize) + `"},"objects":[{"oid":"` + strings.Repeat("a", 64) + `","size":1}]}`
+	w = batch(big)
+	is.Equal(w.Code, http.StatusRequestEntityTooLarge)
+
+	// The object limit applies to uploads too, before the operation is
+	// handled.
+	w = batch(strings.Replace(objects(maxLfsBatchObjects+1), "download", "upload", 1))
+	is.Equal(w.Code, http.StatusRequestEntityTooLarge)
+}
+
+// TestLFSJSONBodiesAreLimited checks that the verify and lock endpoints, which
+// take a single object or path, refuse oversized JSON bodies instead of
+// reading them into memory.
+func TestLFSJSONBodiesAreLimited(t *testing.T) {
+	is := is.New(t)
+	ctx, be, _ := newLFSTestContext(t)
+
+	owner, err := be.CreateUser(ctx, "owner", proto.UserOptions{})
+	is.NoErr(err)
+	_, err = be.CreateRepository(ctx, "repo", owner, proto.RepositoryOptions{})
+	is.NoErr(err)
+	token, err := be.CreateAccessToken(ctx, owner, "test", time.Time{})
+	is.NoErr(err)
+
+	router := lfsTestRouter(ctx)
+	padding := strings.Repeat("a", maxLfsJSONBodySize)
+	for _, tc := range []struct {
+		name, path, body string
+		auth             bool
+	}{
+		// Anonymous readers can reach verify under the default anon access.
+		{"verify", "/repo.git/info/lfs/objects/basic/verify", `{"oid":"` + padding + `","size":1}`, false},
+		{"lock create", "/repo.git/info/lfs/locks", `{"path":"` + padding + `"}`, true},
+		{"lock verify", "/repo.git/info/lfs/locks/verify", `{"cursor":"` + padding + `"}`, true},
+		{"unlock", "/repo.git/info/lfs/locks/1/unlock", `{"force":false,"ref":{"name":"` + padding + `"}}`, true},
+	} {
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Content-Type", lfs.MediaType)
+		req.Header.Set("Accept", lfs.MediaType)
+		if tc.auth {
+			req.Header.Set("Authorization", "token "+token)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("%s: got status %d, want 413: %s", tc.name, w.Code, w.Body.String())
 		}
 	}
 }
