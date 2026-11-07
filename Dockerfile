@@ -21,10 +21,12 @@ EXPOSE 23233/tcp
 # Git
 EXPOSE 9418/tcp
 
-# Set the default command
-ENTRYPOINT [ "/usr/local/bin/soft", "serve" ]
+# Run soft under tini so it is not PID 1. Git detaches background children
+# (e.g. "git maintenance run --auto --detach" after a push or fetch) that are
+# re-parented to PID 1 when they finish; tini reaps them, soft would not.
+ENTRYPOINT [ "/sbin/tini", "--", "/usr/local/bin/soft", "serve" ]
 
-RUN apk update && apk add --update git bash openssh && rm -rf /var/cache/apk/*
+RUN apk update && apk add --update git bash openssh tini && rm -rf /var/cache/apk/*
 
 # GoReleaser puts the binary for each platform under <os>/<arch>[/<variant>]/.
 ARG TARGETPLATFORM
