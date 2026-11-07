@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -23,7 +22,6 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/lfs"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/ssrf"
-	"github.com/charmbracelet/soft-serve/pkg/storage"
 	"github.com/charmbracelet/soft-serve/pkg/utils"
 	"github.com/charmbracelet/soft-serve/pkg/webhook"
 	gitcfg "github.com/go-git/go-git/v5/plumbing/format/config"
@@ -548,6 +546,9 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 		}
 	}
 
+	// repoID is set once the repository's row is found, and names its LFS
+	// directory.
+	var repoID int64
 	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
 		repom, dberr := d.store.GetRepoByName(ctx, tx, name)
 		if dberr != nil {
@@ -561,24 +562,7 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 			return db.WrapError(dberr)
 		}
 
-		repoID := strconv.FormatInt(repom.ID, 10)
-		strg := storage.NewLocalStorage(filepath.Join(d.cfg.DataPath, "lfs", repoID))
-		objs, err := d.store.GetLFSObjectsByName(ctx, tx, name)
-		if err != nil {
-			return db.WrapError(err)
-		}
-
-		for _, obj := range objs {
-			p := lfs.Pointer{
-				Oid:  obj.Oid,
-				Size: obj.Size,
-			}
-
-			d.logger.Debug("deleting lfs object", "repo", name, "oid", obj.Oid)
-			if err := strg.Delete(path.Join("objects", p.RelativePath())); err != nil {
-				d.logger.Error("failed to delete lfs object", "repo", name, "err", err, "oid", obj.Oid)
-			}
-		}
+		repoID = repom.ID
 
 		// Remove the webhooks and their rows explicitly, so none are left
 		// behind whether or not the connection enforces foreign keys.
@@ -593,6 +577,22 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 		return os.RemoveAll(rp)
 	}); err != nil {
 		return wrapRepoError(err)
+	}
+
+	// Remove the repository's LFS storage only now that its row is gone, so
+	// a failed delete leaves its objects in place. This takes the temporary
+	// files of unfinished uploads and objects without a row along with the
+	// recorded ones. Repository ids are never reused, so no other repository
+	// can have written here. The row is already gone, so a failure is logged
+	// rather than returned. An LFS upload, import or mirror sync still running
+	// for this repository can recreate the directory after it is removed,
+	// leaving an orphan; since the id is not reused, no other repository can
+	// reach it.
+	if repoID != 0 {
+		lfsPath := filepath.Join(d.cfg.DataPath, "lfs", strconv.FormatInt(repoID, 10))
+		if err := os.RemoveAll(lfsPath); err != nil {
+			d.logger.Error("failed to delete lfs objects", "repo", name, "path", lfsPath, "err", err)
+		}
 	}
 
 	// The repository is gone, so its event is delivered without recording
