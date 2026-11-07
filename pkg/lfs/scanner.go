@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -14,7 +15,8 @@ import (
 	"github.com/charmbracelet/soft-serve/git"
 )
 
-// SearchPointerBlobs scans the whole repository for LFS pointer files
+// SearchPointerBlobs scans the whole repository for LFS pointer files. It
+// sends at most one error on errChan, which must have room for it.
 func SearchPointerBlobs(ctx context.Context, repo *git.Repository, pointerChan chan<- PointerBlob, errChan chan<- error) {
 	basePath := repo.Path
 
@@ -29,10 +31,10 @@ func SearchPointerBlobs(ctx context.Context, repo *git.Repository, pointerChan c
 
 	// 4. Take the output of cat-file --batch and check if each file in turn
 	// to see if they're pointers to files in the LFS store
-	go createPointerResultsFromCatFileBatch(ctx, catFileBatchReader, &wg, pointerChan)
+	go createPointerResultsFromCatFileBatch(ctx, catFileBatchReader, &wg, pointerChan, errChan)
 
 	// 3. Take the shas of the blobs and batch read them
-	go catFileBatch(ctx, shasToBatchReader, catFileBatchWriter, &wg, basePath)
+	go catFileBatch(ctx, shasToBatchReader, catFileBatchWriter, &wg, basePath, errChan)
 
 	// 2. From the provided objects restrict to blobs <=1k
 	go blobsLessThan1024FromCatFileBatchCheck(catFileCheckReader, shasToBatchWriter, &wg)
@@ -40,7 +42,7 @@ func SearchPointerBlobs(ctx context.Context, repo *git.Repository, pointerChan c
 	// 1. Run batch-check on all objects in the repository
 	revListReader, revListWriter := io.Pipe()
 	shasToCheckReader, shasToCheckWriter := io.Pipe()
-	go catFileBatchCheck(ctx, shasToCheckReader, catFileCheckWriter, &wg, basePath)
+	go catFileBatchCheck(ctx, shasToCheckReader, catFileCheckWriter, &wg, basePath, errChan)
 	go blobsFromRevListObjects(revListReader, shasToCheckWriter, &wg)
 	go revListAllObjects(ctx, revListWriter, &wg, basePath, errChan)
 	wg.Wait()
@@ -49,12 +51,30 @@ func SearchPointerBlobs(ctx context.Context, repo *git.Repository, pointerChan c
 	close(errChan)
 }
 
-func createPointerResultsFromCatFileBatch(ctx context.Context, catFileBatchReader *io.PipeReader, wg *sync.WaitGroup, pointerChan chan<- PointerBlob) {
+// sendScanError reports a failed stage of the scan. A stage that fails
+// breaks the pipes around it, so the stages next to it may fail as well; the
+// first error is the one that counts and later ones are dropped rather than
+// block. Each stage reports before it closes its pipes with the error, so
+// the stage that failed first gets in ahead of the ones it broke.
+func sendScanError(errChan chan<- error, err error) {
+	select {
+	case errChan <- err:
+	default:
+	}
+}
+
+func createPointerResultsFromCatFileBatch(ctx context.Context, catFileBatchReader *io.PipeReader, wg *sync.WaitGroup, pointerChan chan<- PointerBlob, errChan chan<- error) {
 	defer wg.Done()
 	defer catFileBatchReader.Close() //nolint: errcheck
 
 	bufferedReader := bufio.NewReader(catFileBatchReader)
 	buf := make([]byte, 1025)
+
+	fail := func(err error) {
+		err = fmt.Errorf("reading git cat-file --batch output: %w", err)
+		sendScanError(errChan, err)
+		_ = catFileBatchReader.CloseWithError(err)
+	}
 
 loop:
 	for {
@@ -67,28 +87,32 @@ loop:
 		// File descriptor line: sha
 		sha, err := bufferedReader.ReadString(' ')
 		if err != nil {
-			_ = catFileBatchReader.CloseWithError(err)
+			// A clean end of the output between two blobs is the end of
+			// the scan.
+			if !errors.Is(err, io.EOF) || sha != "" {
+				fail(err)
+			}
 			break
 		}
 		sha = strings.TrimSpace(sha)
 		// Throw away the blob
 		if _, err := bufferedReader.ReadString(' '); err != nil {
-			_ = catFileBatchReader.CloseWithError(err)
+			fail(err)
 			break
 		}
 		sizeStr, err := bufferedReader.ReadString('\n')
 		if err != nil {
-			_ = catFileBatchReader.CloseWithError(err)
+			fail(err)
 			break
 		}
 		size, err := strconv.Atoi(sizeStr[:len(sizeStr)-1])
 		if err != nil {
-			_ = catFileBatchReader.CloseWithError(err)
+			fail(err)
 			break
 		}
 		pointerBuf := buf[:size+1]
 		if _, err := io.ReadFull(bufferedReader, pointerBuf); err != nil {
-			_ = catFileBatchReader.CloseWithError(err)
+			fail(err)
 			break
 		}
 		pointerBuf = pointerBuf[:size]
@@ -102,13 +126,12 @@ loop:
 	}
 }
 
-func catFileBatch(ctx context.Context, shasToBatchReader *io.PipeReader, catFileBatchWriter *io.PipeWriter, wg *sync.WaitGroup, basePath string) {
+func catFileBatch(ctx context.Context, shasToBatchReader *io.PipeReader, catFileBatchWriter *io.PipeWriter, wg *sync.WaitGroup, basePath string, errChan chan<- error) {
 	defer wg.Done()
 	defer shasToBatchReader.Close()  //nolint: errcheck
 	defer catFileBatchWriter.Close() //nolint: errcheck
 
 	stderr := new(bytes.Buffer)
-	var errbuf strings.Builder
 	if err := gitm.NewCommandWithContext(ctx, "cat-file", "--batch").
 		WithTimeout(-1).
 		RunInDirWithOptions(basePath, gitm.RunInDirOptions{
@@ -116,7 +139,9 @@ func catFileBatch(ctx context.Context, shasToBatchReader *io.PipeReader, catFile
 			Stdin:  shasToBatchReader,
 			Stderr: stderr,
 		}); err != nil {
-		_ = shasToBatchReader.CloseWithError(fmt.Errorf("git rev-list [%s]: %w - %s", basePath, err, errbuf.String()))
+		err = fmt.Errorf("git cat-file --batch [%s]: %w - %s", basePath, err, stderr.String())
+		sendScanError(errChan, err)
+		_ = shasToBatchReader.CloseWithError(err)
 	}
 }
 
@@ -152,13 +177,12 @@ func blobsLessThan1024FromCatFileBatchCheck(catFileCheckReader *io.PipeReader, s
 	}
 }
 
-func catFileBatchCheck(ctx context.Context, shasToCheckReader *io.PipeReader, catFileCheckWriter *io.PipeWriter, wg *sync.WaitGroup, basePath string) {
+func catFileBatchCheck(ctx context.Context, shasToCheckReader *io.PipeReader, catFileCheckWriter *io.PipeWriter, wg *sync.WaitGroup, basePath string, errChan chan<- error) {
 	defer wg.Done()
 	defer shasToCheckReader.Close()  //nolint: errcheck
 	defer catFileCheckWriter.Close() //nolint: errcheck
 
 	stderr := new(bytes.Buffer)
-	var errbuf strings.Builder
 	if err := gitm.NewCommandWithContext(ctx, "cat-file", "--batch-check").
 		WithTimeout(-1).
 		RunInDirWithOptions(basePath, gitm.RunInDirOptions{
@@ -166,7 +190,9 @@ func catFileBatchCheck(ctx context.Context, shasToCheckReader *io.PipeReader, ca
 			Stdin:  shasToCheckReader,
 			Stderr: stderr,
 		}); err != nil {
-		_ = shasToCheckReader.CloseWithError(fmt.Errorf("git rev-list [%s]: %w - %s", basePath, err, errbuf.String()))
+		err = fmt.Errorf("git cat-file --batch-check [%s]: %w - %s", basePath, err, stderr.String())
+		sendScanError(errChan, err)
+		_ = shasToCheckReader.CloseWithError(err)
 	}
 }
 
@@ -204,13 +230,12 @@ func revListAllObjects(ctx context.Context, revListWriter *io.PipeWriter, wg *sy
 	defer revListWriter.Close() //nolint: errcheck
 
 	stderr := new(bytes.Buffer)
-	var errbuf strings.Builder
 	if err := gitm.NewCommandWithContext(ctx, "rev-list", "--objects", "--all").
 		WithTimeout(-1).
 		RunInDirWithOptions(basePath, gitm.RunInDirOptions{
 			Stdout: revListWriter,
 			Stderr: stderr,
 		}); err != nil {
-		errChan <- fmt.Errorf("git rev-list [%s]: %w - %s", basePath, err, errbuf.String())
+		sendScanError(errChan, fmt.Errorf("git rev-list [%s]: %w - %s", basePath, err, stderr.String()))
 	}
 }
