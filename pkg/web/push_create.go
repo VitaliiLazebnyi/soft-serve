@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"charm.land/log/v2"
 	gitb "github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/backend"
+	"github.com/charmbracelet/soft-serve/pkg/proto"
 )
 
 // pushCreateTimeout is how long a repository created by an HTTP push may
@@ -23,13 +25,17 @@ var pushCreateTimeout = 10 * time.Minute
 // the repository when the push fails; over HTTP the push may fail in a later
 // request or never arrive. A listed repository is removed when a
 // receive-pack request to it fails and leaves no ref, or when nothing has
-// reached it for pushCreateTimeout and it still has no ref. A receive-pack
-// request that succeeds without updating a ref, such as the probe git sends
-// before a pack larger than http.postBuffer, only restarts the timeout. A
-// repository leaves the list once a request to it ends and it has a ref.
+// reached it for pushCreateTimeout and it still has no ref. It is kept
+// instead if it was used meanwhile or a push over SSH to it is running; see
+// backend.RemovePushCreatedRepository. A receive-pack request that succeeds
+// without updating a ref, such as the probe git sends before a pack larger
+// than http.postBuffer, only restarts the timeout. A repository leaves the
+// list once a request to it ends and it has a ref.
 //
 // The list is kept in memory, so a repository still on it when the server
-// stops is kept.
+// stops is kept, empty, until someone deletes it. That errs on the side of
+// keeping: nothing on disk tells such a repository apart from one created
+// empty on purpose.
 type pushCreates struct {
 	// mu guards the map and the entries' fields. It is never held while
 	// running git or deleting a repository, since every HTTP git request
@@ -43,10 +49,10 @@ type pushCreate struct {
 	// ctx is the creating request's context without its cancellation, used
 	// to delete the repository after that request has ended.
 	ctx context.Context
-	// id is the created repository's ID. The repository is only deleted if
-	// the name still belongs to it, not to one renamed or created in its
-	// place since.
-	id       int64
+	// repo is the created repository as it was created. It is only deleted
+	// if the name still belongs to it, not to one renamed or created in its
+	// place since, and nothing about it changed.
+	repo     proto.Repository
 	dir      string
 	inflight int
 	// gen changes whenever a request starts or a decision is taken, so a
@@ -80,15 +86,14 @@ func markPushFailed(ctx context.Context) {
 	}
 }
 
-// add records that the request in ctx created the repository name, with
-// the ID id, at dir.
-func (p *pushCreates) add(ctx context.Context, name string, id int64, dir string) {
+// add records that the request in ctx created repo, under name, at dir.
+func (p *pushCreates) add(ctx context.Context, name string, repo proto.Repository, dir string) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.repos[name] = &pushCreate{ctx: context.WithoutCancel(ctx), id: id, dir: dir}
+	p.repos[name] = &pushCreate{ctx: context.WithoutCancel(ctx), repo: repo, dir: dir}
 }
 
 // begin marks a request to the repository name as in flight, so it is not
@@ -157,9 +162,9 @@ func (p *pushCreates) end(name string, pc *pushCreate, failed bool) {
 	pc.timer = time.AfterFunc(pushCreateTimeout, func() { p.remove(name, pc, gen) })
 }
 
-// remove takes the repository off the list and deletes it if it still has
-// no refs and the name still belongs to it. It does nothing if a request
-// started since gen was taken.
+// remove takes the repository off the list and deletes it if it is still
+// unused; see backend.RemovePushCreatedRepository. It does nothing if a
+// request started since gen was taken.
 func (p *pushCreates) remove(name string, pc *pushCreate, gen int) {
 	p.mu.Lock()
 	if p.repos[name] != pc || pc.gen != gen || pc.inflight > 0 || pc.removing != nil {
@@ -184,14 +189,14 @@ func (p *pushCreates) remove(name string, pc *pushCreate, gen int) {
 	}
 	logger := log.FromContext(pc.ctx)
 	be := backend.FromContext(pc.ctx)
-	repo, err := be.Repository(pc.ctx, name)
-	if err != nil || repo.ID() != pc.id {
-		// Deleted, or renamed with another repository now in its place.
-		return
-	}
-	logger.Info("removing repository created by a push that sent no refs", "repo", name)
-	if err := be.DeleteRepository(pc.ctx, name); err != nil {
+	removed, err := be.RemovePushCreatedRepository(pc.ctx, pc.repo)
+	switch {
+	case errors.Is(err, proto.ErrRepoNotFound):
+		// Deleted, or renamed, meanwhile.
+	case err != nil:
 		logger.Error("failed to remove repository created by a push", "repo", name, "err", err)
+	case removed:
+		logger.Info("removed repository created by a push that sent no refs", "repo", name)
 	}
 }
 

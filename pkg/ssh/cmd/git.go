@@ -263,8 +263,17 @@ func gitRunE(cmd *cobra.Command, args []string) error {
 				return err
 			}
 			createRepoCounter.WithLabelValues(name).Inc()
-		} else if err := gitAccess(user, repo, accessLevel, access.ReadWriteAccess); err != nil {
-			return err
+		} else {
+			if err := gitAccess(user, repo, accessLevel, access.ReadWriteAccess); err != nil {
+				return err
+			}
+			// Hold off the removal of a repository an HTTP push created
+			// and left without refs while this push may write some.
+			done, err := be.BeginPush(ctx, repo)
+			if err != nil {
+				return err
+			}
+			defer done()
 		}
 
 		if err := service.Handler(ctx, scmd); err != nil {
