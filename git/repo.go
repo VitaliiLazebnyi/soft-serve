@@ -1,6 +1,7 @@
 package git
 
 import (
+	"fmt"
 	gopath "path"
 	"path/filepath"
 	"strings"
@@ -42,18 +43,32 @@ func Init(path string, bare bool) (*Repository, error) {
 	return Open(path)
 }
 
+// gitDir runs "git rev-parse --git-dir" in r. It does not use r.RevParse,
+// which turns every exit status 128 into ErrRevisionNotExist and drops
+// git's stderr.
 func gitDir(r *git.Repository) (string, error) {
-	return r.RevParse("--git-dir")
+	out, err := git.NewCommand("rev-parse", "--git-dir").RunInDir(r.Path())
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // Open opens a git repository at the given path.
+//
+// When git does not accept the path as a repository the error wraps
+// ErrNotAGitRepository and carries git's reason, for example "detected
+// dubious ownership". That reason can include the server path.
 func Open(path string) (*Repository, error) {
 	repo, err := git.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	gp, err := gitDir(repo)
-	if err != nil || (gp != "." && gp != ".git") {
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrNotAGitRepository, strings.TrimSpace(err.Error()))
+	}
+	if gp != "." && gp != ".git" {
 		return nil, ErrNotAGitRepository
 	}
 	return &Repository{
