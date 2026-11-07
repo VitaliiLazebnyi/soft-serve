@@ -30,7 +30,7 @@ func (b *Backend) CreateWebhook(ctx context.Context, repo proto.Repository, url 
 	}
 	events = dedupeEvents(events)
 
-	return dbx.TransactionContext(ctx, func(tx *db.Tx) error {
+	err := dbx.TransactionContext(ctx, func(tx *db.Tx) error {
 		lastID, err := datastore.CreateWebhook(ctx, tx, repo.ID(), url, secret, int(contentType), active)
 		if err != nil {
 			return db.WrapError(err)
@@ -61,6 +61,9 @@ func (b *Backend) CreateWebhook(ctx context.Context, repo proto.Repository, url 
 
 		return nil
 	})
+	// A repository deleted meanwhile fails the insert on its foreign key,
+	// which would read as a duplicate; report it as gone.
+	return store.RepoGoneError(ctx, datastore, dbx, repo.ID(), err)
 }
 
 // Webhook returns a webhook for a repository.

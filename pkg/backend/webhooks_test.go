@@ -882,3 +882,15 @@ func TestRedeliverFallsBackOnUnknownStoredContentType(t *testing.T) {
 		is.Equal(strings.TrimSpace(rd.RequestBody), `{"ref":"main"}`)
 	}
 }
+
+// A webhook created for a repository deleted meanwhile fails on its foreign
+// key. That must be reported as the repository being gone, not as a
+// duplicate key.
+func TestCreateWebhookOnDeletedRepository(t *testing.T) {
+	is := is.New(t)
+	e := newWebhookEnv(t)
+	is.NoErr(e.be.DeleteRepository(e.ctx, "repo"))
+
+	err := e.be.CreateWebhook(e.ctx, e.repo, whURL, webhook.ContentTypeJSON, "", []webhook.Event{webhook.EventPush}, true)
+	is.True(errors.Is(err, proto.ErrRepoNotFound))
+}

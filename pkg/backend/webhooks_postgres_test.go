@@ -107,7 +107,9 @@ func TestCreateWebhookCapHoldsUnderConcurrencyPostgres(t *testing.T) {
 			result <- e.be.CreateWebhook(e.ctx, e.repo, whURL+"/racer",
 				webhook.ContentTypeJSON, "", []webhook.Event{webhook.EventPush}, true)
 		}()
-		waitBlockedBy(t, e, holder, result)
+		if err := waitBlockedBy(e, holder, result, "CreateWebhook"); err != nil {
+			return err
+		}
 
 		_, err = e.be.store.CreateWebhook(e.ctx, tx, e.repo.ID(), whURL+"/last", "", int(webhook.ContentTypeJSON), true)
 		return err
@@ -125,28 +127,30 @@ func TestCreateWebhookCapHoldsUnderConcurrencyPostgres(t *testing.T) {
 }
 
 // waitBlockedBy waits until some backend is waiting for a lock held by the
-// backend holder. It fails the test if result delivers first, meaning the
-// operation it watches finished without waiting, or if nothing blocks within
-// 10 seconds.
-func waitBlockedBy(t *testing.T, e whEnv, holder int, result <-chan error) {
-	t.Helper()
+// backend holder. It returns an error naming op, the operation it watches,
+// if result delivers first, meaning op finished without waiting, or if
+// nothing blocks within 10 seconds. It returns an error rather than failing
+// the test so a caller inside the holder's transaction can return it, which
+// rolls the transaction back and lets the waiting operation finish before
+// the test database is dropped.
+func waitBlockedBy(e whEnv, holder int, result <-chan error, op string) error {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		select {
 		case err := <-result:
-			t.Fatalf("CreateWebhook did not wait for the repository lock: %v", err)
+			return fmt.Errorf("%s did not wait for the repository lock: %v", op, err)
 		default:
 		}
 		var blocked bool
 		if err := e.be.db.GetContext(e.ctx, &blocked,
 			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)));`, holder); err != nil {
-			t.Fatalf("checking for blocked backends: %v", err)
+			return fmt.Errorf("checking for blocked backends: %w", err)
 		}
 		if blocked {
-			return
+			return nil
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("CreateWebhook did not block on the repository lock")
+			return fmt.Errorf("%s did not block on the repository lock", op)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

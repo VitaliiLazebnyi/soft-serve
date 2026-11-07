@@ -17,8 +17,8 @@ import (
 // go with the row through ON DELETE CASCADE, although its caller was told
 // it was added. The keep check reads the row with FOR UPDATE, which the
 // insert's foreign key check waits for: here the insert must block on the
-// deleting transaction (checked with pg_blocking_pids) and then fail,
-// since the repository it names is gone.
+// deleting transaction (checked with pg_blocking_pids) and then fail with
+// proto.ErrRepoNotFound, since the repository it names is gone.
 func TestDeleteRepositoryKeepCheckLocksRowPostgres(t *testing.T) {
 	is := is.New(t)
 	e := newPostgresWebhookEnv(t)
@@ -34,14 +34,21 @@ func TestDeleteRepositoryKeepCheckLocksRowPostgres(t *testing.T) {
 		go func() {
 			result <- e.be.AddCollaborator(e.ctx, "repo", "alice", access.ReadWriteAccess)
 		}()
-		waitBlockedBy(t, e, holder, result)
+		// An error, rather than a failed test, rolls the delete back and
+		// lets AddCollaborator finish before the database is dropped.
+		if err := waitBlockedBy(e, holder, result, "AddCollaborator"); err != nil {
+			return true, err
+		}
 		return false, nil
 	})
 	is.NoErr(err)
 
 	select {
 	case err := <-result:
-		is.True(err != nil) // the collaborator was not added to a deleted repository
+		// The collaborator was not added to the deleted repository, and
+		// the error says the repository is gone, not that the
+		// collaborator exists.
+		is.True(errors.Is(err, proto.ErrRepoNotFound))
 	case <-time.After(10 * time.Second):
 		t.Fatal("AddCollaborator still waiting after the delete committed")
 	}

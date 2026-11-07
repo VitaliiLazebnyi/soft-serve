@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/charmbracelet/soft-serve/pkg/utils"
 	"github.com/charmbracelet/soft-serve/pkg/webhook"
 )
@@ -33,6 +34,11 @@ func (d *Backend) AddCollaborator(ctx context.Context, repo string, username str
 			return d.store.AddCollabByUsernameAndRepo(ctx, tx, username, repo, level)
 		}),
 	); err != nil {
+		// A repository deleted meanwhile fails the insert on a
+		// constraint too; report it as gone, not as a duplicate.
+		if err := store.RepoGoneError(ctx, d.store, d.db, r.ID(), err); errors.Is(err, proto.ErrRepoNotFound) {
+			return err
+		}
 		if errors.Is(err, db.ErrDuplicateKey) {
 			return proto.ErrCollaboratorExist
 		}

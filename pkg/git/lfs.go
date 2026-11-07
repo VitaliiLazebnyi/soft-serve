@@ -126,7 +126,7 @@ func (t *lfsTransfer) Batch(_ string, pointers []transfer.BatchItem, _ transfer.
 
 		if pointers[i].Present && obj.ID == 0 {
 			if err := t.store.CreateLFSObject(t.ctx, t.dbx, t.repo.ID(), pointers[i].Oid, pointers[i].Size); err != nil {
-				return pointers, db.WrapError(err)
+				return pointers, store.RepoGoneError(t.ctx, t.store, t.dbx, t.repo.ID(), db.WrapError(err))
 			}
 		}
 	}
@@ -201,7 +201,7 @@ func (t *lfsTransfer) Upload(oid string, size int64, r io.Reader, _ transfer.Arg
 	}
 
 	if err := t.store.CreateLFSObject(t.ctx, t.dbx, t.repo.ID(), pointer.Oid, pointer.Size); err != nil {
-		return db.WrapError(err)
+		return store.RepoGoneError(t.ctx, t.store, t.dbx, t.repo.ID(), db.WrapError(err))
 	}
 
 	// Rename takes names relative to the storage root, not the absolute path
@@ -318,6 +318,11 @@ func (l *lfsLockBackend) Create(path string, refname string) (transfer.Lock, err
 		lock.owner, err = l.store.GetUserByID(l.ctx, tx, lock.lock.UserID)
 		return db.WrapError(err)
 	}); err != nil {
+		// A repository deleted meanwhile fails the insert on its foreign
+		// key too; that is not an existing lock.
+		if err := store.RepoGoneError(l.ctx, l.store, l.dbx, l.repo.ID(), err); errors.Is(err, proto.ErrRepoNotFound) {
+			return nil, err
+		}
 		// Return conflict (409) if the lock already exists.
 		if errors.Is(err, db.ErrDuplicateKey) {
 			return nil, transfer.ErrConflict

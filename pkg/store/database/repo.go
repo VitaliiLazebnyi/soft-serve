@@ -101,6 +101,14 @@ func (*repoStore) GetRepoByName(ctx context.Context, tx db.Handler, name string)
 	return repo, db.WrapError(err)
 }
 
+// GetRepoByID implements store.RepositoryStore.
+func (*repoStore) GetRepoByID(ctx context.Context, h db.Handler, id int64) (models.Repo, error) {
+	var repo models.Repo
+	query := h.Rebind("SELECT * FROM repos WHERE id = ?;")
+	err := h.GetContext(ctx, &repo, query, id)
+	return repo, db.WrapError(err)
+}
+
 // GetRepoByNameForUpdate implements store.RepositoryStore. See LockUserRepos
 // for the driver switch.
 func (*repoStore) GetRepoByNameForUpdate(ctx context.Context, h db.Handler, name string) (models.Repo, error) {
