@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
+	"github.com/charmbracelet/soft-serve/pkg/ssrf"
 	"github.com/charmbracelet/soft-serve/pkg/store"
 	"github.com/charmbracelet/soft-serve/pkg/utils"
 	"github.com/charmbracelet/soft-serve/pkg/webhook"
@@ -25,7 +26,7 @@ func (b *Backend) CreateWebhook(ctx context.Context, repo proto.Repository, url 
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
 	url = utils.Sanitize(url)
-	if err := validateWebhookInput(url, contentType, events); err != nil {
+	if err := validateWebhookInput(b.webhookAllowedHosts(), url, contentType, events); err != nil {
 		return err
 	}
 	events = dedupeEvents(events)
@@ -146,7 +147,7 @@ func (b *Backend) UpdateWebhook(ctx context.Context, repo proto.Repository, id i
 	datastore := store.FromContext(ctx)
 
 	url = utils.Sanitize(url)
-	if err := validateWebhookInput(url, contentType, updatedEvents); err != nil {
+	if err := validateWebhookInput(b.webhookAllowedHosts(), url, contentType, updatedEvents); err != nil {
 		return err
 	}
 	updatedEvents = dedupeEvents(updatedEvents)
@@ -417,11 +418,21 @@ func (b *Backend) WebhookDelivery(ctx context.Context, repo proto.Repository, we
 	return delivery, nil
 }
 
+// webhookAllowedHosts returns the private and internal destinations the
+// operator allows webhooks to reach (webhook.allowed_hosts).
+func (d *Backend) webhookAllowedHosts() ssrf.AllowedHosts {
+	if d.cfg == nil {
+		return nil
+	}
+	return d.cfg.Webhook.ParsedAllowedHosts()
+}
+
 // validateWebhookInput checks a webhook's URL, content type and events before
-// anything is stored.
-func validateWebhookInput(url string, contentType webhook.ContentType, events []webhook.Event) error {
+// anything is stored. The URL may reach the private and internal
+// destinations allowed permits.
+func validateWebhookInput(allowed ssrf.AllowedHosts, url string, contentType webhook.ContentType, events []webhook.Event) error {
 	// Validate webhook URL to prevent SSRF attacks.
-	if err := webhook.ValidateWebhookURL(url); err != nil {
+	if err := webhook.ValidateWebhookURLAllowing(url, allowed); err != nil {
 		return err //nolint:wrapcheck
 	}
 	if contentType.String() == "" {
