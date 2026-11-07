@@ -221,6 +221,15 @@ ssh:
   # The number of seconds a connection can be idle before it is closed.
   idle_timeout: 120
 
+  # The key exchange algorithms, ciphers and MACs the SSH server offers, in
+  # order of preference. When a list is empty, the server offers every
+  # algorithm golang.org/x/crypto/ssh considers secure, which leaves out the
+  # SHA-1 based ones. Unknown names are rejected at startup. See
+  # "SSH Algorithms" below.
+  kex_algorithms: []
+  ciphers: []
+  macs: []
+
 # The Git daemon configuration.
 git:
   # The address on which the Git daemon will listen.
@@ -301,6 +310,26 @@ lfs:
 jobs:
   mirror_pull: "@every 10m"
 
+# Repository webhook configuration.
+webhook:
+  # Private and internal destinations webhooks may be sent to. Webhooks to
+  # loopback, private networks and other internal addresses are refused
+  # unless listed here. Entries are hostnames, IP addresses, or CIDR ranges,
+  # each with an optional port (a URL without a port uses 80 for http and
+  # 443 for https). An IP or CIDR entry allows the addresses it covers,
+  # whatever hostname the webhook URL names. A hostname entry allows that
+  # name to resolve to loopback, RFC1918, CGNAT or IPv6 unique local
+  # addresses, and the name is resolved again for every delivery, so list
+  # only names whose DNS you trust. Link-local and cloud metadata addresses
+  # (such as 169.254.169.254) are reachable only through an IP or CIDR entry
+  # inside their own range; a broad range such as 0.0.0.0/0 does not open
+  # them. The list is checked when a webhook is created or updated, and
+  # again on every delivery, so existing webhooks follow the current list.
+  allowed_hosts: []
+    # - "jenkins.internal.example"
+    # - "10.0.0.0/8"
+    # - "127.0.0.1:8080"
+
 # The stats server configuration.
 stats:
   # The address on which the stats server will listen.
@@ -323,9 +352,10 @@ stats:
 # Only server admins (admin accounts or initial_admin_keys) may create
 # repositories. Registered non-admins and anonymous users cannot create or
 # import. Renaming counts as creating the new name, so repository owners and
-# collaborators can no longer rename their repositories. Anonymous access to a
-# name that does not exist yet is capped at read-only whatever anon_access
-# says. Access to existing repositories is not affected. Defaults to false.
+# admin-access collaborators can no longer rename their repositories.
+# Anonymous access to a name that does not exist yet is capped at read-only
+# whatever anon_access says. Access to existing repositories is not affected.
+# Defaults to false.
 #admin_only_create: false
 
 # Maximum number of repositories each user may create (repo create, repo
@@ -351,9 +381,65 @@ name all in uppercase. Here are some examples:
 - `SOFT_SERVE_GIT_MAX_CONNECTIONS`: The number of simultaneous connections to git daemon
 - `SOFT_SERVE_ANON_ACCESS`: Overrides the `anon-access` setting (see [Authentication](#authentication))
 - `SOFT_SERVE_ALLOW_KEYLESS`: Overrides the `allow-keyless` setting (see [Authentication](#authentication))
-- `SOFT_SERVE_ADMIN_ONLY_CREATE`: Only server admins may create repositories. Owners and collaborators can no longer rename repositories, and anonymous access to names that do not exist yet is capped at read-only. Defaults to `false`. Access to existing repositories is not affected.
+- `SOFT_SERVE_ADMIN_ONLY_CREATE`: Only server admins may create repositories. Owners and admin-access collaborators can no longer rename repositories, and anonymous access to names that do not exist yet is capped at read-only. Defaults to `false`. Access to existing repositories is not affected.
 - `SOFT_SERVE_MAX_REPOS_PER_USER`: Maximum number of repositories each user may create. Server admins are exempt, and repositories created without an account count together as one user. Defaults to `0` (no limit).
 - `SOFT_SERVE_DEFAULT_REPO`: Repository name to create on boot if missing
+- `SOFT_SERVE_SSH_KEX_ALGORITHMS`, `SOFT_SERVE_SSH_CIPHERS`, `SOFT_SERVE_SSH_MACS`: Comma-separated lists of the SSH key exchange algorithms, ciphers and MACs to offer. Empty means the secure defaults (see [SSH Algorithms](#ssh-algorithms))
+- `SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS`: Comma-separated private or internal hosts, IP addresses or CIDR ranges (each with an optional port) that webhooks may be sent to (see [Repository webhooks](#repository-webhooks)). Defaults to empty: public addresses only.
+
+#### SSH Algorithms
+
+The SSH server offers the key exchange algorithms, ciphers and MACs that
+[golang.org/x/crypto/ssh](https://pkg.go.dev/golang.org/x/crypto/ssh#SupportedAlgorithms)
+considers secure, minus `hmac-sha1`. With the current x/crypto that is:
+
+- key exchange: `mlkem768x25519-sha256`, `curve25519-sha256` (and its alias `curve25519-sha256@libssh.org`), `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521`, `diffie-hellman-group14-sha256`, `diffie-hellman-group16-sha512`, `diffie-hellman-group-exchange-sha256`
+- ciphers: `aes128-gcm@openssh.com`, `aes256-gcm@openssh.com`, `chacha20-poly1305@openssh.com`, `aes128-ctr`, `aes192-ctr`, `aes256-ctr`
+- MACs: `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512-etm@openssh.com`, `hmac-sha2-256`, `hmac-sha2-512`
+
+Earlier versions offered x/crypto's defaults, which also include the SHA-1
+based `diffie-hellman-group14-sha1`, `hmac-sha1` and `hmac-sha1-96`. To
+restrict the server further, for example to drop the NIST curves, set
+`ssh.kex_algorithms`, `ssh.ciphers` or `ssh.macs` (or the environment
+variables above). A list replaces the default rather than adding to it, and
+a name x/crypto does not implement stops the server at startup.
+
+**Older clients.** The host key Soft Serve Plus generates by default is
+Ed25519, and the clients we checked that can verify an Ed25519 host key all
+agree on the defaults: OpenSSH 6.6 and later (Ed25519 arrived in 6.5),
+libssh2 1.10 (Ubuntu 22.04), and the maintained JSch fork
+(`com.github.mwiede:jsch`) on Java 15 or later. Clients without Ed25519 host
+key support cannot verify the default host key, with or without this
+setting: OpenSSH before 6.5, libssh2 1.8 (Ubuntu 18.04 and 20.04, used by
+libgit2 based tools there), and the original JCraft JSch up to 0.1.55. With
+an RSA host key (`ssh.key_path`), libssh2 1.8 and JSch 0.1.55 do connect
+with the defaults, using `diffie-hellman-group-exchange-sha256` (or ECDH for
+JSch), `aes128-ctr` and `hmac-sha2-256`.
+
+A client limited to SHA-1 key exchange or MACs is refused. To let one in,
+copy the default list above and append the legacy algorithm. Listing only a
+few algorithms would drop the rest, including the post-quantum
+`mlkem768x25519-sha256`, for every client:
+
+```yaml
+ssh:
+  kex_algorithms:
+    - "mlkem768x25519-sha256"
+    - "curve25519-sha256"
+    - "ecdh-sha2-nistp256"
+    - "ecdh-sha2-nistp384"
+    - "ecdh-sha2-nistp521"
+    - "diffie-hellman-group14-sha256"
+    - "diffie-hellman-group16-sha512"
+    - "diffie-hellman-group-exchange-sha256"
+    - "diffie-hellman-group14-sha1" # legacy, appended
+  macs:
+    - "hmac-sha2-256-etm@openssh.com"
+    - "hmac-sha2-512-etm@openssh.com"
+    - "hmac-sha2-256"
+    - "hmac-sha2-512"
+    - "hmac-sha1" # legacy, appended
+```
 
 #### Database Configuration
 
@@ -550,8 +636,13 @@ Soft Serve Plus offers a simple access control. There are four access levels,
 no-access, read-only, read-write, and admin-access.
 
 `admin-access` has full control of the server and can make changes to users and repos.
+Given to a collaborator, it only applies to that repo.
 
-`read-write` access gets full control of repos.
+`read-write` access can push to repos and change their content and metadata.
+Deleting or renaming a repo, changing whether it is private, and managing its
+webhooks need `admin-access` to that repo, which its owner always has. With
+`anon-access: read-write`, anonymous users can push to public repos but can't
+delete, rename or change the visibility of any of them.
 
 `read-only` can read public repos.
 
@@ -759,6 +850,11 @@ ssh -p 23231 localhost repo collab remove soft-serve-plus beatrice
 ssh -p 23231 localhost repo collab list soft-serve-plus
 ```
 
+A `read-write` collaborator can push and edit the repo's branches, tags and
+metadata. Only the owner, server admins and `admin-access` collaborators can
+delete or rename the repo, change whether it is private, or manage its
+webhooks.
+
 ### Repository Metadata
 
 You can also change the repo's description, project name, whether it's private,
@@ -857,6 +953,55 @@ to about the size of the file. On Postgres, autovacuum makes the space
 reusable, and `VACUUM FULL webhook_deliveries` returns it to the system.
 
 A repository can have at most 20 webhooks.
+
+#### Webhooks to internal services
+
+Webhooks are protected against server-side request forgery: by default a
+webhook URL may not point at loopback, a private network, a link-local or
+cloud metadata address, or any other internal address. This is checked when a
+webhook is created or updated, and again when each delivery connects, so a
+name that later resolves to an internal address is refused too. Redirects are
+never followed.
+
+To send webhooks to an internal service such as a CI server, list it in
+`webhook.allowed_hosts` (or `SOFT_SERVE_WEBHOOK_ALLOWED_HOSTS`, comma
+separated):
+
+```yaml
+webhook:
+  allowed_hosts:
+    - "jenkins.internal.example" # this name, on any port
+    - "10.20.0.0/16"             # any URL whose addresses fall in this range
+    - "127.0.0.1:8080"           # only port 8080 on loopback
+```
+
+The entries are trusted differently:
+
+- An IP address or CIDR range allows the addresses it covers whatever host
+  name the URL uses. It is checked against the address actually connected to,
+  so DNS cannot get around it. Prefer it when the service has a fixed address.
+- A hostname allows that name to resolve to loopback, RFC1918, CGNAT
+  (100.64.0.0/10) and IPv6 unique local (fc00::/7) addresses. The name is
+  resolved again for every delivery, so whoever controls its DNS decides
+  which of those addresses is reached; list only names you trust. A hostname
+  entry never opens anything else, and it does not cover other names that
+  resolve to the same addresses. `localhost` names need a hostname entry.
+- Link-local addresses, including the 169.254.169.254 metadata service, the
+  other cloud metadata addresses (`fd00:ec2::254`, `100.100.100.200`) and the
+  remaining reserved ranges can only be opened by an IP or CIDR entry inside
+  that range, such as `169.254.169.254`; a broad entry such as `0.0.0.0/0`
+  does not open them.
+- An entry in an IPv6 transition range, such as NAT64 (`64:ff9b::/96`) or
+  6to4 (`2002::/16`), also reaches the IPv4 addresses embedded in the
+  addresses it covers once a gateway translates them, metadata addresses
+  included: `64:ff9b::/96` reaches 169.254.169.254 as `64:ff9b::a9fe:a9fe`.
+  List such ranges only if you mean every IPv4 address behind them.
+
+Every address a name resolves to must be public or allowed, otherwise the
+webhook is refused. Existing webhooks follow the list in effect when they are
+delivered: removing an entry stops deliveries to it, which are then recorded as
+failed. The list applies to webhooks only. Git LFS transfers and HTTP repository
+imports and mirrors are not affected by it.
 
 ## The Soft Serve Plus TUI
 

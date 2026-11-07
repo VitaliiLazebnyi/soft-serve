@@ -1,0 +1,41 @@
+# vi: set ft=conf
+
+# A push whose pack is larger than http.postBuffer makes git send a small
+# probe request to git-receive-pack, with no ref updates, before the real
+# one. A repository created by the push advertisement must survive that
+# probe, along with the LFS objects git-lfs uploaded before it.
+
+[windows] skip 'needs dd and /dev/urandom'
+
+# git and git-lfs dial the remote and the LFS action URLs (built from the
+# public URL) themselves, so both name the address the server listens on
+env SOFT_SERVE_HTTP_PUBLIC_URL=http://127.0.0.1:$HTTP_PORT
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+soft settings anon-access read-write
+
+# a repository with a pack over 1 MiB and an LFS-tracked file
+mkdir ./repo1
+git -c init.defaultBranch=master -C repo1 init
+git -C repo1 lfs install --local
+git -C repo1 lfs track '*.png'
+mkfile ./repo1/foo.png 'lfs content'
+exec dd if=/dev/urandom of=repo1/big.bin bs=1024 count=2048
+git -C repo1 add -A
+git -C repo1 commit -m 'first'
+
+# push-to-create over HTTP
+git -C repo1 push http://127.0.0.1:$HTTP_PORT/repo1 HEAD:refs/heads/master
+soft repo tree repo1
+stdout 'big.bin'
+
+# a fresh clone gets the LFS object
+git clone http://127.0.0.1:$HTTP_PORT/repo1 clone1
+git -C clone1 lfs install --local
+git -C clone1 lfs pull
+exec cat clone1/foo.png
+stdout 'lfs content'
