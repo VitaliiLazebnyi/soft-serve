@@ -323,9 +323,10 @@ stats:
 # Only server admins (admin accounts or initial_admin_keys) may create
 # repositories. Registered non-admins and anonymous users cannot create or
 # import. Renaming counts as creating the new name, so repository owners and
-# collaborators can no longer rename their repositories. Anonymous access to a
-# name that does not exist yet is capped at read-only whatever anon_access
-# says. Access to existing repositories is not affected. Defaults to false.
+# admin-access collaborators can no longer rename their repositories.
+# Anonymous access to a name that does not exist yet is capped at read-only
+# whatever anon_access says. Access to existing repositories is not affected.
+# Defaults to false.
 #admin_only_create: false
 
 # Maximum number of repositories each user may create (repo create, repo
@@ -351,7 +352,7 @@ name all in uppercase. Here are some examples:
 - `SOFT_SERVE_GIT_MAX_CONNECTIONS`: The number of simultaneous connections to git daemon
 - `SOFT_SERVE_ANON_ACCESS`: Overrides the `anon-access` setting (see [Authentication](#authentication))
 - `SOFT_SERVE_ALLOW_KEYLESS`: Overrides the `allow-keyless` setting (see [Authentication](#authentication))
-- `SOFT_SERVE_ADMIN_ONLY_CREATE`: Only server admins may create repositories. Owners and collaborators can no longer rename repositories, and anonymous access to names that do not exist yet is capped at read-only. Defaults to `false`. Access to existing repositories is not affected.
+- `SOFT_SERVE_ADMIN_ONLY_CREATE`: Only server admins may create repositories. Owners and admin-access collaborators can no longer rename repositories, and anonymous access to names that do not exist yet is capped at read-only. Defaults to `false`. Access to existing repositories is not affected.
 - `SOFT_SERVE_MAX_REPOS_PER_USER`: Maximum number of repositories each user may create. Server admins are exempt, and repositories created without an account count together as one user. Defaults to `0` (no limit).
 - `SOFT_SERVE_DEFAULT_REPO`: Repository name to create on boot if missing
 
@@ -551,7 +552,9 @@ no-access, read-only, read-write, and admin-access.
 
 `admin-access` has full control of the server and can make changes to users and repos.
 
-`read-write` access gets full control of repos.
+`read-write` access can push to repos and change their content and metadata.
+Deleting or renaming a repo, changing whether it is private, and managing its
+webhooks need `admin-access` to that repo, which its owner always has.
 
 `read-only` can read public repos.
 
@@ -756,6 +759,11 @@ ssh -p 23231 localhost repo collab remove soft-serve-plus beatrice
 # List collaborators
 ssh -p 23231 localhost repo collab list soft-serve-plus
 ```
+
+A `read-write` collaborator can push and edit the repo's branches, tags and
+metadata. Only the owner, server admins and `admin-access` collaborators can
+delete or rename the repo, change whether it is private, or manage its
+webhooks.
 
 ### Repository Metadata
 
