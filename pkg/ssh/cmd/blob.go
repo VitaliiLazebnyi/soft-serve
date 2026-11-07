@@ -51,7 +51,7 @@ func blobCommand() *cobra.Command {
 			}
 
 			if ref == "" {
-				head, err := r.HEAD()
+				head, err := repoHead(r)
 				if err != nil {
 					return err
 				}

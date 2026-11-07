@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
@@ -174,9 +175,12 @@ func (d *Backend) createRepository(ctx context.Context, name string, user proto.
 	}
 
 	if _, err := git.Init(rp, true); err != nil {
-		d.logger.Debug("failed to create repository", "err", err)
+		if !errors.Is(err, git.ErrNotAGitRepository) {
+			// openRepoError logs the other case.
+			d.logger.Debug("failed to create repository", "err", err)
+		}
 		os.RemoveAll(rp) //nolint:errcheck
-		return nil, err
+		return nil, openRepoError(d.logger, err, rp)
 	}
 
 	return d.registerRepository(ctx, name, user, opts, limited)
@@ -688,9 +692,10 @@ func (d *Backend) Repositories(ctx context.Context) ([]proto.Repository, error) 
 
 		for _, m := range ms {
 			r := &repo{
-				name: m.Name,
-				path: filepath.Join(d.repoPath(m.Name)),
-				repo: m,
+				name:   m.Name,
+				path:   filepath.Join(d.repoPath(m.Name)),
+				repo:   m,
+				logger: d.logger,
 			}
 
 			repos = append(repos, r)
@@ -728,9 +733,10 @@ func (d *Backend) Repository(ctx context.Context, name string) (proto.Repository
 	}
 
 	r := &repo{
-		name: name,
-		path: rp,
-		repo: m,
+		name:   name,
+		path:   rp,
+		repo:   m,
+		logger: d.logger,
 	}
 
 	return r, nil
@@ -1130,9 +1136,10 @@ var _ proto.Repository = (*repo)(nil)
 
 // repo is a Git repository with metadata stored in a SQLite database.
 type repo struct {
-	name string
-	path string
-	repo models.Repo
+	name   string
+	path   string
+	repo   models.Repo
+	logger *log.Logger
 }
 
 // ID returns the repository's ID.
@@ -1185,7 +1192,26 @@ func (r *repo) Name() string {
 //
 // It implements backend.Repository.
 func (r *repo) Open() (*git.Repository, error) {
-	return git.Open(r.path)
+	gr, err := git.Open(r.path)
+	if err != nil {
+		return nil, openRepoError(r.logger, err, r.path)
+	}
+	return gr, nil
+}
+
+// openRepoError returns the error to show to clients when git does not accept
+// a repository. git's reason (for example "detected dubious ownership") names
+// the server path, so it is logged here and the client gets the plain
+// ErrNotAGitRepository, as before. Other errors are returned unchanged.
+func openRepoError(logger *log.Logger, err error, path string) error {
+	if !errors.Is(err, git.ErrNotAGitRepository) {
+		return err
+	}
+	if logger == nil {
+		logger = log.Default()
+	}
+	logger.Error("git does not accept the repository", "err", err, "path", path)
+	return git.ErrNotAGitRepository
 }
 
 // ProjectName returns the repository's project name.

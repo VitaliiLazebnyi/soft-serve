@@ -1,0 +1,1 @@
+ALTER TABLE lfs_objects ALTER COLUMN size TYPE BIGINT;
