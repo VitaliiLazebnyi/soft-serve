@@ -64,11 +64,12 @@ type ObjectResponse struct {
 }
 
 // Link provides a structure with information about how to access a object.
+// ExpiresIn is in seconds, as the git-lfs batch API defines it.
 type Link struct {
 	Href      string            `json:"href"`
 	Header    map[string]string `json:"header,omitempty"`
 	ExpiresAt *time.Time        `json:"expires_at,omitempty"`
-	ExpiresIn *time.Duration    `json:"expires_in,omitempty"`
+	ExpiresIn *int64            `json:"expires_in,omitempty"`
 }
 
 // ObjectError defines the JSON structure returned to the client in case of an error.
@@ -94,10 +95,11 @@ type Reference struct {
 }
 
 // AuthenticateResponse is the git-lfs-authenticate JSON response object.
+// ExpiresIn is in seconds, as the git-lfs SSH API defines it.
 type AuthenticateResponse struct {
 	Header    map[string]string `json:"header"`
 	Href      string            `json:"href"`
-	ExpiresIn time.Duration     `json:"expires_in"`
+	ExpiresIn int64             `json:"expires_in"`
 	ExpiresAt time.Time         `json:"expires_at"`
 }
 
