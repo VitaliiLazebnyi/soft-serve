@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,5 +60,35 @@ func TestLFSAuthenticateDoesNotLogToken(t *testing.T) {
 	}
 	if strings.Contains(got, token) {
 		t.Errorf("log contains the signed token:\n%s", got)
+	}
+}
+
+// The git-lfs spec gives expires_in in seconds, and git-lfs reads it into an
+// int, which is 32 bits wide on 32-bit platforms. A response in nanoseconds
+// does not fit there and reads as thousands of years on 64-bit clients.
+func TestLFSAuthenticateExpiresInSeconds(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DataPath = t.TempDir()
+	cfg.SSH.KeyPath = filepath.Join(cfg.DataPath, "host_key")
+
+	ctx := config.WithContext(context.Background(), cfg)
+	ctx = log.WithContext(ctx, log.New(io.Discard))
+	ctx = proto.WithUserContext(ctx, lfsAuthUser{})
+	ctx = proto.WithRepositoryContext(ctx, lfsAuthRepo{})
+
+	var out bytes.Buffer
+	if err := LFSAuthenticate(ctx, ServiceCommand{Stdout: &out, Args: []string{"repo", lfs.OperationDownload}}); err != nil {
+		t.Fatalf("LFSAuthenticate: %v", err)
+	}
+
+	// Decode as a 32-bit git-lfs client would.
+	var res struct {
+		ExpiresIn int32 `json:"expires_in"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if res.ExpiresIn != 300 {
+		t.Errorf("expires_in = %d, want 300 seconds", res.ExpiresIn)
 	}
 }
