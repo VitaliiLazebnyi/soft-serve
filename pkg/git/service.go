@@ -159,11 +159,11 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 	wg.Wait()
 
 	err = cmd.Wait()
-	if err != nil && ctx.Err() != nil {
+	if err != nil && stoppedByContext(ctx, err) {
 		// The context was cancelled, usually because the client went away,
 		// and git was killed for it. Report the cancellation rather than
 		// the kill so callers can tell it apart from a git failure.
-		return fmt.Errorf("%s: %w", svc, ctx.Err())
+		return fmt.Errorf("%s: %w (%v)", svc, ctx.Err(), err)
 	} else if err != nil && errors.Is(err, os.ErrNotExist) {
 		return ErrInvalidRepo
 	} else if err != nil {
@@ -176,6 +176,28 @@ func gitServiceHandler(ctx context.Context, svc Service, scmd ServiceCommand) er
 	}
 
 	return nil
+}
+
+// stoppedByContext reports whether err, returned by Wait for a command run
+// with ctx, comes from the command being stopped because ctx was done rather
+// than from the command failing on its own. A command killed for the context
+// was terminated by a signal; one that exited with a status, even after the
+// context was done, failed on its own and its error is the one to report.
+// Wait returns the context error itself when the command exits successfully
+// after it was told to stop.
+//
+// On Windows a killed process still reports an exit status, so a kill is
+// reported as the plain Wait error there.
+func stoppedByContext(ctx context.Context, err error) bool {
+	ctxErr := ctx.Err()
+	if ctxErr == nil {
+		return false
+	}
+	if errors.Is(err, ctxErr) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && !exitErr.Exited()
 }
 
 // ServiceCommand is used to run a git service command.
