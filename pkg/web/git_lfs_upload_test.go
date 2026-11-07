@@ -277,10 +277,10 @@ func (failRenameStorage) Rename(string, string) error {
 }
 
 // TestRenameLFSObjectExistingDestination checks the rename into objects/
-// when it fails. If a concurrent upload of the same object has already put
-// a file of the expected size there, the object is stored and the upload
-// succeeds; on Windows, one of two identical concurrent uploads used to get
-// a 500. Otherwise the rename error is returned.
+// when it fails. If the object is already there, as when a concurrent upload
+// of it stored it first, the upload succeeds; on Windows, one of two
+// identical concurrent uploads used to get a 500. A destination that is not
+// the object, even one of the same size, is not accepted.
 func TestRenameLFSObjectExistingDestination(t *testing.T) {
 	const content = "hello lfs"
 	oid := sha256Hex(content)
@@ -295,6 +295,7 @@ func TestRenameLFSObjectExistingDestination(t *testing.T) {
 		{"destination holds the object", ptr(content), false},
 		{"no destination", nil, true},
 		{"destination of another size", ptr(content + "!"), true},
+		{"destination of the same size but other content", ptr("jello lfs"), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -307,7 +308,7 @@ func TestRenameLFSObjectExistingDestination(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			err := renameLFSObject(failRenameStorage{local}, tempName, objPath, int64(len(content)))
+			err := renameLFSObject(failRenameStorage{local}, tempName, objPath, oid, int64(len(content)))
 			if gotErr := err != nil; gotErr != tc.wantErr {
 				t.Errorf("renameLFSObject => %v, want error %v", err, tc.wantErr)
 			}

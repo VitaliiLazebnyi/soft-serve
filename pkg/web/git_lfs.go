@@ -397,7 +397,7 @@ func serviceLfsBasicUpload(w http.ResponseWriter, r *http.Request) {
 	// The content is verified, so a concurrent upload of the same object
 	// renames identical bytes over the same path.
 	pointer := lfs.Pointer{Oid: oid}
-	if err := renameLFSObject(strg, tempName, path.Join("objects", pointer.RelativePath()), size); err != nil {
+	if err := renameLFSObject(strg, tempName, path.Join("objects", pointer.RelativePath()), oid, size); err != nil {
 		logger.Error("error renaming object", "oid", oid, "err", err)
 		renderJSON(w, http.StatusInternalServerError, lfs.ErrorResponse{
 			Message: "internal server error",
@@ -429,19 +429,36 @@ func serviceLfsBasicUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 // renameLFSObject moves the verified temporary file tempName to objPath. On
-// Windows, renaming onto a file that a concurrent upload of the same object
-// is renaming or has open fails. The temporary file was checked against the
-// oid that names objPath, so if objPath now holds a file of the expected
-// size it is the same object, and the rename counts as done.
-func renameLFSObject(strg storage.Storage, tempName, objPath string, size int64) error {
+// Windows, renaming onto a file that another upload is renaming or a download
+// has open fails. If objPath already holds the object, the rename counts as
+// done. Not everything that writes objects/ verifies the content, so the
+// existing file is accepted only if it is size bytes long and hashes to oid;
+// otherwise the rename error is returned and the client retries.
+func renameLFSObject(strg storage.Storage, tempName, objPath, oid string, size int64) error {
 	err := strg.Rename(tempName, objPath)
-	if err == nil {
-		return nil
-	}
-	if fi, serr := strg.Stat(objPath); serr == nil && fi.Mode().IsRegular() && fi.Size() == size {
+	if err == nil || isLFSObject(strg, objPath, oid, size) {
 		return nil
 	}
 	return err
+}
+
+// isLFSObject reports whether objPath is a regular file of size bytes whose
+// SHA-256 is oid.
+func isLFSObject(strg storage.Storage, objPath, oid string, size int64) bool {
+	f, err := strg.Open(objPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close() //nolint: errcheck
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() != size {
+		return false
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return false
+	}
+	return hex.EncodeToString(hash.Sum(nil)) == oid
 }
 
 // POST: /<repo>.git/info/lfs/objects/basic/verify
