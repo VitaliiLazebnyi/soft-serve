@@ -175,7 +175,7 @@ func waitForLog(t *testing.T, levels func() map[string]string, prefix string) (s
 // be logged as an error; any other copy failure still is.
 func TestGitServiceInputCopyErrorLevel(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "repo.git")
-	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(t.Context(), "git", "init", "--bare", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
 
