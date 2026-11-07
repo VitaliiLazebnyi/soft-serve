@@ -3,9 +3,6 @@
 # FIXME: don't skip windows
 [windows] skip 'curl makes github actions hang'
 
-# convert crlf to lf on windows
-[windows] dos2unix http1.txt http2.txt http3.txt goget.txt gitclone.txt
-
 # git and git-lfs dial the remote and the LFS action URLs (built from the
 # public URL) themselves, so both name the address the server listens on
 env SOFT_SERVE_HTTP_PUBLIC_URL=http://127.0.0.1:$HTTP_PORT
