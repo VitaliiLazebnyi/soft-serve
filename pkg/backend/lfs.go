@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"charm.land/log/v2"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/lfs"
@@ -18,7 +19,16 @@ import (
 	"github.com/charmbracelet/soft-serve/pkg/store"
 )
 
+// ErrLFSObjectsUnavailable is returned, joined with the error of each object,
+// when the remote could not provide some LFS objects. Every other object was
+// still stored.
+var ErrLFSObjectsUnavailable = errors.New("some lfs objects are unavailable")
+
 // StoreRepoMissingLFSObjects stores missing LFS objects for a repository.
+//
+// Objects the remote can't provide are logged and skipped, and reported
+// together as ErrLFSObjectsUnavailable once every other object is stored.
+// Any other error stops the sync.
 func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx *db.DB, store store.Store, lfsClient lfs.Client) error {
 	cfg := config.FromContext(ctx)
 	repoID := strconv.FormatInt(repo.ID(), 10)
@@ -43,10 +53,18 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 	// recorded holds the objects that are already in the database but missing
 	// on disk. Those only need their content written.
 	recorded := make(map[string]bool)
+	logger := log.FromContext(ctx).WithPrefix("lfs")
+	var unavailable []error
+	objectFailed := func(p lfs.Pointer, err error) {
+		logger.Warn("skipping lfs object", "repo", repo.Name(), "oid", p.Oid, "err", err)
+		unavailable = append(unavailable, fmt.Errorf("lfs object %s: %w", p.Oid, err))
+	}
+
 	download := func(pointers []lfs.Pointer) error {
 		return lfsClient.Download(ctx, pointers, func(p lfs.Pointer, content io.ReadCloser, objectError error) error {
 			if objectError != nil {
-				return objectError
+				objectFailed(p, objectError)
+				return nil
 			}
 
 			defer content.Close() //nolint: errcheck
@@ -122,7 +140,13 @@ func StoreRepoMissingLFSObjects(ctx context.Context, repo proto.Repository, dbx 
 
 	// Download whatever is left over from the last, partial batch.
 	if len(batch) > 0 {
-		return download(batch)
+		if err := download(batch); err != nil {
+			return err
+		}
+	}
+
+	if len(unavailable) > 0 {
+		return fmt.Errorf("%w: %w", ErrLFSObjectsUnavailable, errors.Join(unavailable...))
 	}
 
 	return nil

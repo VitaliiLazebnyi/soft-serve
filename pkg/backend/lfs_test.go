@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,7 +22,11 @@ import (
 // fakeLFSClient serves every requested object from memory and records which
 // objects were asked for.
 type fakeLFSClient struct {
-	objects   map[string][]byte
+	objects map[string][]byte
+	// errs holds the per-object errors the remote reports.
+	errs map[string]error
+	// err, if set, fails the whole download, like a failed batch request.
+	err       error
 	requested []string
 	// onRead, if set, runs when an object's content is first read, standing
 	// in for the time spent receiving it from the network.
@@ -29,8 +34,17 @@ type fakeLFSClient struct {
 }
 
 func (c *fakeLFSClient) Download(_ context.Context, pointers []lfs.Pointer, cb lfs.DownloadCallback) error {
+	if c.err != nil {
+		return c.err
+	}
 	for _, p := range pointers {
 		c.requested = append(c.requested, p.Oid)
+		if err := c.errs[p.Oid]; err != nil {
+			if err := cb(p, nil, err); err != nil {
+				return err
+			}
+			continue
+		}
 		var r io.Reader = bytes.NewReader(c.objects[p.Oid])
 		if c.onRead != nil {
 			r = &hookReader{r: r, hook: c.onRead}
@@ -213,4 +227,38 @@ func TestStoreRepoMissingLFSObjectsRepoDeleted(t *testing.T) {
 			is.True(lt.store() != nil) // the sync fails
 		})
 	}
+}
+
+// TestStoreRepoMissingLFSObjectsObjectError verifies that an object the
+// remote reports an error for is skipped, the other objects are still
+// stored, and the sync reports ErrLFSObjectsUnavailable.
+func TestStoreRepoMissingLFSObjectsObjectError(t *testing.T) {
+	is := is.New(t)
+	lt := newLFSTest(t, 2)
+	missing, ok := lt.pointers[0], lt.pointers[1]
+	lt.client.errs = map[string]error{missing.Oid: errors.New("object does not exist")}
+
+	err := lt.store()
+	is.True(errors.Is(err, ErrLFSObjectsUnavailable)) // the missing object is reported
+	is.Equal(len(lt.client.requested), 2)             // every object is attempted
+
+	_, err = lt.be.store.GetLFSObjectByOid(lt.ctx, lt.be.db, lt.repo.ID(), ok.Oid)
+	is.NoErr(err) // the available object is recorded
+	_, err = os.Stat(lt.path(ok))
+	is.NoErr(err) // and stored
+	_, err = lt.be.store.GetLFSObjectByOid(lt.ctx, lt.be.db, lt.repo.ID(), missing.Oid)
+	is.True(err != nil) // the missing object is not recorded
+}
+
+// TestFetchImportLFSObjects verifies that an import succeeds when the remote
+// lacks some LFS objects, and fails when fetching them fails otherwise.
+func TestFetchImportLFSObjects(t *testing.T) {
+	is := is.New(t)
+	lt := newLFSTest(t, 2)
+
+	lt.client.errs = map[string]error{lt.pointers[0].Oid: errors.New("object does not exist")}
+	is.NoErr(lt.be.fetchImportLFSObjects(lt.ctx, lt.repo, lt.client)) // missing objects are only logged
+
+	lt.client.err = errors.New("batch request failed")
+	is.True(lt.be.fetchImportLFSObjects(lt.ctx, lt.repo, lt.client) != nil) // other errors fail the import
 }
