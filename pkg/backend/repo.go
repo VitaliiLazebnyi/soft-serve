@@ -572,6 +572,9 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 	// repoID is set once the repository's row is found, and names its LFS
 	// directory.
 	var repoID int64
+	// rowDeleted is set once the repository's row is deleted, and says the
+	// directory is to be removed after the commit.
+	var rowDeleted bool
 	if err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
 		repom, dberr := d.store.GetRepoByName(ctx, tx, name)
 		if dberr != nil {
@@ -597,9 +600,23 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 			return db.WrapError(err)
 		}
 
-		return os.RemoveAll(rp)
+		rowDeleted = true
+		return nil
 	}); err != nil {
 		return wrapRepoError(err)
+	}
+
+	// Remove the directory only now that the row is gone. Removing it inside
+	// the transaction could leave a repository with a row but a partly
+	// removed directory when the removal failed, or a row with no directory
+	// when the commit failed. The delete has happened once the row is gone,
+	// so a failure here is logged rather than returned. The leftover
+	// directory has no row: it cannot be created, imported or renamed over,
+	// and deleting the repository again removes it.
+	if rowDeleted {
+		if err := os.RemoveAll(rp); err != nil {
+			d.logger.Error("failed to delete repository directory", "repo", name, "path", rp, "err", err)
+		}
 	}
 
 	// Remove the repository's LFS storage only now that its row is gone, so
