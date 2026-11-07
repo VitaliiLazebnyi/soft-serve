@@ -18,6 +18,29 @@ import (
 // SearchPointerBlobs scans the whole repository for LFS pointer files. It
 // sends at most one error on errChan, which must have room for it.
 func SearchPointerBlobs(ctx context.Context, repo *git.Repository, pointerChan chan<- PointerBlob, errChan chan<- error) {
+	searchPointerBlobs(ctx, repo, []string{"--all"}, "", pointerChan, errChan)
+}
+
+// SearchPointerBlobsBetween is SearchPointerBlobs for only the objects
+// reachable from the objects in include but not from those in exclude, as
+// git rev-list --objects <include...> --not <exclude...> lists them. Each
+// one is an object id. With no include, nothing is scanned.
+func SearchPointerBlobsBetween(ctx context.Context, repo *git.Repository, include, exclude []string, pointerChan chan<- PointerBlob, errChan chan<- error) {
+	// The ids go on stdin, as a repository can have more refs than fit on
+	// a command line.
+	var revs strings.Builder
+	for _, id := range include {
+		revs.WriteString(id + "\n")
+	}
+	for _, id := range exclude {
+		revs.WriteString("^" + id + "\n")
+	}
+	searchPointerBlobs(ctx, repo, []string{"--stdin"}, revs.String(), pointerChan, errChan)
+}
+
+// searchPointerBlobs scans the objects git rev-list --objects lists with
+// revArgs and stdin.
+func searchPointerBlobs(ctx context.Context, repo *git.Repository, revArgs []string, stdin string, pointerChan chan<- PointerBlob, errChan chan<- error) {
 	basePath := repo.Path
 
 	catFileCheckReader, catFileCheckWriter := io.Pipe()
@@ -44,7 +67,7 @@ func SearchPointerBlobs(ctx context.Context, repo *git.Repository, pointerChan c
 	shasToCheckReader, shasToCheckWriter := io.Pipe()
 	go catFileBatchCheck(ctx, shasToCheckReader, catFileCheckWriter, &wg, basePath, errChan)
 	go blobsFromRevListObjects(revListReader, shasToCheckWriter, &wg)
-	go revListAllObjects(ctx, revListWriter, &wg, basePath, errChan)
+	go revListObjects(ctx, revListWriter, &wg, basePath, revArgs, stdin, errChan)
 	wg.Wait()
 
 	// A canceled scan stops early, possibly after git rev-list finished
@@ -236,14 +259,15 @@ func blobsFromRevListObjects(revListReader *io.PipeReader, shasToCheckWriter *io
 	}
 }
 
-func revListAllObjects(ctx context.Context, revListWriter *io.PipeWriter, wg *sync.WaitGroup, basePath string, errChan chan<- error) {
+func revListObjects(ctx context.Context, revListWriter *io.PipeWriter, wg *sync.WaitGroup, basePath string, revArgs []string, stdin string, errChan chan<- error) {
 	defer wg.Done()
 	defer revListWriter.Close() //nolint: errcheck
 
 	stderr := new(bytes.Buffer)
-	if err := gitm.NewCommandWithContext(ctx, "rev-list", "--objects", "--all").
+	if err := gitm.NewCommandWithContext(ctx, append([]string{"rev-list", "--objects"}, revArgs...)...).
 		WithTimeout(-1).
 		RunInDirWithOptions(basePath, gitm.RunInDirOptions{
+			Stdin:  strings.NewReader(stdin),
 			Stdout: revListWriter,
 			Stderr: stderr,
 		}); err != nil {

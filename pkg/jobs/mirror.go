@@ -179,7 +179,7 @@ func (m mirrorPull) Func(ctx context.Context) func() {
 							return
 						}
 
-						if err := backend.StoreRepoMissingLFSObjects(ctx, repo, dbx, datastore, client); err != nil {
+						if err := backend.SyncRepoLFSObjects(ctx, repo, dbx, datastore, client); err != nil {
 							if errors.Is(err, backend.ErrLFSObjectsUnavailable) {
 								// The next sync tries them again.
 								logger.Warn("mirrored repository without some lfs objects", "repo", name, "err", err)
