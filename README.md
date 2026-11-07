@@ -703,7 +703,8 @@ behind. Soft Serve Plus removes a repository created this way if its push fails
 without writing any ref, or if nothing has reached it for 10 minutes and it still
 has none. It is kept if anything was done with it meanwhile: a collaborator,
 webhook, LFS object or LFS lock added, or its description, project name,
-visibility or hidden flag changed. Which repositories are waiting for their push
+visibility or hidden flag changed. It is also kept if a push or LFS upload to it
+over SSH is running when the removal comes due. Which repositories are waiting for their push
 is only kept in memory, so one still waiting when the server restarts is kept
 empty; delete it with `repo delete` if it is not wanted.
 
