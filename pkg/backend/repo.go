@@ -513,6 +513,21 @@ func (d *Backend) importRepository(ctx context.Context, user proto.User, imp imp
 //
 // It implements backend.Backend.
 func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
+	return d.deleteRepository(ctx, name, nil)
+}
+
+// errRepoKept is returned by deleteRepository when its keep check kept the
+// repository.
+var errRepoKept = errors.New("repository kept")
+
+// deleteRepository is DeleteRepository with an optional check. A non-nil
+// keep runs in the transaction that deletes the repository's row, with that
+// row, so nothing can change between the check and the delete; if it
+// returns true the repository is kept and errRepoKept is returned. With
+// keep set, a directory with no row is left alone rather than removed as an
+// orphan: the row the caller meant is gone, and the directory may belong to
+// a repository being created.
+func (d *Backend) deleteRepository(ctx context.Context, name string, keep func(tx *db.Tx, m models.Repo) (bool, error)) error {
 	name = utils.SanitizeRepo(name)
 	rp := d.repoPath(name)
 
@@ -548,13 +563,22 @@ func (d *Backend) DeleteRepository(ctx context.Context, name string) error {
 		repom, dberr := d.store.GetRepoByName(ctx, tx, name)
 		if dberr != nil {
 			// A directory with no row is an orphan; remove it.
-			if d.repoPathExists(name) {
+			if keep == nil && d.repoPathExists(name) {
 				return os.RemoveAll(rp)
 			}
 			if errors.Is(db.WrapError(dberr), db.ErrRecordNotFound) {
 				return proto.ErrRepoNotFound
 			}
 			return db.WrapError(dberr)
+		}
+		if keep != nil {
+			kept, err := keep(tx, repom)
+			if err != nil {
+				return err
+			}
+			if kept {
+				return errRepoKept
+			}
 		}
 
 		repoID := strconv.FormatInt(repom.ID, 10)

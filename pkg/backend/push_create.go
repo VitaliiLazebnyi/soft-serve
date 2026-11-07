@@ -2,11 +2,13 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 
 	"github.com/charmbracelet/soft-serve/git"
 	"github.com/charmbracelet/soft-serve/pkg/db"
+	"github.com/charmbracelet/soft-serve/pkg/db/models"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/charmbracelet/soft-serve/pkg/utils"
 )
@@ -59,8 +61,9 @@ func (p *pushGates) release(name string, g *pushGate) {
 }
 
 // testHookBeforePushCreatedDelete, when set, runs in
-// RemovePushCreatedRepository after every check passed and before the
-// repository is deleted, with the repository's gate held.
+// RemovePushCreatedRepository after the check for refs and before the
+// transaction that checks the rest and deletes the repository, with the
+// repository's gate held.
 var testHookBeforePushCreatedDelete func()
 
 // BeginPush marks a push to the existing repository repo as running until
@@ -119,64 +122,56 @@ func (d *Backend) RemovePushCreatedRepository(ctx context.Context, created proto
 		return false, nil
 	}
 
-	used, err := d.pushCreatedRepositoryUsed(ctx, name, created)
-	if err != nil || used {
-		return false, err
-	}
-
 	if testHookBeforePushCreatedDelete != nil {
 		testHookBeforePushCreatedDelete()
 	}
 
-	if err := d.DeleteRepository(ctx, name); err != nil {
+	// The rest is checked in the transaction that deletes the row, so a
+	// setting, collaborator or webhook added meanwhile, or another
+	// repository now under the name, is seen.
+	err := d.deleteRepository(ctx, name, func(tx *db.Tx, m models.Repo) (bool, error) {
+		return d.pushCreatedRepositoryUsed(ctx, tx, m, created)
+	})
+	switch {
+	case errors.Is(err, errRepoKept):
+		return false, nil
+	case err != nil:
 		return false, err
 	}
 	return true, nil
 }
 
-// pushCreatedRepositoryUsed reports whether the repository name is no
-// longer created as it was made, or has anything recorded for it since.
-func (d *Backend) pushCreatedRepositoryUsed(ctx context.Context, name string, created proto.Repository) (bool, error) {
-	used := true
-	err := d.db.TransactionContext(ctx, func(tx *db.Tx) error {
-		m, err := d.store.GetRepoByName(ctx, tx, name)
-		if err != nil {
-			return err
-		}
-		if m.ID != created.ID() ||
-			m.ProjectName != created.ProjectName() ||
-			m.Description != created.Description() ||
-			m.Private != created.IsPrivate() ||
-			m.Hidden != created.IsHidden() ||
-			m.Mirror != created.IsMirror() ||
-			m.UserID.Int64 != created.UserID() {
-			return nil
-		}
-
-		collabs, err := d.store.ListCollabsByRepo(ctx, tx, name)
-		if err != nil || len(collabs) > 0 {
-			return err
-		}
-		hooks, err := d.store.GetWebhooksByRepoID(ctx, tx, m.ID)
-		if err != nil || len(hooks) > 0 {
-			return err
-		}
-		objs, err := d.store.GetLFSObjects(ctx, tx, m.ID)
-		if err != nil || len(objs) > 0 {
-			return err
-		}
-		locks, err := d.store.GetLFSLocks(ctx, tx, m.ID, 1, 1)
-		if err != nil || len(locks) > 0 {
-			return err
-		}
-
-		used = false
-		return nil
-	})
-	if err != nil {
-		return true, wrapRepoError(err)
+// pushCreatedRepositoryUsed reports whether m, the row now under created's
+// name, is no longer created as it was made, or has anything recorded for
+// it since.
+func (d *Backend) pushCreatedRepositoryUsed(ctx context.Context, tx *db.Tx, m models.Repo, created proto.Repository) (bool, error) {
+	if m.ID != created.ID() ||
+		m.ProjectName != created.ProjectName() ||
+		m.Description != created.Description() ||
+		m.Private != created.IsPrivate() ||
+		m.Hidden != created.IsHidden() ||
+		m.Mirror != created.IsMirror() ||
+		m.UserID.Int64 != created.UserID() {
+		return true, nil
 	}
-	return used, nil
+
+	collabs, err := d.store.ListCollabsByRepo(ctx, tx, m.Name)
+	if err != nil || len(collabs) > 0 {
+		return true, err
+	}
+	hooks, err := d.store.GetWebhooksByRepoID(ctx, tx, m.ID)
+	if err != nil || len(hooks) > 0 {
+		return true, err
+	}
+	objs, err := d.store.GetLFSObjects(ctx, tx, m.ID)
+	if err != nil || len(objs) > 0 {
+		return true, err
+	}
+	locks, err := d.store.GetLFSLocks(ctx, tx, m.ID, 1, 1)
+	if err != nil || len(locks) > 0 {
+		return true, err
+	}
+	return false, nil
 }
 
 // hasRefs reports whether the repository at dir has any ref. A repository

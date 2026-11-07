@@ -142,3 +142,53 @@ func TestRemovePushCreatedRepositoryOrdersPushes(t *testing.T) {
 	is.True(removed)
 	is.True(errors.Is(<-pushErr, proto.ErrRepoNotFound)) // the push finds it gone
 }
+
+// A change that lands after the removal's checks for refs, and before the
+// repository's row is deleted, still keeps it: the checks run in the
+// transaction that deletes the row. A repository renamed away, with
+// another created under its name, in that gap is not the one deleted.
+func TestRemovePushCreatedRepositoryChecksWhenDeleting(t *testing.T) {
+	be, cfg := newTestBackend(t)
+	ctx := backendTestContext(be, cfg)
+	owner, err := be.CreateUser(ctx, "owner", proto.UserOptions{})
+	is.New(t).NoErr(err)
+	_, err = be.CreateUser(ctx, "alice", proto.UserOptions{})
+	is.New(t).NoErr(err)
+	t.Cleanup(func() { testHookBeforePushCreatedDelete = nil })
+
+	t.Run("collaborator", func(t *testing.T) {
+		is := is.New(t)
+		r, err := be.CreateRepository(ctx, "collab", owner, proto.RepositoryOptions{})
+		is.NoErr(err)
+		testHookBeforePushCreatedDelete = func() {
+			is.NoErr(be.AddCollaborator(ctx, "collab", "alice", access.ReadWriteAccess))
+		}
+
+		removed, err := be.RemovePushCreatedRepository(ctx, r)
+		is.NoErr(err)
+		is.True(!removed)
+		_, err = be.Repository(ctx, "collab")
+		is.NoErr(err) // kept with its collaborator
+	})
+
+	t.Run("recreated", func(t *testing.T) {
+		is := is.New(t)
+		r, err := be.CreateRepository(ctx, "name", owner, proto.RepositoryOptions{})
+		is.NoErr(err)
+		var other proto.Repository
+		testHookBeforePushCreatedDelete = func() {
+			is.NoErr(be.RenameRepository(ctx, "name", "moved"))
+			other, err = be.CreateRepository(ctx, "name", owner, proto.RepositoryOptions{})
+			is.NoErr(err)
+		}
+
+		removed, err := be.RemovePushCreatedRepository(ctx, r)
+		is.NoErr(err)
+		is.True(!removed)
+		cur, err := be.Repository(ctx, "name")
+		is.NoErr(err) // the repository now under the name is kept
+		is.Equal(cur.ID(), other.ID())
+		_, err = be.Repository(ctx, "moved")
+		is.NoErr(err)
+	})
+}
